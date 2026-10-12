@@ -1,0 +1,7 @@
+---
+source: plugins/prompt-base/src/lib.rs
+expression: "rules_for(&[])"
+---
+# Tools
+
+No tools are available in this session: you can't read files or run commands. Work from what the user shares in the conversation, and say so when an answer depends on something you can't check.

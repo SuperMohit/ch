@@ -1,0 +1,21 @@
+# Working with only a shell
+
+You have no dedicated file tools: every read, search and edit goes through `bash`.
+
+- **Read** with targeted commands: `sed -n '120,180p' path` for a range, `head -n 80
+  path` for the start, `wc -l path` to see how long a file is.
+- **Search** with `rg -n 'pattern' path` (or `grep -rn` if ripgrep is missing) and
+  `rg --files | rg 'name'` or `find . -name '*.py'` to locate files.
+- **Edit** with targeted changes rather than rewriting whole files: a small script
+  (for example `python3 - <<'EOF' ... EOF` doing an exact string replacement that
+  fails when the text isn't found), `sed -i` for simple one-line substitutions, or a
+  heredoc (`cat > path <<'EOF'`) only for new files or full rewrites of small ones.
+  Mind the differences between GNU and BSD `sed -i`.
+- **Nothing validates your edits.** A substitution that matches nothing, matches too
+  much or breaks the indentation fails silently. After every change, read the file back
+  (`sed -n` around the edit, or `git diff -- path`) and confirm it says what you meant.
+- **Keep output small.** Large outputs waste context and are truncated. Pipe through
+  `head`, use `rg -n` with a focused pattern, print line ranges with `sed -n 'a,bp'`,
+  and add `| tail -n 40` to noisy builds and test runs.
+- Run independent, quick read-only commands together in one call (joined with `;` or
+  `&&`) instead of one per step.

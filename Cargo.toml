@@ -1,0 +1,95 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "plugins/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.dependencies]
+# internal
+ch-kernel = { path = "crates/ch-kernel" }
+ch-testkit = { path = "crates/ch-testkit" }
+ch-plugin-protocol = { path = "crates/ch-plugin-protocol" }
+ch-plugin-sdk = { path = "crates/ch-plugin-sdk" }
+ch-provider-anthropic = { path = "plugins/provider-anthropic" }
+ch-provider-openai = { path = "plugins/provider-openai" }
+ch-provider-scripted = { path = "plugins/provider-scripted" }
+ch-tools-fs = { path = "plugins/tools-fs" }
+ch-tool-bash = { path = "plugins/tool-bash" }
+ch-tool-web-fetch = { path = "plugins/tool-web-fetch" }
+ch-safety = { path = "plugins/safety" }
+ch-stuck = { path = "plugins/stuck" }
+ch-diagnostics = { path = "plugins/diagnostics" }
+ch-planning = { path = "plugins/planning" }
+ch-context = { path = "plugins/context" }
+ch-prompt-base = { path = "plugins/prompt-base" }
+ch-project-instructions = { path = "plugins/project-instructions" }
+ch-commands-core = { path = "plugins/commands-core" }
+ch-commands-markdown = { path = "plugins/commands-markdown" }
+ch-executor-local = { path = "plugins/executor-local" }
+ch-executor-docker = { path = "plugins/executor-docker" }
+ch-frontend-repl = { path = "plugins/frontend-repl" }
+ch-frontend-print = { path = "plugins/frontend-print" }
+ch-mcp-bridge = { path = "plugins/mcp-bridge" }
+ch-external-host = { path = "plugins/external-host" }
+ch-hooks-shell = { path = "plugins/hooks-shell" }
+ch-telemetry-langfuse = { path = "plugins/telemetry-langfuse" }
+ch-telemetry-jsonl = { path = "plugins/telemetry-jsonl" }
+
+# external
+anyhow = "1"
+async-trait = "0.1"
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.29"
+dirs = "6"
+eventsource-stream = "0.2"
+futures = "0.3"
+globset = "0.4"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+htmd = "0.5"
+ignore = "0.4"
+indicatif = "0.18"
+insta = { version = "1", features = ["json", "yaml"] }
+libc = "0.2"
+nu-ansi-term = "0.50"
+nix = { version = "0.31", features = ["signal", "process"] }
+reedline = "0.49" # 0.50+ needs rustc 1.95; stable was 1.94 when this was set
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shell-words = "1"
+sha2 = "0.10"
+similar = "2"
+tempfile = "3"
+termimad = "0.35"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = "0.7"
+toml = "0.9"
+unicode-width = "0.2"
+url = "2"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+walkdir = "2"
+wiremock = "0.6"
+
+[profile.release]
+lto = "thin"

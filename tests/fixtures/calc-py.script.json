@@ -1,0 +1,6 @@
+[
+  {"text": "Let me look at the code.", "tool_calls": [{"name": "read_file", "input": {"path": "calc.py"}}]},
+  {"tool_calls": [{"name": "edit_file", "input": {"path": "calc.py", "old_text": "    return a - b", "new_text": "    return a + b"}}]},
+  {"tool_calls": [{"name": "bash", "input": {"command": "python3 -m unittest -q"}}]},
+  {"text": "Fixed `add` in calc.py; the tests pass."}
+]

@@ -1,0 +1,121 @@
+[package]
+name = "ch-cli"
+description = "The ch command-line coding agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "ch_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ch"
+path = "src/main.rs"
+
+# One feature per built-in plugin, named after the plugin id. All are on by default.
+# To wire a plugin: uncomment its line in `default`, its feature line, its dependency
+# line below, and its line in `src/plugins.rs::builtin_plugins`.
+[features]
+default = [
+    "frontend-repl",
+    "frontend-print",
+    "provider-scripted", # off at runtime unless enabled in config; used by e2e tests
+    "provider-anthropic",
+    "provider-openai",
+    "tools-fs",
+    "tool-bash",
+    "tool-web-fetch",
+    "safety",
+    # "stuck",
+    # "diagnostics",
+    # "planning",
+    # "context",
+    "prompt-base",
+    "project-instructions",
+    "commands-core",
+    "commands-markdown",
+    "executor-local",
+    # "executor-docker",
+    # "mcp-bridge",
+    # "external-host",
+    # "hooks-shell",
+    # "telemetry-jsonl",
+    # "telemetry-langfuse",
+]
+frontend-repl = ["dep:ch-frontend-repl"]
+frontend-print = ["dep:ch-frontend-print"]
+provider-anthropic = ["dep:ch-provider-anthropic"]
+provider-openai = ["dep:ch-provider-openai"]
+provider-scripted = ["dep:ch-provider-scripted"]
+tools-fs = ["dep:ch-tools-fs"]
+tool-bash = ["dep:ch-tool-bash"]
+tool-web-fetch = ["dep:ch-tool-web-fetch"]
+safety = ["dep:ch-safety"]
+# stuck = ["dep:ch-stuck"]
+# diagnostics = ["dep:ch-diagnostics"]
+# planning = ["dep:ch-planning"]
+# context = ["dep:ch-context"]
+prompt-base = ["dep:ch-prompt-base"]
+project-instructions = ["dep:ch-project-instructions"]
+commands-core = ["dep:ch-commands-core"]
+commands-markdown = ["dep:ch-commands-markdown"]
+executor-local = ["dep:ch-executor-local"]
+# executor-docker = ["dep:ch-executor-docker"]
+# mcp-bridge = ["dep:ch-mcp-bridge"]
+# external-host = ["dep:ch-external-host"]
+# hooks-shell = ["dep:ch-hooks-shell"]
+# telemetry-jsonl = ["dep:ch-telemetry-jsonl"]
+# telemetry-langfuse = ["dep:ch-telemetry-langfuse"]
+
+[dependencies]
+anyhow.workspace = true
+ch-kernel.workspace = true
+clap.workspace = true
+dirs.workspace = true
+serde.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+
+# Built-in plugins (optional, one per feature above).
+ch-frontend-repl = { workspace = true, optional = true }
+ch-frontend-print = { workspace = true, optional = true }
+ch-provider-anthropic = { workspace = true, optional = true }
+ch-provider-openai = { workspace = true, optional = true }
+ch-provider-scripted = { workspace = true, optional = true }
+ch-tools-fs = { workspace = true, optional = true }
+ch-tool-bash = { workspace = true, optional = true }
+ch-tool-web-fetch = { workspace = true, optional = true }
+ch-safety = { workspace = true, optional = true }
+# ch-stuck = { workspace = true, optional = true }
+# ch-diagnostics = { workspace = true, optional = true }
+# ch-planning = { workspace = true, optional = true }
+# ch-context = { workspace = true, optional = true }
+ch-prompt-base = { workspace = true, optional = true }
+ch-project-instructions = { workspace = true, optional = true }
+ch-commands-core = { workspace = true, optional = true }
+ch-commands-markdown = { workspace = true, optional = true }
+ch-executor-local = { workspace = true, optional = true }
+# ch-executor-docker = { workspace = true, optional = true }
+# ch-mcp-bridge = { workspace = true, optional = true }
+# ch-external-host = { workspace = true, optional = true }
+# ch-hooks-shell = { workspace = true, optional = true }
+# ch-telemetry-jsonl = { workspace = true, optional = true }
+# ch-telemetry-langfuse = { workspace = true, optional = true }
+
+[dev-dependencies]
+insta.workspace = true
+tempfile.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true

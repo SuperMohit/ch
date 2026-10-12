@@ -1,0 +1,20 @@
+---
+source: plugins/prompt-base/src/lib.rs
+expression: "rules_for(&[\"read_file\", \"edit_file\", \"grep_text\"])"
+---
+# Using your tools
+
+Which tool for which job:
+
+- `read_file`: read a file (the whole file, or a line range of a large one).
+- `edit_file`: change part of an existing file by exact string replacement.
+- `grep_text`: search file contents.
+
+- **Read the whole file before editing it.** Edits to a file you haven't fully read,
+  or that changed on disk since you read it, are rejected. If that happens, read the
+  file again and redo the edit.
+- Edit with exact, unique snippets of the current text. Include enough surrounding
+  lines to make the match unique, and keep the original indentation.
+- **Batch independent read-only calls in a single step.** Reading several files or
+  running several searches at once is faster, because read-only calls run in parallel.
+  Calls that depend on an earlier result have to wait for it.

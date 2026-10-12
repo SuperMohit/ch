@@ -1,0 +1,34 @@
+---
+source: plugins/prompt-base/src/lib.rs
+expression: rules_for(FULL)
+---
+# Using your tools
+
+Which tool for which job:
+
+- `read_file`: read a file (the whole file, or a line range of a large one).
+- `edit_file`: change part of an existing file by exact string replacement.
+- `write_file`: create a new file, or replace a small file entirely.
+- `list_files`: see what a directory contains.
+- `glob_files`: find files by name pattern.
+- `grep_text`: search file contents.
+
+- **Prefer the dedicated file tools over `bash`** for reading, searching and editing.
+  They give structured, line-numbered output, respect the workspace boundaries and
+  track which files you have read. Don't use `cat`, `head`, `sed`, `grep`, `find`,
+  `echo >` or heredocs through `bash` for these jobs.
+- **Read the whole file before editing it.** Edits to a file you haven't fully read,
+  or that changed on disk since you read it, are rejected. If that happens, read the
+  file again and redo the edit.
+- Edit with exact, unique snippets of the current text. Include enough surrounding
+  lines to make the match unique, and keep the original indentation.
+- **Batch independent read-only calls in a single step.** Reading several files or
+  running several searches at once is faster, because read-only calls run in parallel.
+  Calls that depend on an earlier result have to wait for it.
+- Use `bash` for what the file tools can't do: builds, tests, linters, formatters,
+  package managers and git.
+
+# Other tools
+
+- `web_fetch` retrieves a web page as markdown. Use it for documentation, changelogs or issues you need to check, and for URLs the user gives you. Don't guess URLs, and if a fetch fails, say so rather than describing the page from memory.
+- `update_plan` keeps a visible task plan. Use it for multi-step work: send the complete list on every update, keep exactly one item `in_progress`, and mark items `completed` as soon as they are done. Skip it for quick, single-step tasks.

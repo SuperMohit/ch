@@ -1,0 +1,28 @@
+[package]
+name = "ch-tools-fs"
+description = "File and search tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ch-kernel.workspace = true
+ch-safety.workspace = true
+globset.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
+ignore.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+ch-testkit.workspace = true
+tempfile.workspace = true

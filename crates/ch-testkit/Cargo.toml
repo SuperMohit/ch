@@ -1,0 +1,19 @@
+[package]
+name = "ch-testkit"
+description = "Test helpers and conformance suites for ch plugins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ch-kernel.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

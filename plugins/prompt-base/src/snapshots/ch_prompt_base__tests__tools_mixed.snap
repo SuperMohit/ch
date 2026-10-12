@@ -1,0 +1,14 @@
+---
+source: plugins/prompt-base/src/lib.rs
+expression: "rules_for(&[\"bash\", \"read_file\", \"grep_text\"])"
+---
+# Using your tools
+
+Which tool for which job:
+
+- `read_file`: read a file (the whole file, or a line range of a large one).
+- `grep_text`: search file contents.
+
+- Prefer the file tools above over `bash` for the jobs they cover. Use `bash` for builds, tests, linters, package managers and git.
+- File edits go through `bash`, and **nothing validates them**: read the file back after every change to confirm it says what you meant.
+- **Batch independent read-only calls in a single step**: they run in parallel.
