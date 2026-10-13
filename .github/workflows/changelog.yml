@@ -1,0 +1,33 @@
+name: Changelog
+
+# A pull request that changes code must add a line to CHANGELOG.md, unless it has the
+# `no-changelog` label (for refactors, tests and other changes users won't notice).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  entry:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a CHANGELOG.md entry for code changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed=$(git diff --name-only "$BASE"...HEAD)
+          if ! grep -qE '^(crates|plugins|prompts)/' <<<"$changed"; then
+            echo "No code changes."
+            exit 0
+          fi
+          if grep -qx 'CHANGELOG.md' <<<"$changed"; then
+            exit 0
+          fi
+          echo "::error file=CHANGELOG.md::This pull request changes code but not CHANGELOG.md. Add a line under '## Unreleased', or add the 'no-changelog' label if users won't notice the change."
+          exit 1

@@ -15,7 +15,7 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
 | Milestone | You get | Phases | Status |
 |---|---|---|---|
-| **M1 — Usable CLI agent** | `ch` REPL with streaming, the file/bash tools, approvals, slash commands, Ctrl-C to interrupt, sessions with resume, and `ch -p` headless mode. All of it built as plugins on the kernel | 0–5 | Done except 5.2 expandable output |
+| **M1 — Usable CLI agent** | `ch` REPL with streaming, the file/bash tools, approvals, slash commands, Ctrl-C to interrupt, sessions with resume, and `ch -p` headless mode. All of it built as plugins on the kernel | 0–5 | Done except 5.2 expandable output and 5.9–5.11 |
 | **M2 — Long-session harness** | Planning, staged context management, stuck detection and post-edit diagnostics as plugins. Long sessions never overflow the context window | 6 | Next |
 | **M3 — Open to outside plugins** | External JSON-RPC plugins, MCP tools, shell hooks, markdown commands, and a `ch plugins` command to manage them | 7 | Not started |
 | **M4 — Observable & measurable** | Langfuse telemetry, an eval runner and ablation matrices | 8–9 | Not started |
@@ -80,12 +80,20 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [x] **5.6** `frontend-print`: `ch -p "task"` runs non-interactively with the `auto-deny` approver by default (or `--allow "<rules>"`), with `--output-format text|json|stream-json`. The exit code reflects the termination reason. Eval and CI use this.
 - [x] **5.7** End-to-end tests: `provider-scripted` + `frontend-print` against a fixture repo (read → edit → test → done). Snapshot the assembled prompts with `insta`.
 - [x] **5.8** Live smoke test: a real model fixes a failing test in a fixture repo using `ch -p`.
+- [ ] **5.9** Sanitize tool output before it reaches the terminal. Error first lines and edit diffs are printed as they are ([format.rs](plugins/frontend-repl/src/format.rs) `tool_end_lines`), so a file or command output holding escape sequences can retitle the window, write the clipboard (OSC 52) or rewrite earlier lines. One helper that strips or escapes C0/C1 control characters (keeping `\n` and `\t`), applied on every path that prints tool content, including `stream-json` stderr in `frontend-print`. Test with OSC, CSI and bare `\r` payloads.
+- [ ] **5.10** Small REPL fixes:
+  - one terminal bell when an approval is waiting
+  - Ctrl-C at a non-empty prompt clears the line before it counts toward exiting
+  - Esc must be pressed twice within one second to interrupt, so a stray key doesn't stop a long turn (Ctrl-C still interrupts at once)
+- [ ] **5.11** Record the provider and `base_url` in `SessionMeta`. Resuming a session against a different endpoint asks first in the REPL and fails in `-p`, so a conversation is never sent somewhere other than where it started.
 
 **Done when (M1):** you can use `ch` daily on a real repo, and removing any built-in plugin from the config still leaves a working binary (for example, no web-fetch means no `web_fetch` tool and nothing breaks).
 
 ### Phase 6 — Harness plugins → **Milestone M2**
 - [ ] **6.1** `planning`: `update_plan` tool (full-list replace, exactly one `in_progress`), `PlanStore` service, system block (`prompts/planning.md`), first-turn reminder until a plan exists, fresh plan reminder every turn, never stored in history. The REPL shows a todo panel by subscribing to plan events.
 - [ ] **6.2** `stuck`: `post_tool` hook. Streaks are counted over identical tool + canonical arguments, and permission denials don't count. A one-time reminder at 5 calls (`prompts/stuck-*.md`), and `Stop(Stuck)` at 8 identical failures.
+  - Also a `pre_tool` check: the third identical call that already failed twice is refused before it runs, with the earlier error repeated so the model changes approach. Measure against the 5/8 thresholds in `ch-eval` before settling the numbers.
+  - Three steps in a row whose tool calls all have malformed input (unparseable JSON, schema mismatch) end the turn. Check that a malformed call stored in history is still accepted by the provider on the next request.
 - [ ] **6.3** `diagnostics`: `post_tool` hook on successful edits and writes. A per-extension command from config (`.py` → ruff, `.ts` → configurable, `.rs` → `rustfmt --check` by default) with a short timeout; findings are appended as a note.
 - [ ] **6.4** `context`: `ContextStrategy` with region split (preamble | middle | recent ≥ 0.30 × window, at least 2 turns), per [architecture §8](docs/architecture.md#8-design-defaults).
   - Elision stubs above `soft`.
@@ -93,8 +101,13 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
   - Strategies `none`, `elide`, `summarize` and `staged` selected by config.
   - Elided originals written to the session directory.
   - `/compact` triggers a summary manually.
+  - When the provider rejects a request as too long (`ContextOverflow`), compact once and retry the step before ending the turn with exit code 3.
+  - The compaction trigger is configurable as a share of the window (`plugins.context.compact_at_percent`, 10–80) on top of the token thresholds.
+  - Messages the user sent during the turn (6.7) and the current plan survive compaction unchanged.
   - Newer Claude models reject history edits that come before a signed thinking block ("invalid signature … bound to a different conversation"). Elision and summaries must leave everything up to the last signed thinking block untouched, or strip those blocks consistently.
 - [ ] **6.5** Tests: thresholds trigger correctly, the preamble and recent window stay byte-identical, tool_use/tool_result pairs stay valid, a long scripted session never overflows under `staged`, `none` ends with `ContextOverflow`, planning never appears twice in a prompt, stuck thresholds behave as specified.
+- [ ] **6.6** Keep truncated tool output. Results over `tool_result_max_chars` are cut with `truncate_middle` and the middle is lost. Write the full output to the session's `aux_dir`, end the truncated result with a handle (`[full output: result 12, 184,302 chars — read_tool_result]`), and add a read-only `read_tool_result` tool (handle, offset, limit) that works after resume. Shares the storage with 6.4's elided originals. `--no-save` keeps it in memory until exit.
+- [ ] **6.7** Mid-turn messages. A `SteerHandle` beside `CancelHandle` queues user text while a turn runs; the session adds it as a user message at the next model call (after pending tool results), emits it as an event and saves it to history. In the REPL, Enter during a turn sends a message instead of being ignored. A message queued when the turn ends starts the next turn. Cancelling keeps messages already added.
 
 ### Phase 7 — Plugins from outside the binary → **Milestone M3**
 - [ ] **7.1** `ch-plugin-protocol`: JSON-RPC 2.0 over stdio with newline-delimited framing and a versioned protocol.
@@ -103,6 +116,9 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [ ] **7.2** `external-host` plugin: reads `plugin.toml` manifests, spawns plugin processes lazily, and wraps their capabilities as kernel Tool/Hook/Command/PromptContributor/EventSink adapters. Per-call timeouts. If a plugin crashes, disable it and warn; never crash the agent.
 - [ ] **7.3** `ch-plugin-sdk` (Rust) and a Python example in `examples/plugins/`, for example a `todo-scanner` tool and a `block-secrets` pre_tool hook.
 - [ ] **7.4** `mcp-bridge`: connects to configured MCP servers (stdio and streamable HTTP) with `rmcp` and registers their tools as `mcp__<server>__<tool>`.
+  - Servers from a project's `.mcp.json` or `.ch/config.toml` stay off until you trust them, through the same trust store as project config, and are asked about again when their command, URL or env changes.
+  - Servers connect independently: one that fails or hangs at startup is reported with its reason (exited, timed out, invalid output) and doesn't block the others.
+  - Secrets in MCP error messages (tokens, `Authorization` values, env values) are redacted before they reach the model, the terminal or logs.
 - [ ] **7.5** `hooks-shell`: hooks defined in config ([architecture §5](docs/architecture.md#5-config-and-file-locations)). The command gets the event JSON on stdin; exit code 0 means continue, exit code 2 means deny with stderr as the reason, or the command can return a JSON `HookDecision`.
 - [ ] **7.6** `ch plugins list|info|enable|disable|install <path|git-url>` and a trust prompt for project-level plugins and hooks.
 - [ ] **7.7** Run the conformance suite (3.7) against the example external plugins and an MCP test server.
@@ -133,6 +149,8 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [ ] **10.3** Tuned profiles: run the ablation matrix on your target models and set defaults per profile (planning, tools vs bash-only, context strategy).
 - [ ] **10.4** Optional: a WASM plugin tier (wasmtime + WIT) for sandboxed in-process plugins.
 - [ ] **10.5** Docs: `docs/plugins.md` (writing built-in and external plugins, protocol reference, hook semantics) and a README.
+- [ ] **10.6** Long-running processes: a `bash_background` tool with `start`, `read` (new output since the last read) and `stop`, for dev servers and watchers that `bash` would kill at its timeout. Processes run through the `Executor`, go through the same safety checks as `bash`, are listed by a new `/tasks` command, and are killed when the session ends. A cap on live processes.
+- [ ] **10.7** Images: an image content block in the kernel, `read_file` returning PNG/JPEG/GIF/WebP to models that support vision, images in tool results for both providers, and a size limit with downscaling. `ToolResult.content` is a `String` today, so this changes the kernel types and the session format.
 
 ## Open questions
 
