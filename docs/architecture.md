@@ -98,7 +98,7 @@ sequenceDiagram
 |---|---|---|---|
 | **ModelProvider** | 1 per role (agent, summarizer) | `stream(req, cancel) -> Stream<ModelEvent>` | `provider-anthropic`, `provider-openai` |
 | **Tool** | many | `spec() -> ToolSpec`, `call(input, &ToolCx) -> ToolOutput` | `tools-fs`, `tool-bash`, `tool-web-fetch`, `planning` (`update_plan`) |
-| **Hook** | many, ordered by priority | `on(&mut HookEvent, &HookCx) -> HookDecision` | `safety` (permissions), `stuck`, `diagnostics`, `hooks-shell` |
+| **Hook** | many, ordered by priority | `on(&HookEvent, &Cx) -> HookDecision` | `safety` (permissions), `stuck`, `diagnostics`, `hooks-shell` |
 | **PromptContributor** | many, ordered | `system_blocks(cx)`, `turn_reminders(cx)` | `prompt-base`, `project-instructions`, `planning`, `stuck` |
 | **ContextStrategy** | 1 | `view(&History, Budget, cx) -> View` | `context` (`none` / `elide` / `summarize` / `staged`) |
 | **Command** (slash) | many | `name()`, `run(args, &CmdCx) -> Outcome` | `commands-core`, `commands-markdown` |

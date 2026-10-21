@@ -4,7 +4,8 @@
 //! # How decisions combine
 //!
 //! Hooks registered for a point run in ascending `priority()` order (ties keep
-//! registration order). Each hook sees the event as changed by earlier hooks.
+//! registration order). Hooks see the event read-only; a `Rewrite` is the only way to
+//! change it, and later hooks see the rewritten input.
 //!
 //! - `Deny` and `Stop` end the chain immediately; later hooks don't run.
 //! - `Ask` is remembered and the chain continues; the result is `Ask` unless a later hook
@@ -14,8 +15,8 @@
 //! - `AppendNote(text)` notes are concatenated in order.
 //!
 //! If any hook rewrites the input, the chain runs a second time on the rewritten input
-//! with rewrites ignored, and the second run's verdict and notes are the result. A hook
-//! that ran before the rewrite (such as the permission check, which runs first) so
+//! with rewrites ignored, and the second run's verdict and notes are the result. So a
+//! hook that ran before the rewrite (such as the permission check, which runs first)
 //! always decides on the input that is actually used. Hooks can therefore run twice for
 //! one event; keep them free of side effects that must happen only once.
 //!
@@ -100,7 +101,8 @@ pub enum HookEvent {
     PostTool {
         call: ToolCall,
         output: ToolOutput,
-        /// True when the call never ran because a hook or the user denied it.
+        /// True when the call never ran: a hook or the user denied it, or the turn was
+        /// stopped or cancelled before it.
         denied: bool,
     },
     TurnEnd {
@@ -194,7 +196,7 @@ pub trait Hook: Send + Sync {
     fn priority(&self) -> i32 {
         0
     }
-    async fn on(&self, event: &mut HookEvent, cx: &Cx) -> HookDecision;
+    async fn on(&self, event: &HookEvent, cx: &Cx) -> HookDecision;
 }
 
 /// The combined verdict of all hooks at one point.
@@ -247,22 +249,12 @@ pub async fn run_hooks(
     event: &mut HookEvent,
     cx: &Cx,
 ) -> HookOutcome {
-    let before = rewrite_target(event);
-    let first = run_chain(hooks, event, cx, true).await;
+    let (first, rewritten) = run_chain(hooks, event, cx, true).await;
     let ended = matches!(first.verdict, Verdict::Deny { .. } | Verdict::Stop { .. });
-    if ended || rewrite_target(event) == before {
+    if ended || !rewritten {
         return first;
     }
-    run_chain(hooks, event, cx, false).await
-}
-
-/// The part of the event a `Rewrite` changes.
-fn rewrite_target(event: &HookEvent) -> Option<Value> {
-    match event {
-        HookEvent::PreTool { call, .. } => Some(call.input.clone()),
-        HookEvent::UserPrompt { text } => Some(Value::String(text.clone())),
-        _ => None,
-    }
+    run_chain(hooks, event, cx, false).await.0
 }
 
 async fn run_chain(
@@ -270,26 +262,23 @@ async fn run_chain(
     event: &mut HookEvent,
     cx: &Cx,
     allow_rewrite: bool,
-) -> HookOutcome {
+) -> (HookOutcome, bool) {
     let point = event.point();
     let mut notes = Vec::new();
     let mut ask: Option<Verdict> = None;
+    let mut rewritten = false;
     for hook in hooks.iter().filter(|h| h.points().contains(&point)) {
         let decision = hook.on(event, cx).await;
         let id = hook.id().to_string();
         match decision {
             HookDecision::Continue => {}
             HookDecision::Deny { reason } => {
-                return HookOutcome {
-                    verdict: Verdict::Deny { hook: id, reason },
-                    notes,
-                };
+                let verdict = Verdict::Deny { hook: id, reason };
+                return (HookOutcome { verdict, notes }, rewritten);
             }
             HookDecision::Stop { reason } => {
-                return HookOutcome {
-                    verdict: Verdict::Stop { hook: id, reason },
-                    notes,
-                };
+                let verdict = Verdict::Stop { hook: id, reason };
+                return (HookOutcome { verdict, notes }, rewritten);
             }
             HookDecision::Ask { reason, key } => {
                 if ask.is_none() {
@@ -300,26 +289,41 @@ async fn run_chain(
                     });
                 }
             }
-            HookDecision::Rewrite { input } if allow_rewrite => apply_rewrite(event, input, &id),
+            HookDecision::Rewrite { input } if allow_rewrite => {
+                rewritten |= apply_rewrite(event, input, &id);
+            }
             HookDecision::Rewrite { .. } => {
                 tracing::debug!(hook = %id, "rewrite ignored while re-checking a rewritten input");
             }
             HookDecision::AppendNote { text } => notes.push((id, text)),
         }
     }
-    HookOutcome {
-        verdict: ask.unwrap_or(Verdict::Continue),
-        notes,
-    }
+    let verdict = ask.unwrap_or(Verdict::Continue);
+    (HookOutcome { verdict, notes }, rewritten)
 }
 
-fn apply_rewrite(event: &mut HookEvent, input: Value, hook: &str) {
+/// Applies a `Rewrite`; returns whether the event changed.
+fn apply_rewrite(event: &mut HookEvent, input: Value, hook: &str) -> bool {
     match event {
-        HookEvent::PreTool { call, .. } => call.input = input,
+        HookEvent::PreTool { call, .. } => {
+            let changed = call.input != input;
+            call.input = input;
+            changed
+        }
         HookEvent::UserPrompt { text } => match input {
-            Value::String(s) => *text = s,
-            other => tracing::warn!(hook, "user_prompt rewrite must be a string, got {other}"),
+            Value::String(s) => {
+                let changed = *text != s;
+                *text = s;
+                changed
+            }
+            other => {
+                tracing::warn!(hook, "user_prompt rewrite must be a string, got {other}");
+                false
+            }
         },
-        other => tracing::warn!(hook, point = ?other.point(), "rewrite ignored at this point"),
+        other => {
+            tracing::warn!(hook, point = ?other.point(), "rewrite ignored at this point");
+            false
+        }
     }
 }

@@ -153,7 +153,7 @@ struct ScriptedHook {
     priority: i32,
     points: Vec<HookPoint>,
     log: Log,
-    decide: Box<dyn Fn(&mut HookEvent) -> HookDecision + Send + Sync>,
+    decide: Box<dyn Fn(&HookEvent) -> HookDecision + Send + Sync>,
 }
 
 #[async_trait::async_trait]
@@ -167,7 +167,7 @@ impl Hook for ScriptedHook {
     fn priority(&self) -> i32 {
         self.priority
     }
-    async fn on(&self, event: &mut HookEvent, _cx: &Cx) -> HookDecision {
+    async fn on(&self, event: &HookEvent, _cx: &Cx) -> HookDecision {
         self.log
             .lock()
             .unwrap()
@@ -913,6 +913,199 @@ async fn sessions_persist_and_restore() {
         .unwrap();
     assert_eq!(s2.history().len(), 2);
     assert_eq!(s2.turn(), 1);
+}
+
+fn prompt_guard() -> Arc<dyn Plugin> {
+    plugin("guard", |cx| {
+        cx.add_hook(ScriptedHook {
+            id: "guard",
+            priority: 0,
+            points: vec![HookPoint::UserPrompt],
+            log: Default::default(),
+            decide: Box::new(|ev| match ev {
+                HookEvent::UserPrompt { text } if text == "blocked" => HookDecision::deny("no"),
+                _ => HookDecision::Continue,
+            }),
+        });
+        Ok(())
+    })
+}
+
+#[tokio::test]
+async fn saved_sessions_keep_event_ids_and_turn_numbers() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path());
+    let h = harness(
+        vec![Ok(text_reply("one")), Ok(text_reply("two"))],
+        vec![prompt_guard()],
+        config(),
+    );
+    let (registry, cfg) = (h.session.registry().clone(), h.session.config().clone());
+    let mut s = Session::builder(registry.clone(), cfg.clone())
+        .store(store.clone())
+        .build()
+        .unwrap();
+    s.run_turn("first").await;
+    s.clear();
+    s.run_turn("blocked").await;
+    s.run_turn("second").await;
+    let snap = store.load(s.id()).unwrap();
+    let ids: Vec<u64> = snap.history.events().iter().map(|e| e.id).collect();
+    assert_eq!(ids, [2, 3]);
+    let mut s2 = Session::builder(registry, cfg)
+        .restore(snap)
+        .build()
+        .unwrap();
+    assert_eq!(s2.turn(), 3);
+    s2.history_mut().push(4, Message::user("more"));
+    assert_eq!(s2.history().last().unwrap().id, 4);
+    // Saves go through a temp file of their own, which is renamed away.
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        let name = entry.unwrap().file_name();
+        assert!(!name.to_string_lossy().ends_with(".tmp"), "{name:?}");
+    }
+}
+
+#[tokio::test]
+async fn resuming_keeps_the_model_unless_the_provider_changed_or_one_is_given() {
+    let cfg = Config::parse(
+        r#"
+        [model]
+        provider = "scripted"
+        id = "test-model"
+        context_window = 5000
+        "#,
+    )
+    .unwrap();
+    let mut h = harness(vec![], vec![], cfg);
+    assert_eq!(h.session.context_window(), 5000);
+    h.session.set_model("picked-model");
+    // `context_window` describes `test-model`, not the model picked with /model.
+    assert_eq!(h.session.context_window(), 100_000);
+    let snap = h.session.snapshot();
+    assert_eq!(snap.meta.provider.as_deref(), Some("scripted"));
+
+    let (registry, cfg) = (h.session.registry().clone(), h.session.config().clone());
+    let resume =
+        |snap: SessionSnapshot| Session::builder(registry.clone(), cfg.clone()).restore(snap);
+    assert_eq!(
+        resume(snap.clone()).build().unwrap().model(),
+        "picked-model"
+    );
+    let s = resume(snap.clone()).model("flag-model").build().unwrap();
+    assert_eq!(s.model(), "flag-model");
+    let mut elsewhere = snap;
+    elsewhere.meta.provider = Some("another-provider".into());
+    assert_eq!(resume(elsewhere).build().unwrap().model(), "test-model");
+}
+
+#[tokio::test]
+async fn turn_end_hooks_run_once_however_the_turn_ends() {
+    let log: Log = Default::default();
+    let l = log.clone();
+    let plugins = vec![
+        prompt_guard(),
+        plugin("verifier", move |cx| {
+            cx.add_hook(ScriptedHook {
+                id: "verify",
+                priority: 0,
+                points: vec![HookPoint::TurnEnd],
+                log: l.clone(),
+                decide: Box::new(|_| HookDecision::stop("verified")),
+            });
+            Ok(())
+        }),
+    ];
+    let mut refusal = text_reply("I can't help with that.");
+    refusal.stop_reason = StopReason::Refusal;
+    let mut h = harness(vec![Ok(text_reply("done")), Ok(refusal)], plugins, config());
+    let turn_ends = || log.lock().unwrap().len();
+
+    // A turn_end Stop ends the turn without running turn_end hooks again.
+    let r = h.session.run_turn("go").await;
+    assert!(matches!(r.reason, TerminationReason::HookStop { .. }));
+    assert_eq!(turn_ends(), 1);
+    // A refusal and a denied prompt end the turn too.
+    h.session.run_turn("go").await;
+    assert_eq!(turn_ends(), 2);
+    let r = h.session.run_turn("blocked").await;
+    assert!(matches!(r.reason, TerminationReason::PromptDenied { .. }));
+    assert_eq!(turn_ends(), 3);
+}
+
+#[tokio::test]
+async fn a_pre_tool_stop_skips_the_rest_of_a_read_only_batch() {
+    let plugins = vec![plugin("guard", |cx| {
+        cx.add_hook(ScriptedHook {
+            id: "guard",
+            priority: 0,
+            points: vec![HookPoint::PreTool],
+            log: Default::default(),
+            decide: Box::new(|ev| match ev.tool_call() {
+                Some(c) if c.id == "b" => HookDecision::stop("enough"),
+                _ => HookDecision::Continue,
+            }),
+        });
+        Ok(())
+    })];
+    let mut h = harness(
+        vec![Ok(tool_reply(&[
+            ("a", "echo", json!({"text":"1"})),
+            ("b", "echo", json!({"text":"2"})),
+            ("c", "echo", json!({"text":"3"})),
+        ]))],
+        plugins,
+        config(),
+    );
+    let r = h.session.run_turn("go").await;
+    assert!(matches!(r.reason, TerminationReason::HookStop { .. }));
+    let results = tool_results(&h.session.history().events()[2].message);
+    assert_eq!(results[0], ("a".into(), "1".into(), false));
+    assert!(results[1].2);
+    assert!(
+        results[2].2 && results[2].1.contains("stopped by a hook"),
+        "{results:?}"
+    );
+}
+
+#[tokio::test]
+async fn hook_notes_reach_the_bus_and_after_model_notes_stay_in_their_turn() {
+    let plugins = vec![plugin("noter", |cx| {
+        cx.add_hook(ScriptedHook {
+            id: "noter",
+            priority: 0,
+            points: vec![HookPoint::PreTool, HookPoint::AfterModel],
+            log: Default::default(),
+            decide: Box::new(|ev| match ev {
+                HookEvent::PreTool { .. } => HookDecision::note("pre-tool note"),
+                _ => HookDecision::note("after-model note"),
+            }),
+        });
+        Ok(())
+    })];
+    let mut h = harness(
+        vec![
+            Ok(tool_reply(&[("a", "echo", json!({"text":"1"}))])),
+            Ok(text_reply("done")),
+            Ok(text_reply("second turn")),
+        ],
+        plugins,
+        config(),
+    );
+    let mut rx = h.session.events().subscribe();
+    h.session.run_turn("go").await;
+    let mut notes = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let AgentEvent::Note { text, .. } = ev {
+            notes.push(text);
+        }
+    }
+    assert!(notes.contains(&"pre-tool note".to_string()), "{notes:?}");
+    h.session.run_turn("next").await;
+    let reqs = h.script.requests.lock().unwrap();
+    assert!(format!("{:?}", reqs[1].messages).contains("after-model note"));
+    // The note on turn 1's final answer isn't sent with turn 2's prompt.
+    assert!(!format!("{:?}", reqs[2].messages).contains("after-model note"));
 }
 
 // ---------- registry validation ----------

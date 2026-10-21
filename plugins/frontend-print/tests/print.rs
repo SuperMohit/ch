@@ -102,7 +102,7 @@ impl Hook for AskHook {
     fn points(&self) -> &[HookPoint] {
         &[HookPoint::PreTool]
     }
-    async fn on(&self, _event: &mut HookEvent, _cx: &Cx) -> HookDecision {
+    async fn on(&self, _event: &HookEvent, _cx: &Cx) -> HookDecision {
         HookDecision::ask("testing", Some("echo".into()))
     }
 }

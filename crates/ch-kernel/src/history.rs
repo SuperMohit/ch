@@ -30,6 +30,12 @@ impl History {
         Self::default()
     }
 
+    /// A history continuing from saved events, keeping their ids.
+    pub fn from_events(events: Vec<Event>) -> Self {
+        let next_id = events.last().map_or(0, |e| e.id + 1);
+        Self { events, next_id }
+    }
+
     pub fn push(&mut self, turn: u32, message: Message) -> EventId {
         let id = self.next_id;
         self.next_id += 1;
