@@ -787,7 +787,7 @@ fn pipes_download_to_shell(_command: &str, parsed: &Parsed) -> bool {
 const READ_ONLY_PROGRAMS: &[&str] = &[
     "ls", "pwd", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "echo", "which", "file",
     "stat", "du", "df", "whoami", "uname", "basename", "dirname", "realpath", "readlink", "nl",
-    "true", "false", "cmp", "diff", "printenv", "id", "cd", "type", "tac", "cut", "jq",
+    "true", "false", "cmp", "diff", "id", "cd", "type", "tac", "cut", "jq",
 ];
 
 /// `git` subcommands that only read.
@@ -835,7 +835,6 @@ pub fn segment_is_read_only(seg: &Segment) -> bool {
         "tree" => !cmd.has_arg(|a| a == "-o"),
         "sort" => !cmd.has_arg(|a| a == "-o" || a.starts_with("--output")),
         "date" => !cmd.has_arg(|a| a == "-s" || a.starts_with("--set")),
-        "env" => cmd.args.is_empty(),
         "git" => git_is_read_only(&cmd),
         "cargo" => matches!(
             cmd.args.first().map(String::as_str),
@@ -1053,7 +1052,6 @@ mod tests {
             "cat a.txt | grep x | wc -l",
             "cd src && ls",
             "cargo check",
-            "env",
             "echo hi 2>&1",
             "ls >/dev/null",
             "head -n 5 a; tail b",
@@ -1084,6 +1082,10 @@ mod tests {
             "env GIT_CONFIG_GLOBAL=./x git status",
             "HOME=. git status",
             "RUSTC_WRAPPER=./x cargo check",
+            // They print the environment, API keys included.
+            "env",
+            "printenv",
+            "printenv ANTHROPIC_API_KEY",
         ] {
             assert!(!ro(cmd), "should not be read-only: {cmd}");
         }
