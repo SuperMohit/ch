@@ -27,10 +27,12 @@
 //! [`ReplOptions`] service when building the registry.
 
 mod approval;
+mod ask;
 mod format;
 mod input;
 mod markdown;
 mod repl;
+mod rules;
 mod terminal;
 #[cfg(test)]
 mod turn_tests;

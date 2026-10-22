@@ -1,18 +1,16 @@
 //! The REPL loop and the turn runner.
 
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
-use ch_kernel::{Approval, ApprovalRequest, Outcome, Session, TerminationReason, Usage};
-use crossterm::event::{KeyCode, KeyModifiers};
+use ch_kernel::{Outcome, Session, TerminationReason, Usage};
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::approval::{
-    ApprovalKey, Pending, is_interrupt_key, is_yes_key, parse_approval_key, save_allow_rule,
-};
-use crate::format::{approval_prompt, bold, dim, footer, green, red, yellow};
+use crate::approval::{Pending, is_interrupt_key};
+use crate::ask::ask;
+use crate::format::{bold, dim, footer, red};
 use crate::input::{Input, LineEditor, normalize_input};
 use crate::markdown::render_message;
 use crate::terminal::{KeyPoller, Term, install_panic_hook, next_key};
@@ -175,7 +173,6 @@ pub(crate) async fn run_turn(
     let cost_before = session.cost();
     let started = Instant::now();
 
-    term.set_raw(keys.is_some());
     let mut view = TurnView::new();
     let mut interrupted = false;
 
@@ -199,10 +196,7 @@ pub(crate) async fn run_turn(
                     }
                     Some(_) => {}
                     // The key reader died; keep going without it.
-                    None => {
-                        keys = None;
-                        term.set_raw(false);
-                    }
+                    None => keys = None,
                 },
                 Some(pending) = approvals.recv() => {
                     // Render what led up to the request (its tool line) first.
@@ -210,11 +204,11 @@ pub(crate) async fn run_turn(
                     term.apply(view.finish());
                     let answer =
                         ask(&pending.request, &mut keys, term, &workspace, on_saved.as_deref()).await;
-                    if answer.1 {
+                    if answer.cancel_turn {
                         interrupted = true;
                         cancel.cancel();
                     }
-                    let _ = pending.reply.send(answer.0);
+                    let _ = pending.reply.send(answer.approval);
                 }
             }
         }
@@ -222,7 +216,6 @@ pub(crate) async fn run_turn(
     drain(&mut events, &mut view, term);
     term.apply(view.finish());
     drop(keys);
-    term.set_raw(false);
 
     let usage = usage_since(&usage_before, &session.usage());
     let cost = (session.cost() - cost_before).max(0.0);
@@ -244,135 +237,6 @@ fn drain(
             Ok(ev) => term.apply(view.handle(&ev)),
             Err(TryRecvError::Lagged(_)) => continue,
             Err(_) => break,
-        }
-    }
-}
-
-/// Shows the approval prompt and reads the answer. The bool is true when the user
-/// pressed Ctrl-C, which also cancels the turn.
-async fn ask(
-    req: &ApprovalRequest,
-    keys: &mut Option<KeyPoller>,
-    term: &mut Term,
-    workspace: &Path,
-    on_saved: Option<&RuleSaved>,
-) -> (Approval, bool) {
-    term.write(&approval_prompt(req));
-    let Some(poller) = keys.as_mut() else {
-        term.line(&red("no terminal to ask on; denied"));
-        return (
-            Approval::Deny {
-                reason: Some("nobody could answer the approval prompt".into()),
-            },
-            false,
-        );
-    };
-    loop {
-        let Some(key) = poller.next().await else {
-            term.line(&red("denied"));
-            return (Approval::Deny { reason: None }, false);
-        };
-        match parse_approval_key(&key) {
-            None => continue,
-            Some(ApprovalKey::Yes) => {
-                term.line(&green("yes"));
-                return (Approval::Allow, false);
-            }
-            Some(ApprovalKey::NoQuiet) => {
-                term.line(&red("no"));
-                return (Approval::Deny { reason: None }, false);
-            }
-            Some(ApprovalKey::No) => {
-                term.line(&red("no"));
-                term.write(&dim("  tell the agent why (Enter to skip): "));
-                let reason = read_text(poller, term).await;
-                return (Approval::Deny { reason }, false);
-            }
-            Some(ApprovalKey::Cancel) => {
-                term.line(&red("cancelled"));
-                return (
-                    Approval::Deny {
-                        reason: Some("the user interrupted the turn".into()),
-                    },
-                    true,
-                );
-            }
-            Some(ApprovalKey::Always) => {
-                term.line(&green("always"));
-                if let Some(rule) = &req.key {
-                    offer_to_save(rule, poller, term, workspace, on_saved).await;
-                }
-                return (Approval::AllowAlways, false);
-            }
-        }
-    }
-}
-
-async fn offer_to_save(
-    rule: &str,
-    poller: &mut KeyPoller,
-    term: &mut Term,
-    workspace: &Path,
-    on_saved: Option<&RuleSaved>,
-) {
-    let path = project_config_path(workspace);
-    term.write(&format!(
-        "  save `{rule}` to {} for future sessions? [y/N] ",
-        dim(".ch/config.toml")
-    ));
-    let yes = poller.next().await.is_some_and(|k| is_yes_key(&k));
-    if !yes {
-        term.line(&dim("not saved (allowed for this session only)"));
-        return;
-    }
-    match save_allow_rule(&path, rule) {
-        Ok(true) => {
-            term.line(&green("saved"));
-            if let Some(hook) = on_saved {
-                (hook.0)(rule);
-            }
-        }
-        Ok(false) => term.line(&dim("already in the allow list")),
-        Err(e) => term.line(&yellow(&format!("could not save: {e:#}"))),
-    }
-}
-
-fn project_config_path(workspace: &Path) -> PathBuf {
-    workspace.join(".ch").join("config.toml")
-}
-
-/// Reads a short line of text in raw mode. Enter finishes, Esc or Ctrl-C give `None`.
-async fn read_text(poller: &mut KeyPoller, term: &mut Term) -> Option<String> {
-    let mut text = String::new();
-    loop {
-        let key = poller.next().await?;
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            if matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
-                term.line("");
-                return None;
-            }
-            continue;
-        }
-        match key.code {
-            KeyCode::Enter => {
-                term.line("");
-                let t = text.trim().to_string();
-                return (!t.is_empty()).then_some(t);
-            }
-            KeyCode::Esc => {
-                term.line("");
-                return None;
-            }
-            KeyCode::Backspace => {
-                if text.pop().is_some() {
-                    term.write("\u{8} \u{8}");
-                }
-            }
-            KeyCode::Char(c) => {
-                text.push(c);
-                term.write(&c.to_string());
-            }
-            _ => {}
         }
     }
 }

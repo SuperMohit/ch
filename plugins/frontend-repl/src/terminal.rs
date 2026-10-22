@@ -36,8 +36,6 @@ pub fn install_panic_hook() {
 pub struct Term {
     out: Box<dyn Write + Send>,
     size: fn() -> Option<(u16, u16)>,
-    /// Raw mode is on, so `\n` must be written as `\r\n`.
-    raw: bool,
     spinner_allowed: bool,
     spinner: Option<ProgressBar>,
     spinner_message: Option<String>,
@@ -54,7 +52,6 @@ impl Term {
         Self {
             out: Box::new(std::io::stdout()),
             size: || terminal::size().ok(),
-            raw: false,
             spinner_allowed: true,
             spinner: None,
             spinner_message: None,
@@ -67,22 +64,18 @@ impl Term {
         Self {
             out: Box::new(out),
             size,
-            raw: false,
             spinner_allowed: false,
             spinner: None,
             spinner_message: None,
         }
     }
 
-    pub fn set_raw(&mut self, raw: bool) {
-        self.raw = raw;
-    }
-
-    /// Writes `text`, stopping the spinner first.
+    /// Writes `text`, stopping the spinner first. In raw mode (while a [`KeyPoller`]
+    /// runs) `\n` alone doesn't return to column 0, so it is written as `\r\n`.
     pub fn write(&mut self, text: &str) {
         self.stop_spinner();
         let out = &mut self.out;
-        let _ = if self.raw {
+        let _ = if terminal::is_raw_mode_enabled().unwrap_or(false) {
             out.write_all(text.replace('\n', "\r\n").as_bytes())
         } else {
             out.write_all(text.as_bytes())
