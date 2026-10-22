@@ -65,19 +65,6 @@ fn reason_detail(reason: &TerminationReason) -> Option<String> {
     }
 }
 
-fn usage_since(before: &Usage, after: &Usage) -> Usage {
-    Usage {
-        input_tokens: after.input_tokens.saturating_sub(before.input_tokens),
-        output_tokens: after.output_tokens.saturating_sub(before.output_tokens),
-        cache_read_tokens: after
-            .cache_read_tokens
-            .saturating_sub(before.cache_read_tokens),
-        cache_write_tokens: after
-            .cache_write_tokens
-            .saturating_sub(before.cache_write_tokens),
-    }
-}
-
 /// Writes events in the chosen format. Write errors (a closed pipe, say) are ignored so
 /// the run still finishes and the session is saved.
 struct Printer<'a, O, E> {
@@ -231,7 +218,7 @@ where
         exit_code: exit_code(&turn.reason),
         final_text: turn.final_text.clone(),
         steps: turn.steps,
-        usage: usage_since(&usage_before, &session.usage()),
+        usage: session.usage().since(&usage_before),
         cost: (session.cost() - cost_before).max(0.0),
         duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     };

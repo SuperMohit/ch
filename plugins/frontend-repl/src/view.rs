@@ -4,9 +4,10 @@
 //! [`Action`]s that the terminal layer carries out. That keeps the rendering rules
 //! testable.
 
+use ch_kernel::util::first_line;
 use ch_kernel::{AgentEvent, CompactionKind};
 
-use crate::format::{dim, first_line, red, tool_end_lines, tool_start_line, yellow};
+use crate::format::{dim, red, tool_end_lines, tool_start_line, yellow};
 use crate::markdown::MarkdownLines;
 
 /// Something the terminal layer should do.

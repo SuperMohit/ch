@@ -4,7 +4,7 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Instant;
 
-use ch_kernel::{Outcome, Session, TerminationReason, Usage};
+use ch_kernel::{Outcome, Session, TerminationReason};
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -143,19 +143,6 @@ fn shorten_home(path: &Path) -> String {
     path.display().to_string()
 }
 
-fn usage_since(before: &Usage, after: &Usage) -> Usage {
-    Usage {
-        input_tokens: after.input_tokens.saturating_sub(before.input_tokens),
-        output_tokens: after.output_tokens.saturating_sub(before.output_tokens),
-        cache_read_tokens: after
-            .cache_read_tokens
-            .saturating_sub(before.cache_read_tokens),
-        cache_write_tokens: after
-            .cache_write_tokens
-            .saturating_sub(before.cache_write_tokens),
-    }
-}
-
 /// Runs one turn, rendering its events, handling approvals and interrupts, and prints
 /// the footer.
 pub(crate) async fn run_turn(
@@ -217,7 +204,7 @@ pub(crate) async fn run_turn(
     term.apply(view.finish());
     drop(keys);
 
-    let usage = usage_since(&usage_before, &session.usage());
+    let usage = session.usage().since(&usage_before);
     let cost = (session.cost() - cost_before).max(0.0);
     term.line(&footer(&result.reason, &usage, cost, started.elapsed()));
     if matches!(result.reason, TerminationReason::Cancelled) {

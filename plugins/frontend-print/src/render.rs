@@ -1,5 +1,6 @@
 //! Plain-text lines for `--verbose` output on stderr. No colours: stderr is often a log.
 
+use ch_kernel::util::{diff_counts, first_line};
 use ch_kernel::{AgentEvent, CompactionKind};
 use serde_json::Value;
 
@@ -74,27 +75,6 @@ pub fn result_summary(name: &str, content: &str, is_error: bool, metadata: &Valu
         }
         _ => lines,
     }
-}
-
-/// Added and removed lines in a unified diff (headers excluded).
-pub fn diff_counts(diff: &str) -> (usize, usize) {
-    let mut added = 0;
-    let mut removed = 0;
-    for line in diff.lines() {
-        if line.starts_with("+++") || line.starts_with("---") {
-            continue;
-        }
-        if line.starts_with('+') {
-            added += 1;
-        } else if line.starts_with('-') {
-            removed += 1;
-        }
-    }
-    (added, removed)
-}
-
-fn first_line(s: &str) -> &str {
-    s.trim().lines().next().unwrap_or("").trim_end()
 }
 
 #[cfg(test)]
