@@ -614,6 +614,53 @@ async fn ask_without_approver_is_denied() {
     assert!(r.1.contains("needs approval"));
 }
 
+/// Cancels the turn while its approval prompt is open, as Ctrl-C at the REPL does.
+struct CancellingApprover(Arc<Mutex<Option<CancelHandle>>>);
+
+#[async_trait::async_trait]
+impl Approver for CancellingApprover {
+    fn id(&self) -> &str {
+        "cancelling"
+    }
+    async fn ask(&self, _request: &ApprovalRequest) -> Approval {
+        self.0.lock().unwrap().as_ref().unwrap().cancel();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn a_call_whose_approval_is_cancelled_was_not_denied() {
+    let handle: Arc<Mutex<Option<CancelHandle>>> = Default::default();
+    let h2 = handle.clone();
+    let plugins = vec![plugin("perm", move |cx| {
+        cx.add_hook(ScriptedHook {
+            id: "asker",
+            priority: 0,
+            points: vec![HookPoint::PreTool],
+            log: Default::default(),
+            decide: Box::new(|_| HookDecision::ask("risky", None)),
+        });
+        cx.add_approver(CancellingApprover(h2.clone()));
+        Ok(())
+    })];
+    let mut h = harness(
+        vec![
+            Ok(tool_reply(&[("t1", "echo", json!({"text":"x"}))])),
+            Ok(text_reply("never sent")),
+        ],
+        plugins,
+        config(),
+    );
+    *handle.lock().unwrap() = Some(h.session.cancel_handle());
+    let r = h.session.run_turn("go").await;
+    assert_eq!(r.reason, TerminationReason::Cancelled);
+    let result = &tool_results(&h.session.history().events()[2].message)[0];
+    assert_eq!(
+        result.1, "Not run: the user cancelled the turn.",
+        "the model must not be told the user denied the call"
+    );
+}
+
 #[tokio::test]
 async fn cancellation_mid_tool_keeps_history_valid() {
     let mut h = harness(

@@ -26,6 +26,10 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 ### Fixed
 
+- In the REPL, Esc or Ctrl-C cancels a running slash command such as `/compact`. Before, Ctrl-C during a command killed `ch` without saving the session.
+- A tool call whose approval prompt was interrupted is answered "Not run: the user cancelled the turn." Before, the model was told the user had denied it and not to retry it.
+- The REPL exits with code 1 when its line editor fails, instead of 0.
+
 - `ch -c --model <id>` uses the given model. Before, a resumed session kept its saved model. A session saved with a different provider from the configured one now resumes on the configured model, instead of sending the old provider's model id.
 - `[model] context_window` and `pricing` apply only to `model.id`, not to a model picked with `/model` or kept from a resumed session.
 - Hooks at the end of a turn run exactly once. Before, they ran twice when one of them stopped the turn, and not at all after a refusal or a blocked prompt.

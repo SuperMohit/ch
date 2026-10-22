@@ -228,14 +228,24 @@ impl Session {
                 });
                 let answer = tokio::select! {
                     biased;
-                    _ = cx.cancel.cancelled() => Approval::Deny { reason: Some("turn cancelled".into()) },
-                    a = approver.ask(&req) => a,
+                    _ = cx.cancel.cancelled() => None,
+                    a = approver.ask(&req) => Some(a),
                 };
-                let approved = !matches!(answer, Approval::Deny { .. });
+                let approved = matches!(answer, Some(Approval::Allow | Approval::AllowAlways));
                 self.events.emit(AgentEvent::ApprovalResolved {
                     tool: call.name.clone(),
                     approved,
                 });
+                let Some(answer) = answer else {
+                    let output = ToolOutput::error("Not run: the user cancelled the turn.");
+                    let done = Prepared::Done {
+                        call,
+                        output,
+                        not_run: true,
+                        notes,
+                    };
+                    return (done, None);
+                };
                 match answer {
                     Approval::Allow => (Prepared::Run { call, tool, notes }, None),
                     Approval::AllowAlways => {
