@@ -69,17 +69,6 @@ impl History {
         self.events.last()
     }
 
-    pub fn get(&self, id: EventId) -> Option<&Event> {
-        self.events
-            .binary_search_by_key(&id, |e| e.id)
-            .ok()
-            .map(|i| &self.events[i])
-    }
-
-    pub fn tokens_est(&self) -> u64 {
-        self.events.iter().map(|e| e.tokens_est).sum()
-    }
-
     /// Text of the first user message (the original task), if any.
     pub fn first_user_text(&self) -> Option<String> {
         self.events
@@ -90,10 +79,5 @@ impl History {
 
     pub fn clear(&mut self) {
         self.events.clear();
-    }
-
-    /// Removes events from the end until the last remaining one has an id < `id`.
-    pub fn truncate_from(&mut self, id: EventId) {
-        self.events.retain(|e| e.id < id);
     }
 }

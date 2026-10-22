@@ -31,10 +31,6 @@ impl Config {
         &self.root
     }
 
-    pub fn to_toml_string(&self) -> String {
-        toml::to_string_pretty(&self.root).unwrap_or_default()
-    }
-
     /// Merges `overlay` on top of this config.
     pub fn merge(&mut self, overlay: Table) {
         merge_tables(&mut self.root, overlay);

@@ -41,7 +41,7 @@ pub use model::{
 };
 pub use plugin::{API_VERSION, Plugin, PluginManifest, RegisterCx};
 pub use prompt::PromptContributor;
-pub use registry::{PluginStatus, Registry, RegistryBuilder, Selection};
+pub use registry::{PluginStatus, Registry, RegistryBuilder};
 pub use services::Services;
 pub use session::{CancelHandle, Session, SessionBuilder, TurnResult};
 pub use store::{SessionMeta, SessionSnapshot, SessionStore};

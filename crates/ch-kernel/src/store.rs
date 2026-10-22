@@ -98,9 +98,7 @@ impl SessionStore {
         fs::create_dir_all(&self.dir)
             .with_context(|| format!("creating {}", self.dir.display()))?;
         let path = self.path_for(&snap.meta.id);
-        // A temp file of its own, so two processes saving the same session can't
-        // interleave their writes.
-        let tmp = path.with_extension(format!("jsonl.{}.tmp", uuid::Uuid::new_v4().simple()));
+        let tmp = unique_temp_path(&path);
         let written = Self::write(&tmp, snap);
         if written.is_err() {
             let _ = fs::remove_file(&tmp);
@@ -194,6 +192,12 @@ impl SessionStore {
     pub fn latest(&self) -> anyhow::Result<Option<SessionMeta>> {
         Ok(self.list()?.into_iter().next())
     }
+}
+
+/// A temp path next to `path` that no other save uses, so two processes saving the
+/// same session can't write into one file.
+fn unique_temp_path(path: &Path) -> PathBuf {
+    path.with_extension(format!("jsonl.{}.tmp", uuid::Uuid::new_v4().simple()))
 }
 
 #[cfg(test)]

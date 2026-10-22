@@ -50,7 +50,7 @@ pub struct View {
 #[derive(Clone)]
 pub struct ContextCx {
     pub cx: Cx,
-    pub summarizer: Option<Arc<dyn ModelProvider>>,
+    pub summarizer: Arc<dyn ModelProvider>,
     pub summarizer_model: String,
 }
 
