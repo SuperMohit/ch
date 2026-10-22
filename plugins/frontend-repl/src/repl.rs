@@ -89,11 +89,11 @@ pub(crate) async fn run_repl(
         if line.is_empty() {
             continue;
         }
-        if line.starts_with('/') {
-            match session.run_command(&line).await {
-                Some(Ok(Outcome::Done)) => {}
-                Some(Ok(Outcome::Message(text))) => term.write(&render_message(&text)),
-                Some(Ok(Outcome::Prompt(prompt))) => {
+        if let Some(result) = session.run_command(&line).await {
+            match result {
+                Ok(Outcome::Done) => {}
+                Ok(Outcome::Message(text)) => term.write(&render_message(&text)),
+                Ok(Outcome::Prompt(prompt)) => {
                     run_turn(
                         &mut session,
                         prompt,
@@ -103,11 +103,8 @@ pub(crate) async fn run_repl(
                     )
                     .await;
                 }
-                Some(Ok(Outcome::Exit)) => break,
-                Some(Err(e)) => term.line(&red(&format!("error: {e:#}"))),
-                None => {
-                    run_turn(&mut session, line, approvals, &mut term, KeyPoller::start()).await
-                }
+                Ok(Outcome::Exit) => break,
+                Err(e) => term.line(&red(&format!("error: {e:#}"))),
             }
             continue;
         }
@@ -197,7 +194,7 @@ pub(crate) async fn run_turn(
                     Some(k) if is_interrupt_key(&k) && !interrupted => {
                         interrupted = true;
                         cancel.cancel();
-                        term.apply(view.interrupt_output());
+                        term.apply(view.finish());
                         term.line(&dim("  ⎿ interrupting…"));
                     }
                     Some(_) => {}
@@ -210,7 +207,7 @@ pub(crate) async fn run_turn(
                 Some(pending) = approvals.recv() => {
                     // Render what led up to the request (its tool line) first.
                     drain(&mut events, &mut view, term);
-                    term.apply(view.interrupt_output());
+                    term.apply(view.finish());
                     let answer =
                         ask(&pending.request, &mut keys, term, &workspace, on_saved.as_deref()).await;
                     if answer.1 {

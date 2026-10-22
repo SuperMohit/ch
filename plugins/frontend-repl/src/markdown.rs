@@ -63,9 +63,11 @@ impl MarkdownLines {
             } else {
                 Style::new().bold()
             };
+            // Inline rendering may end with a reset sequence, which would cut the
+            // heading's style short, so the heading is styled from its plain text.
             return Some(format!(
                 "{indent}{}",
-                style.paint(strip_inline_reset(&text))
+                style.paint(crate::format::strip_ansi(&text))
             ));
         }
         // Horizontal rules.
@@ -87,13 +89,8 @@ impl MarkdownLines {
             ));
         }
         // Inline styles only.
-        if has_inline_markup(line) {
-            let styled = self.inline(line);
-            if styled != line {
-                return Some(styled);
-            }
-        }
-        None
+        let styled = self.inline(line);
+        (styled != line).then_some(styled)
     }
 
     fn inline(&self, text: &str) -> String {
@@ -115,7 +112,7 @@ fn skin() -> MadSkin {
 }
 
 fn has_inline_markup(s: &str) -> bool {
-    s.contains('`') || s.contains("**") || s.contains('*') || s.contains("~~") || s.contains('_')
+    s.contains('`') || s.contains('*') || s.contains("~~") || s.contains('_')
 }
 
 fn is_rule(s: &str) -> bool {
@@ -124,12 +121,6 @@ fn is_rule(s: &str) -> bool {
         && (s.chars().all(|c| c == '-')
             || s.chars().all(|c| c == '*')
             || s.chars().all(|c| c == '_'))
-}
-
-/// Inline rendering may end with a reset sequence; inside an outer style that would
-/// cut the style short, so heading text is styled from its plain form instead.
-fn strip_inline_reset(s: &str) -> String {
-    crate::format::strip_ansi(s)
 }
 
 #[cfg(test)]

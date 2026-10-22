@@ -180,12 +180,6 @@ impl TurnView {
         out
     }
 
-    /// Before printing something else in the middle of a turn (an approval prompt):
-    /// flushes partial text and hides the spinner.
-    pub fn interrupt_output(&mut self) -> Vec<Action> {
-        self.finish()
-    }
-
     fn waiting_message(&self) -> String {
         match self.running.last() {
             Some((_, name)) => format!("running {name}"),

@@ -43,12 +43,7 @@ use async_trait::async_trait;
 use ch_kernel::{Frontend, Plugin, PluginManifest, RegisterCx, Session};
 use serde::{Deserialize, Serialize};
 
-pub use approval::{
-    ApprovalBridge, ApprovalKey, ReplApprover, add_allow_rule, parse_approval_key, save_allow_rule,
-};
-pub use format::{color_diff, result_summary, strip_ansi, tool_end_lines, tool_start_line};
-pub use markdown::{MarkdownLines, render_message};
-pub use view::{Action, TurnView};
+use approval::{ApprovalBridge, ReplApprover};
 
 /// Plugin id.
 pub const PLUGIN_ID: &str = "frontend-repl";
