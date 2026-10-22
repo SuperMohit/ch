@@ -61,11 +61,13 @@ pub(crate) async fn run_repl(
     }
 
     let mut ctrl_c_once = false;
+    let mut code = 0;
     loop {
         let input = match editor.read().await {
             Ok(i) => i,
             Err(e) => {
                 term.line(&red(&format!("error: {e:#}")));
+                code = 1;
                 break;
             }
         };
@@ -87,7 +89,7 @@ pub(crate) async fn run_repl(
         if line.is_empty() {
             continue;
         }
-        if let Some(result) = session.run_command(&line).await {
+        if let Some(result) = run_command(&mut session, &line, KeyPoller::start()).await {
             match result {
                 Ok(Outcome::Done) => {}
                 Ok(Outcome::Message(text)) => term.write(&render_message(&text)),
@@ -111,7 +113,37 @@ pub(crate) async fn run_repl(
 
     editor.shutdown();
     session.end().await;
-    Ok(0)
+    Ok(code)
+}
+
+/// Runs a slash command with Esc and Ctrl-C cancelling it, as they do a turn. The
+/// terminal would otherwise be in cooked mode, where Ctrl-C kills `ch` before the
+/// session is saved.
+pub(crate) async fn run_command(
+    session: &mut Session,
+    line: &str,
+    mut keys: Option<KeyPoller>,
+) -> Option<anyhow::Result<Outcome>> {
+    let cancel = session.cancel_handle();
+    let result = {
+        let fut = session.run_command(line);
+        tokio::pin!(fut);
+        loop {
+            tokio::select! {
+                result = &mut fut => break result,
+                key = next_key(&mut keys) => match key {
+                    Some(k) if is_interrupt_key(&k) => cancel.cancel(),
+                    Some(_) => {}
+                    None => keys = None,
+                },
+            }
+        }
+    };
+    drop(keys);
+    // A command that runs no turn leaves the cancel pending, where it would cancel
+    // the next turn instead.
+    cancel.clear_pending();
+    result
 }
 
 fn banner(term: &mut Term, session: &Session) {

@@ -6,10 +6,10 @@ expression: t
 ? echo hi
   echo needs approval
   y yes · n no · a always allow `echo:*` · Esc no › cancelled
-  ⎿ echo: The user denied this tool call: turn cancelled. Don't retry the same call; adjust your approach or ask the user.
+  ⎿ echo: Not run: the user cancelled the turn.
   interrupted
   1.2k in · 34 out · <time>
   (the conversation so far is kept; continue or try again)
 --- tool results
-The user denied this tool call: turn cancelled. Don't retry the same call; adjust your approach or ask the user. (error: true)
+Not run: the user cancelled the turn. (error: true)
 --- saved []

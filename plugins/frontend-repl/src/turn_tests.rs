@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use crate::RuleSaved;
 use crate::approval::{ApprovalBridge, ReplApprover};
 use crate::format::strip_ansi;
-use crate::repl::run_turn;
+use crate::repl::{run_command, run_turn};
 use crate::terminal::{KeyPoller, Term};
 
 struct Scripted(Mutex<VecDeque<ModelResponse>>);
@@ -119,6 +119,26 @@ impl Tool for Wait {
     }
 }
 
+/// `/slow`: runs until the turn-or-command cancel is set.
+struct UntilCancelled;
+
+#[async_trait::async_trait]
+impl Command for UntilCancelled {
+    fn name(&self) -> &str {
+        "slow"
+    }
+    fn description(&self) -> &str {
+        "runs until cancelled"
+    }
+    async fn run(&self, _args: &str, cx: &mut CmdCx<'_>) -> anyhow::Result<Outcome> {
+        let cancel = cx.session.cancel_handle();
+        while !cancel.is_cancelled() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        Ok(Outcome::Message("stopped".into()))
+    }
+}
+
 /// Asks for approval of every `echo` call.
 struct AskEcho;
 
@@ -156,6 +176,7 @@ impl Plugin for TestPlugin {
         cx.add_tool(Echo);
         cx.add_tool(Wait);
         cx.add_hook(AskEcho);
+        cx.add_command(UntilCancelled);
         cx.add_approver(ReplApprover {
             bridge: self.bridge.clone(),
         });
@@ -207,24 +228,33 @@ type Step = (&'static str, Option<Vec<KeyEvent>>);
 
 /// Runs one turn of `script` with `steps` typed in, and returns a transcript: the
 /// screen, then the tool results the model got, the rules saved and the project config.
-async fn transcript(script: Vec<ModelResponse>, steps: Vec<Step>) -> String {
-    let dir = tempfile::tempdir().unwrap();
+fn new_session(
+    script: Vec<ModelResponse>,
+    workspace: &std::path::Path,
+    saved: Arc<Mutex<Vec<String>>>,
+) -> (Session, Arc<ApprovalBridge>) {
     let bridge = Arc::new(ApprovalBridge::new());
-    let saved: Arc<Mutex<Vec<String>>> = Default::default();
     let plugin = TestPlugin {
         script: Mutex::new(script),
         bridge: bridge.clone(),
-        saved: saved.clone(),
+        saved,
     };
     let cfg = Config::parse("[model]\nprovider = \"scripted\"\nid = \"m\"\n").unwrap();
     let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(plugin)];
-    let registry = Arc::new(RegistryBuilder::build(plugins, &cfg, dir.path()).unwrap());
-    let mut session = Session::builder(registry, Arc::new(cfg))
-        .workspace(dir.path())
+    let registry = Arc::new(RegistryBuilder::build(plugins, &cfg, workspace).unwrap());
+    let session = Session::builder(registry, Arc::new(cfg))
+        .workspace(workspace)
         .build()
         .unwrap();
-    let mut approvals = bridge.take_receiver().unwrap();
     bridge.set_active(true);
+    (session, bridge)
+}
+
+async fn transcript(script: Vec<ModelResponse>, steps: Vec<Step>) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let saved: Arc<Mutex<Vec<String>>> = Default::default();
+    let (mut session, bridge) = new_session(script, dir.path(), saved.clone());
+    let mut approvals = bridge.take_receiver().unwrap();
 
     let screen = Screen::default();
     let mut term = Term::capture(screen.clone(), || Some((80, 24)));
@@ -370,4 +400,23 @@ async fn esc_interrupts_a_running_tool() {
     )
     .await;
     insta::assert_snapshot!(t);
+}
+
+#[tokio::test]
+async fn esc_cancels_a_slash_command_but_not_the_next_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, bridge) =
+        new_session(vec![text("still here")], dir.path(), Default::default());
+    let (tx, rx) = mpsc::unbounded_channel();
+    tx.send(key(KeyCode::Esc)).unwrap();
+    let result = run_command(&mut session, "/slow", Some(KeyPoller::from_keys(rx))).await;
+    assert_eq!(result.unwrap().unwrap(), Outcome::Message("stopped".into()));
+
+    let mut approvals = bridge.take_receiver().unwrap();
+    let screen = Screen::default();
+    let mut term = Term::capture(screen.clone(), || Some((80, 24)));
+    run_turn(&mut session, "go".into(), &mut approvals, &mut term, None).await;
+    let text = screen.text();
+    assert!(text.contains("still here"), "{text}");
+    assert!(!text.contains("interrupted"), "{text}");
 }
