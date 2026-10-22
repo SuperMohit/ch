@@ -1,5 +1,3 @@
-//! Cancelling the running turn.
-
 use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;

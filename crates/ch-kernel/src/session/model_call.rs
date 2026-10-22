@@ -1,5 +1,3 @@
-//! Building a model request and streaming the response.
-
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -48,11 +46,11 @@ impl Session {
         }
     }
 
-    /// One model call. `Err` is how the turn ends instead.
     pub(super) async fn call_model(
         &mut self,
         cx: &Cx,
         step: u32,
+        after_model_notes: &mut Vec<String>,
     ) -> Result<ModelResponse, TerminationReason> {
         let cancel = cx.cancel.clone();
         let system = self.system_blocks(cx).await;
@@ -65,7 +63,7 @@ impl Session {
                     .filter(|r| !r.trim().is_empty()),
             );
         }
-        reminders.append(&mut self.pending_reminders);
+        reminders.append(after_model_notes);
 
         let budget = self.budget(&system, &reminders);
         let ccx = self.context_cx(cx.clone());
@@ -221,8 +219,6 @@ impl Session {
     }
 }
 
-/// Adds per-call blocks to the last message if it is the user's, or as a new user
-/// message after the assistant's.
 fn append_to_last_user(messages: &mut Vec<Message>, blocks: Vec<ContentBlock>) {
     match messages.last_mut() {
         Some(last) if last.role == Role::User => last.content.extend(blocks),
@@ -233,7 +229,6 @@ fn append_to_last_user(messages: &mut Vec<Message>, blocks: Vec<ContentBlock>) {
     }
 }
 
-/// What the tool definitions add to every request.
 fn specs_chars(specs: &[ToolSpec]) -> usize {
     specs
         .iter()

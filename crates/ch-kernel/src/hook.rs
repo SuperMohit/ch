@@ -92,7 +92,7 @@ pub enum HookEvent {
         output: ToolOutput,
         /// True when the call never ran: a hook or the user denied it, or the turn was
         /// stopped or cancelled before it.
-        denied: bool,
+        not_run: bool,
     },
     TurnEnd {
         /// `Done` when the model stopped calling tools; otherwise why the turn is ending.
@@ -291,7 +291,6 @@ async fn run_chain(
     (HookOutcome { verdict, notes }, rewritten)
 }
 
-/// Applies a `Rewrite`; returns whether the event changed.
 fn apply_rewrite(event: &mut HookEvent, input: Value, hook: &str) -> bool {
     match event {
         HookEvent::PreTool { call, .. } => {

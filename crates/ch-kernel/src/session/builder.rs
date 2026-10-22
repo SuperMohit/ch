@@ -1,5 +1,3 @@
-//! Building a session from the registry and config.
-
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -159,13 +157,10 @@ impl SessionBuilder {
             sink_tasks: Vec::new(),
             started: false,
             ended: false,
-            pending_reminders: Vec::new(),
         })
     }
 }
 
-/// The model to continue a saved session with: the saved one, unless it ran on another
-/// provider than the configured one (a `claude-*` id means nothing to OpenAI).
 pub(super) fn restored_model(meta: &SessionMeta, provider: &str, configured: &str) -> String {
     match &meta.provider {
         Some(p) if p != provider => configured.to_string(),

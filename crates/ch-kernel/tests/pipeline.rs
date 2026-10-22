@@ -960,7 +960,6 @@ async fn saved_sessions_keep_event_ids_and_turn_numbers() {
     s2.run_turn("third").await;
     let last = s2.history().last().unwrap();
     assert_eq!((last.id, last.turn), (5, 4));
-    // Saves go through a temp file of their own, which is renamed away.
     for entry in std::fs::read_dir(dir.path()).unwrap() {
         let name = entry.unwrap().file_name();
         assert!(!name.to_string_lossy().ends_with(".tmp"), "{name:?}");
@@ -968,7 +967,7 @@ async fn saved_sessions_keep_event_ids_and_turn_numbers() {
 }
 
 #[tokio::test]
-async fn resuming_keeps_the_model_unless_the_provider_changed_or_one_is_given() {
+async fn model_settings_apply_only_to_the_configured_model() {
     let cfg = Config::parse(
         r#"
         [model]
@@ -981,8 +980,16 @@ async fn resuming_keeps_the_model_unless_the_provider_changed_or_one_is_given() 
     let mut h = harness(vec![], vec![], cfg);
     assert_eq!(h.session.context_window(), 5000);
     h.session.set_model("picked-model");
-    // `context_window` describes `test-model`, not the model picked with /model.
-    assert_eq!(h.session.context_window(), 100_000);
+    let provider_window = ScriptedProvider(Default::default())
+        .context_window("picked-model")
+        .unwrap();
+    assert_eq!(h.session.context_window(), provider_window);
+}
+
+#[tokio::test]
+async fn resuming_keeps_the_model_unless_the_provider_changed_or_one_is_given() {
+    let mut h = harness(vec![], vec![], config());
+    h.session.set_model("picked-model");
     let snap = h.session.snapshot();
     assert_eq!(snap.meta.provider.as_deref(), Some("scripted"));
 
@@ -1022,11 +1029,9 @@ async fn turn_end_hooks_run_once_however_the_turn_ends() {
     let mut h = harness(vec![Ok(text_reply("done")), Ok(refusal)], plugins, config());
     let turn_ends = || log.lock().unwrap().len();
 
-    // A turn_end Stop ends the turn without running turn_end hooks again.
     let r = h.session.run_turn("go").await;
     assert!(matches!(r.reason, TerminationReason::HookStop { .. }));
     assert_eq!(turn_ends(), 1);
-    // A refusal and a denied prompt end the turn too.
     h.session.run_turn("go").await;
     assert_eq!(turn_ends(), 2);
     let r = h.session.run_turn("blocked").await;
@@ -1105,7 +1110,6 @@ async fn hook_notes_reach_the_bus_and_after_model_notes_stay_in_their_turn() {
     h.session.run_turn("next").await;
     let reqs = h.script.requests.lock().unwrap();
     assert!(format!("{:?}", reqs[1].messages).contains("after-model note"));
-    // The note on turn 1's final answer isn't sent with turn 2's prompt.
     assert!(!format!("{:?}", reqs[2].messages).contains("after-model note"));
 }
 

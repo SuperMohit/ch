@@ -197,7 +197,6 @@ impl RegistryBuilder {
     }
 
     fn finish(mut self, plugins: Vec<PluginStatus>) -> anyhow::Result<Registry> {
-        // Commands that yield give way to a command of the same name that doesn't.
         let firm: HashSet<String> = self
             .commands
             .iter()

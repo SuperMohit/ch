@@ -1,5 +1,3 @@
-//! Running the tool calls of one assistant message.
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -29,7 +27,7 @@ enum Prepared {
     Done {
         call: ToolCall,
         output: ToolOutput,
-        denied: bool,
+        not_run: bool,
         notes: Vec<(String, String)>,
     },
 }
@@ -45,8 +43,6 @@ impl Session {
         let mut results = Vec::with_capacity(calls.len());
         let mut stop: Option<(String, String)> = None;
 
-        // Group consecutive read-only calls into concurrent batches; every other call
-        // is a batch of its own.
         let mut batches: Vec<(bool, Vec<ToolCall>)> = Vec::new();
         for call in calls {
             let ro = self
@@ -63,8 +59,6 @@ impl Session {
         for (_, batch) in batches {
             let mut prepared = Vec::with_capacity(batch.len());
             for call in batch {
-                // Checked per call, so a stop or a cancel also skips the rest of a
-                // read-only batch.
                 let skip = if stop.is_some() {
                     Some("Not run: the turn was stopped by a hook.")
                 } else if cx.cancel.is_cancelled() {
@@ -76,7 +70,7 @@ impl Session {
                     prepared.push(Prepared::Done {
                         call,
                         output: ToolOutput::error(why),
-                        denied: true,
+                        not_run: true,
                         notes: Vec::new(),
                     });
                     continue;
@@ -96,9 +90,9 @@ impl Session {
                         Prepared::Done {
                             call,
                             output,
-                            denied,
+                            not_run,
                             notes,
-                        } => (call, output, denied, notes, 0u64),
+                        } => (call, output, not_run, notes, 0u64),
                         Prepared::Run { call, tool, notes } => {
                             let _permit = sem.acquire_owned().await;
                             cx.tool_use_id = Some(call.id.clone());
@@ -112,13 +106,13 @@ impl Session {
             });
             let done = join_all(futs).await;
 
-            for (call, mut output, denied, pre_notes, ms) in done {
+            for (call, mut output, not_run, pre_notes, ms) in done {
                 output.content =
                     truncate_middle(&output.content, self.kcfg.agent.tool_result_max_chars);
                 let mut ev = HookEvent::PostTool {
                     call: call.clone(),
                     output,
-                    denied,
+                    not_run,
                 };
                 let outcome = run_hooks(&self.hooks, &mut ev, cx).await;
                 let HookEvent::PostTool { mut output, .. } = ev else {
@@ -167,7 +161,7 @@ impl Session {
                 Prepared::Done {
                     call,
                     output,
-                    denied: false,
+                    not_run: false,
                     notes: Vec::new(),
                 },
                 None,
@@ -194,7 +188,7 @@ impl Session {
         let deny = |call: ToolCall, msg: String, notes| Prepared::Done {
             call,
             output: ToolOutput::error(msg),
-            denied: true,
+            not_run: true,
             notes,
         };
         match outcome.verdict {

@@ -75,8 +75,6 @@ pub struct Session {
     sink_tasks: Vec<JoinHandle<()>>,
     started: bool,
     ended: bool,
-    /// One-shot reminders for the next model call (from after_model hooks).
-    pending_reminders: Vec<String>,
 }
 
 impl Session {
@@ -142,8 +140,6 @@ impl Session {
             .unwrap_or(self.kcfg.agent.default_context_window)
     }
 
-    /// A `[model]` setting such as `context_window` or `pricing` describes `model.id`,
-    /// so it doesn't apply after `/model` or a resume switched to another model.
     fn for_configured_model<T>(&self, setting: Option<T>) -> Option<T> {
         setting.filter(|_| self.model == self.kcfg.model.id)
     }
@@ -151,7 +147,6 @@ impl Session {
     /// Forgets the conversation (`/clear`). Usage totals are kept.
     pub fn clear(&mut self) {
         self.history.clear();
-        self.pending_reminders.clear();
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
@@ -186,7 +181,6 @@ impl Session {
         self.history = snap.history;
         self.usage = snap.usage;
         self.cost = snap.cost;
-        self.pending_reminders.clear();
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -350,7 +344,7 @@ impl Session {
             Verdict::Continue | Verdict::Ask { .. } => None,
         };
         if let Some(reason) = denied {
-            self.turn_end_hooks(&reason, 0, "", &cx0).await;
+            self.notify_turn_end(&reason, 0, "", &cx0).await;
             return self.finish_turn(reason, 0, String::new()).await;
         }
         let mut user = Message::user(prompt);
@@ -362,19 +356,18 @@ impl Session {
         let max_steps = self.kcfg.agent.max_steps.max(1);
         let mut final_text = String::new();
         let mut step: u32 = 0;
-        // Whether turn_end hooks already ran for the way this turn ends.
-        let mut turn_end_ran = false;
-        let reason = loop {
+        let mut reminders = Vec::new();
+        let (reason, turn_end_ran) = loop {
             if cancel.is_cancelled() {
-                break TerminationReason::Cancelled;
+                break (TerminationReason::Cancelled, false);
             }
             if step >= max_steps {
-                break TerminationReason::StepLimit;
+                break (TerminationReason::StepLimit, false);
             }
             let cx = self.cx(step, cancel.clone());
-            let response = match self.call_model(&cx, step).await {
+            let response = match self.call_model(&cx, step, &mut reminders).await {
                 Ok(r) => r,
-                Err(reason) => break reason,
+                Err(reason) => break (reason, false),
             };
             step += 1;
             let text = response.message.text();
@@ -410,8 +403,7 @@ impl Session {
             let mut ev = HookEvent::AfterModel { response };
             let outcome = run_hooks(&self.hooks, &mut ev, &cx).await;
             self.emit_notes(&outcome);
-            self.pending_reminders
-                .extend(outcome.notes.iter().map(|(_, n)| n.clone()));
+            reminders.extend(outcome.notes.iter().map(|(_, n)| n.clone()));
             let after_stop = match outcome.verdict {
                 Verdict::Deny { hook, reason } | Verdict::Stop { hook, reason } => {
                     Some(TerminationReason::HookStop {
@@ -428,7 +420,7 @@ impl Session {
                     self.history
                         .push(turn, not_run(&calls, "Not run: the turn was stopped."));
                 }
-                break r;
+                break (r, false);
             }
             if truncated && !calls.is_empty() {
                 // Run none of them: the model sends them again, smaller.
@@ -457,23 +449,21 @@ impl Session {
                 };
                 let outcome = run_hooks(&self.hooks, &mut ev, &cx).await;
                 self.emit_notes(&outcome);
-                turn_end_ran = true;
                 match outcome.verdict {
                     Verdict::Stop { hook, reason } => {
-                        break TerminationReason::HookStop {
+                        let stop = TerminationReason::HookStop {
                             source: hook,
                             reason,
                         };
+                        break (stop, true);
                     }
                     _ => match outcome.notes_text() {
                         Some(notes) if !cancel.is_cancelled() => {
                             self.history
                                 .push(turn, Message::user(system_reminder(&notes)));
-                            // The turn goes on, so it hasn't ended yet.
-                            turn_end_ran = false;
                             continue;
                         }
-                        _ => break TerminationReason::Done,
+                        _ => break (TerminationReason::Done, true),
                     },
                 }
             }
@@ -487,25 +477,25 @@ impl Session {
                 },
             );
             if cancel.is_cancelled() {
-                break TerminationReason::Cancelled;
+                break (TerminationReason::Cancelled, false);
             }
             if let Some((hook, reason)) = stop {
-                break TerminationReason::HookStop {
+                let stop = TerminationReason::HookStop {
                     source: hook,
                     reason,
                 };
+                break (stop, false);
             }
         };
 
         if !turn_end_ran {
             let cx = self.cx(step, cancel.clone());
-            self.turn_end_hooks(&reason, step, &final_text, &cx).await;
+            self.notify_turn_end(&reason, step, &final_text, &cx).await;
         }
         self.finish_turn(reason, step, final_text).await
     }
 
-    /// Runs turn_end hooks for a turn that ends anyway: their decisions can't change it.
-    async fn turn_end_hooks(
+    async fn notify_turn_end(
         &self,
         reason: &TerminationReason,
         steps: u32,
@@ -528,9 +518,6 @@ impl Session {
         final_text: String,
     ) -> TurnResult {
         self.cancel.finish();
-        // Reminders from after_model hooks belong to this turn's next call, which
-        // won't happen.
-        self.pending_reminders.clear();
         self.events.emit(AgentEvent::TurnEnd {
             turn: self.turn,
             reason: reason.clone(),
@@ -566,7 +553,6 @@ impl Session {
     }
 }
 
-/// Answers each of `calls` with the same error, for calls that are never run.
 fn not_run(calls: &[ToolCall], why: &str) -> Message {
     Message {
         role: Role::User,
