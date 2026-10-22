@@ -1,0 +1,15 @@
+---
+source: plugins/frontend-repl/src/turn_tests.rs
+expression: t
+---
+● echo hi
+? echo hi
+  echo needs approval
+  y yes · n no · a always allow `echo:*` · Esc no › cancelled
+  ⎿ echo: The user denied this tool call: turn cancelled. Don't retry the same call; adjust your approach or ask the user.
+  interrupted
+  1.2k in · 34 out · <time>
+  (the conversation so far is kept; continue or try again)
+--- tool results
+The user denied this tool call: turn cancelled. Don't retry the same call; adjust your approach or ask the user. (error: true)
+--- saved []

@@ -34,8 +34,11 @@ pub fn install_panic_hook() {
 
 /// Writes to stdout and owns the spinner.
 pub struct Term {
+    out: Box<dyn Write + Send>,
+    size: fn() -> Option<(u16, u16)>,
     /// Raw mode is on, so `\n` must be written as `\r\n`.
     raw: bool,
+    spinner_allowed: bool,
     spinner: Option<ProgressBar>,
     spinner_message: Option<String>,
 }
@@ -49,7 +52,23 @@ impl Default for Term {
 impl Term {
     pub fn new() -> Self {
         Self {
+            out: Box::new(std::io::stdout()),
+            size: || terminal::size().ok(),
             raw: false,
+            spinner_allowed: true,
+            spinner: None,
+            spinner_message: None,
+        }
+    }
+
+    /// A terminal of `size` that writes to `out` and never shows a spinner.
+    #[cfg(test)]
+    pub fn capture(out: impl Write + Send + 'static, size: fn() -> Option<(u16, u16)>) -> Self {
+        Self {
+            out: Box::new(out),
+            size,
+            raw: false,
+            spinner_allowed: false,
             spinner: None,
             spinner_message: None,
         }
@@ -62,7 +81,7 @@ impl Term {
     /// Writes `text`, stopping the spinner first.
     pub fn write(&mut self, text: &str) {
         self.stop_spinner();
-        let mut out = std::io::stdout().lock();
+        let out = &mut self.out;
         let _ = if self.raw {
             out.write_all(text.replace('\n', "\r\n").as_bytes())
         } else {
@@ -91,7 +110,7 @@ impl Term {
     /// when the raw text's on-screen height can't be known.
     fn restyle(&mut self, raw: &str, styled: &str) {
         self.stop_spinner();
-        let Ok((cols, rows)) = terminal::size() else {
+        let Some((cols, rows)) = (self.size)() else {
             self.write("\n");
             return;
         };
@@ -100,7 +119,7 @@ impl Term {
             self.write("\n");
             return;
         }
-        let mut out = std::io::stdout().lock();
+        let out = &mut self.out;
         if height > 1 {
             let up = u16::try_from(height - 1).unwrap_or(u16::MAX);
             let _ = crossterm::queue!(out, cursor::MoveUp(up));
@@ -110,12 +129,11 @@ impl Term {
             cursor::MoveToColumn(0),
             terminal::Clear(terminal::ClearType::FromCursorDown)
         );
-        drop(out);
         self.write(&format!("{styled}\n"));
     }
 
     fn start_spinner(&mut self, msg: String) {
-        if !std::io::stderr().is_terminal() {
+        if !self.spinner_allowed || !std::io::stderr().is_terminal() {
             return;
         }
         if let Some(sp) = &self.spinner {
@@ -200,6 +218,16 @@ impl KeyPoller {
         }
     }
 
+    /// A poller fed by `rx` instead of the terminal, without raw mode.
+    #[cfg(test)]
+    pub fn from_keys(rx: mpsc::UnboundedReceiver<KeyEvent>) -> Self {
+        Self {
+            rx,
+            stop: Arc::new(AtomicBool::new(false)),
+            thread: None,
+        }
+    }
+
     /// The next key press; `None` if the reader stopped.
     pub async fn next(&mut self) -> Option<KeyEvent> {
         self.rx.recv().await
@@ -211,8 +239,8 @@ impl Drop for KeyPoller {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+            let _ = terminal::disable_raw_mode();
         }
-        let _ = terminal::disable_raw_mode();
     }
 }
 

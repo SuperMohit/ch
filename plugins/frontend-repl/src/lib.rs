@@ -32,6 +32,8 @@ mod input;
 mod markdown;
 mod repl;
 mod terminal;
+#[cfg(test)]
+mod turn_tests;
 mod view;
 
 use std::path::PathBuf;

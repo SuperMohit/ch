@@ -1,0 +1,9 @@
+---
+source: plugins/frontend-repl/src/turn_tests.rs
+expression: t
+---
+Hello there.
+Second line.
+  1.2k in · 34 out · <time>
+--- tool results
+--- saved []

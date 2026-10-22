@@ -1,0 +1,16 @@
+---
+source: plugins/frontend-repl/src/turn_tests.rs
+expression: t
+---
+● echo hi
+? echo hi
+  echo needs approval
+  y yes · n no · a always allow `echo:*` · Esc no › no
+  tell the agent why (Enter to skip): too risky Y
+  ⎿ echo: The user denied this tool call: too riskY. Don't retry the same call; adjust your approach or ask the user.
+
+done
+  2.4k in · 68 out · <time>
+--- tool results
+The user denied this tool call: too riskY. Don't retry the same call; adjust your approach or ask the user. (error: true)
+--- saved []

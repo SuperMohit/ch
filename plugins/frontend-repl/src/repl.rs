@@ -52,7 +52,14 @@ pub(crate) async fn run_repl(
     banner(&mut term, &session);
     if let Some(prompt) = options.initial_prompt.filter(|p| !p.trim().is_empty()) {
         term.line(&format!("{} {}", dim("›"), prompt.trim()));
-        run_turn(&mut session, prompt, approvals, &mut term).await;
+        run_turn(
+            &mut session,
+            prompt,
+            approvals,
+            &mut term,
+            KeyPoller::start(),
+        )
+        .await;
     }
 
     let mut ctrl_c_once = false;
@@ -87,15 +94,24 @@ pub(crate) async fn run_repl(
                 Some(Ok(Outcome::Done)) => {}
                 Some(Ok(Outcome::Message(text))) => term.write(&render_message(&text)),
                 Some(Ok(Outcome::Prompt(prompt))) => {
-                    run_turn(&mut session, prompt, approvals, &mut term).await;
+                    run_turn(
+                        &mut session,
+                        prompt,
+                        approvals,
+                        &mut term,
+                        KeyPoller::start(),
+                    )
+                    .await;
                 }
                 Some(Ok(Outcome::Exit)) => break,
                 Some(Err(e)) => term.line(&red(&format!("error: {e:#}"))),
-                None => run_turn(&mut session, line, approvals, &mut term).await,
+                None => {
+                    run_turn(&mut session, line, approvals, &mut term, KeyPoller::start()).await
+                }
             }
             continue;
         }
-        run_turn(&mut session, line, approvals, &mut term).await;
+        run_turn(&mut session, line, approvals, &mut term, KeyPoller::start()).await;
     }
 
     editor.shutdown();
@@ -147,11 +163,12 @@ fn usage_since(before: &Usage, after: &Usage) -> Usage {
 
 /// Runs one turn, rendering its events, handling approvals and interrupts, and prints
 /// the footer.
-async fn run_turn(
+pub(crate) async fn run_turn(
     session: &mut Session,
     prompt: String,
     approvals: &mut UnboundedReceiver<Pending>,
     term: &mut Term,
+    mut keys: Option<KeyPoller>,
 ) {
     let mut events = session.events().subscribe();
     let cancel = session.cancel_handle();
@@ -161,7 +178,6 @@ async fn run_turn(
     let cost_before = session.cost();
     let started = Instant::now();
 
-    let mut keys = KeyPoller::start();
     term.set_raw(keys.is_some());
     let mut view = TurnView::new();
     let mut interrupted = false;
