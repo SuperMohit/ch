@@ -197,26 +197,19 @@ impl RegistryBuilder {
     }
 
     fn finish(mut self, plugins: Vec<PluginStatus>) -> anyhow::Result<Registry> {
-        // Commands that yield give way to any other command with the same name.
-        let names: Vec<(String, bool)> = self
+        // Commands that yield give way to a command of the same name that doesn't.
+        let firm: HashSet<String> = self
             .commands
             .iter()
-            .map(|(_, c)| (c.name().to_string(), c.yields_on_conflict()))
+            .filter(|(_, c)| !c.yields_on_conflict())
+            .map(|(_, c)| c.name().to_string())
             .collect();
-        let mut i = 0;
         self.commands.retain(|(plugin, c)| {
-            let (name, yields) = &names[i];
-            i += 1;
-            let clash = names
-                .iter()
-                .enumerate()
-                .any(|(j, (n, y))| j != i - 1 && n == name && !*y);
-            if *yields && clash {
+            let hidden = c.yields_on_conflict() && firm.contains(c.name());
+            if hidden {
                 tracing::warn!(plugin = %plugin, command = %c.name(), "command hidden by another plugin's command of the same name");
-                false
-            } else {
-                true
             }
+            !hidden
         });
         check_unique("tool", self.tools.iter().map(|(p, t)| (p, t.spec().name)))?;
         check_unique(

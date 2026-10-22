@@ -13,6 +13,7 @@ use crate::events::AgentEvent;
 use crate::hook::{HookEvent, Verdict, run_hooks};
 use crate::model::{ModelError, ModelEvent, ModelRequest, ModelResponse};
 use crate::tokens::estimate_tokens;
+use crate::tool::ToolSpec;
 use crate::types::{ContentBlock, Message, Role, TerminationReason, Usage};
 use crate::util::system_reminder;
 
@@ -38,11 +39,7 @@ impl Session {
     pub(super) fn budget(&self, system: &[String], reminders: &[String]) -> Budget {
         let fixed_chars: usize = system.iter().map(String::len).sum::<usize>()
             + reminders.iter().map(String::len).sum::<usize>()
-            + self
-                .tool_specs
-                .iter()
-                .map(|t| t.name.len() + t.description.len() + t.input_schema.to_string().len())
-                .sum::<usize>();
+            + specs_chars(&self.tool_specs);
         Budget {
             window: self.context_window(),
             reserved_output: u64::from(self.kcfg.model.max_output_tokens),
@@ -51,13 +48,12 @@ impl Session {
         }
     }
 
-    /// One model call. The outer `Result` is for unexpected kernel errors; the inner
-    /// `Err` is a normal way for a turn to end.
+    /// One model call. `Err` is how the turn ends instead.
     pub(super) async fn call_model(
         &mut self,
         cx: &Cx,
         step: u32,
-    ) -> anyhow::Result<Result<ModelResponse, TerminationReason>> {
+    ) -> Result<ModelResponse, TerminationReason> {
         let cancel = cx.cancel.clone();
         let system = self.system_blocks(cx).await;
         let mut reminders = Vec::new();
@@ -77,20 +73,17 @@ impl Session {
             .context
             .view(&self.history, budget, &ccx)
             .await
-            .with_context(|| format!("context strategy `{}` failed", self.context.id()))?;
+            .with_context(|| format!("context strategy `{}` failed", self.context.id()))
+            .map_err(|e| TerminationReason::Error {
+                message: format!("{e:#}"),
+            })?;
         let mut messages = view.messages;
         let volatile_tail = reminders.len();
         if !reminders.is_empty() {
             let blocks = reminders
                 .iter()
                 .map(|r| ContentBlock::text(system_reminder(r)));
-            match messages.last_mut() {
-                Some(last) if last.role == Role::User => last.content.extend(blocks),
-                _ => messages.push(Message {
-                    role: Role::User,
-                    content: blocks.collect(),
-                }),
-            }
+            append_to_last_user(&mut messages, blocks.collect());
         }
 
         let request = ModelRequest {
@@ -112,24 +105,15 @@ impl Session {
         let HookEvent::BeforeModel { mut request } = ev else {
             unreachable!("hooks cannot change the event kind")
         };
-        match outcome.verdict {
-            Verdict::Deny { hook, reason } | Verdict::Stop { hook, reason } => {
-                return Ok(Err(TerminationReason::HookStop {
-                    source: hook,
-                    reason,
-                }));
-            }
-            _ => {}
+        if let Verdict::Deny { hook, reason } | Verdict::Stop { hook, reason } = outcome.verdict {
+            return Err(TerminationReason::HookStop {
+                source: hook,
+                reason,
+            });
         }
         if let Some(notes) = outcome.notes_text() {
             let block = ContentBlock::text(system_reminder(&notes));
-            match request.messages.last_mut() {
-                Some(last) if last.role == Role::User => last.content.push(block),
-                _ => request.messages.push(Message {
-                    role: Role::User,
-                    content: vec![block],
-                }),
-            }
+            append_to_last_user(&mut request.messages, vec![block]);
             request.volatile_tail += 1;
         }
 
@@ -144,24 +128,23 @@ impl Session {
             context_window: budget.window,
         });
 
-        let result = self.stream_model(request, cancel).await;
-        let response = match result {
-            Ok(r) => r,
-            Err(ModelError::Cancelled) => return Ok(Err(TerminationReason::Cancelled)),
-            Err(ModelError::ContextOverflow(message)) => {
-                return Ok(Err(TerminationReason::ContextOverflow { message }));
-            }
-            Err(e) => {
-                return Ok(Err(TerminationReason::Error {
+        let response = self
+            .stream_model(request, cancel)
+            .await
+            .map_err(|e| match e {
+                ModelError::Cancelled => TerminationReason::Cancelled,
+                ModelError::ContextOverflow(message) => {
+                    TerminationReason::ContextOverflow { message }
+                }
+                e => TerminationReason::Error {
                     message: e.to_string(),
-                }));
-            }
-        };
+                },
+            })?;
 
         let actual = response.usage.prompt_tokens();
         self.calibrator.observe(raw_est, actual);
         self.record_usage(&response.usage);
-        Ok(Ok(response))
+        Ok(response)
     }
 
     /// Records usage and cost from any model call (plugins making their own calls,
@@ -238,13 +221,29 @@ impl Session {
     }
 }
 
+/// Adds per-call blocks to the last message if it is the user's, or as a new user
+/// message after the assistant's.
+fn append_to_last_user(messages: &mut Vec<Message>, blocks: Vec<ContentBlock>) {
+    match messages.last_mut() {
+        Some(last) if last.role == Role::User => last.content.extend(blocks),
+        _ => messages.push(Message {
+            role: Role::User,
+            content: blocks,
+        }),
+    }
+}
+
+/// What the tool definitions add to every request.
+fn specs_chars(specs: &[ToolSpec]) -> usize {
+    specs
+        .iter()
+        .map(|t| t.name.len() + t.description.len() + t.input_schema.to_string().len())
+        .sum()
+}
+
 fn estimate_request_tokens(req: &ModelRequest) -> u64 {
     let chars = req.system.iter().map(String::len).sum::<usize>()
         + req.messages.iter().map(Message::char_len).sum::<usize>()
-        + req
-            .tools
-            .iter()
-            .map(|t| t.name.len() + t.description.len() + t.input_schema.to_string().len())
-            .sum::<usize>();
+        + specs_chars(&req.tools);
     estimate_tokens(chars)
 }

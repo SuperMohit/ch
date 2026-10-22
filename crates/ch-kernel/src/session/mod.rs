@@ -28,7 +28,7 @@ use crate::registry::Registry;
 use crate::store::{SessionMeta, SessionSnapshot, SessionStore};
 use crate::tokens::TokenCalibrator;
 use crate::tool::{Tool, ToolOutput, ToolSpec};
-use crate::types::{ContentBlock, Message, Role, StopReason, TerminationReason, Usage};
+use crate::types::{ContentBlock, Message, Role, StopReason, TerminationReason, ToolCall, Usage};
 use crate::util::{system_reminder, truncate_middle};
 
 pub use builder::SessionBuilder;
@@ -373,13 +373,8 @@ impl Session {
             }
             let cx = self.cx(step, cancel.clone());
             let response = match self.call_model(&cx, step).await {
-                Ok(Ok(r)) => r,
-                Ok(Err(reason)) => break reason,
-                Err(e) => {
-                    break TerminationReason::Error {
-                        message: format!("{e:#}"),
-                    };
-                }
+                Ok(r) => r,
+                Err(reason) => break reason,
             };
             step += 1;
             let text = response.message.text();
@@ -430,19 +425,8 @@ impl Session {
             if let Some(r) = after_stop.or(cut_off) {
                 if !calls.is_empty() {
                     // after_model stopped the turn: still answer every tool call.
-                    let results = calls
-                        .iter()
-                        .map(|c| {
-                            tool_result(&c.id, ToolOutput::error("Not run: the turn was stopped."))
-                        })
-                        .collect();
-                    self.history.push(
-                        turn,
-                        Message {
-                            role: Role::User,
-                            content: results,
-                        },
-                    );
+                    self.history
+                        .push(turn, not_run(&calls, "Not run: the turn was stopped."));
                 }
                 break r;
             }
@@ -461,17 +445,7 @@ impl Session {
                      again with a smaller input, for example by splitting a large change into \
                      several smaller ones."
                 );
-                let results = calls
-                    .iter()
-                    .map(|c| tool_result(&c.id, ToolOutput::error(why.clone())))
-                    .collect();
-                self.history.push(
-                    turn,
-                    Message {
-                        role: Role::User,
-                        content: results,
-                    },
-                );
+                self.history.push(turn, not_run(&calls, &why));
                 continue;
             }
             if calls.is_empty() {
@@ -589,5 +563,16 @@ impl Session {
             tool: tool.map(str::to_string),
             reason: reason.to_string(),
         });
+    }
+}
+
+/// Answers each of `calls` with the same error, for calls that are never run.
+fn not_run(calls: &[ToolCall], why: &str) -> Message {
+    Message {
+        role: Role::User,
+        content: calls
+            .iter()
+            .map(|c| tool_result(&c.id, ToolOutput::error(why)))
+            .collect(),
     }
 }

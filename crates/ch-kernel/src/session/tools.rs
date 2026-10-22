@@ -45,28 +45,22 @@ impl Session {
         let mut results = Vec::with_capacity(calls.len());
         let mut stop: Option<(String, String)> = None;
 
-        // Group consecutive read-only calls into concurrent batches.
-        let mut batches: Vec<Vec<ToolCall>> = Vec::new();
+        // Group consecutive read-only calls into concurrent batches; every other call
+        // is a batch of its own.
+        let mut batches: Vec<(bool, Vec<ToolCall>)> = Vec::new();
         for call in calls {
             let ro = self
                 .tools
                 .get(&call.name)
                 .is_some_and(|t| t.spec().read_only);
             match batches.last_mut() {
-                Some(b)
-                    if ro
-                        && b.iter().all(|c| {
-                            self.tools.get(&c.name).is_some_and(|t| t.spec().read_only)
-                        }) =>
-                {
-                    b.push(call)
-                }
-                _ => batches.push(vec![call]),
+                Some((true, b)) if ro => b.push(call),
+                _ => batches.push((ro, vec![call])),
             }
         }
 
         let sem = Arc::new(Semaphore::new(self.kcfg.agent.max_parallel_readonly.max(1)));
-        for batch in batches {
+        for (_, batch) in batches {
             let mut prepared = Vec::with_capacity(batch.len());
             for call in batch {
                 // Checked per call, so a stop or a cancel also skips the rest of a
