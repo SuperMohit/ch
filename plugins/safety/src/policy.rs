@@ -271,7 +271,6 @@ impl Policy {
         if let Some(d) = self.deny_or_ask("web_fetch", &targets) {
             return d;
         }
-        // As for paths, allow rules see only the normalized URL.
         let allow_targets: Vec<&str> = normalized.as_deref().into_iter().collect();
         if self.allowed("web_fetch", &allow_targets, false) || self.mode == Mode::Bypass {
             return Decision::Allow;
@@ -539,7 +538,6 @@ allow = ["edit_file"]"#,
         assert_eq!(key(&d), Some("edit_file:.git/hooks/pre-commit"));
         assert!(is_ask(&edit(&p, "src/../.env")));
         assert_eq!(key(&edit(&p, "src/../Cargo.toml")), Some("edit_file"));
-        // Deny rules still see the raw path too.
         let p = policy(&f, r#"deny = ["edit_file:src/../**"]"#);
         assert!(is_deny(&edit(&p, "src/../Cargo.toml")));
     }

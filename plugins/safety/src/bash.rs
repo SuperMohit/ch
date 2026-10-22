@@ -498,8 +498,6 @@ impl<'a> Cmd<'a> {
             }
             let Some(w) = words.get(i) else { break };
             if WRAPPERS.contains(&basename(w)) {
-                // Skip the wrapper and its options / numeric arguments, keeping the
-                // assignments (`env GIT_DIR=x git status`).
                 let mut j = i + 1;
                 while j < words.len()
                     && (words[j].starts_with('-')
@@ -1082,7 +1080,6 @@ mod tests {
             "env GIT_CONFIG_GLOBAL=./x git status",
             "HOME=. git status",
             "RUSTC_WRAPPER=./x cargo check",
-            // They print the environment, API keys included.
             "env",
             "printenv",
             "printenv ANTHROPIC_API_KEY",
