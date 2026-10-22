@@ -146,6 +146,20 @@ impl Usage {
         self.cache_write_tokens += other.cache_write_tokens;
     }
 
+    /// The tokens used since `before` was taken.
+    pub fn since(&self, before: &Usage) -> Usage {
+        Usage {
+            input_tokens: self.input_tokens.saturating_sub(before.input_tokens),
+            output_tokens: self.output_tokens.saturating_sub(before.output_tokens),
+            cache_read_tokens: self
+                .cache_read_tokens
+                .saturating_sub(before.cache_read_tokens),
+            cache_write_tokens: self
+                .cache_write_tokens
+                .saturating_sub(before.cache_write_tokens),
+        }
+    }
+
     /// Total prompt-side tokens, including cached ones.
     pub fn prompt_tokens(&self) -> u64 {
         self.input_tokens + self.cache_read_tokens + self.cache_write_tokens

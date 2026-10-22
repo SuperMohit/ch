@@ -4,9 +4,10 @@
 //! [`Action`]s that the terminal layer carries out. That keeps the rendering rules
 //! testable.
 
+use ch_kernel::util::first_line;
 use ch_kernel::{AgentEvent, CompactionKind};
 
-use crate::format::{dim, first_line, red, tool_end_lines, tool_start_line, yellow};
+use crate::format::{dim, red, tool_end_lines, tool_start_line, yellow};
 use crate::markdown::MarkdownLines;
 
 /// Something the terminal layer should do.
@@ -178,12 +179,6 @@ impl TurnView {
         self.end_text(&mut out);
         out.push(Action::Spinner(None));
         out
-    }
-
-    /// Before printing something else in the middle of a turn (an approval prompt):
-    /// flushes partial text and hides the spinner.
-    pub fn interrupt_output(&mut self) -> Vec<Action> {
-        self.finish()
     }
 
     fn waiting_message(&self) -> String {

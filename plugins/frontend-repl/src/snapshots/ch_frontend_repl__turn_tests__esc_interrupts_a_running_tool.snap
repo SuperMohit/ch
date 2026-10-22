@@ -1,0 +1,13 @@
+---
+source: plugins/frontend-repl/src/turn_tests.rs
+expression: t
+---
+● wait {}
+  ⎿ interrupting…
+  ⎿ interrupted
+  interrupted
+  1.2k in · 34 out · <time>
+  (the conversation so far is kept; continue or try again)
+--- tool results
+interrupted (error: true)
+--- saved []

@@ -5,6 +5,7 @@
 
 use std::time::Duration;
 
+use ch_kernel::util::{diff_counts, first_line};
 use ch_kernel::{ApprovalRequest, TerminationReason, Usage};
 use nu_ansi_term::{Color, Style};
 use serde_json::Value;
@@ -67,11 +68,6 @@ pub fn strip_ansi(s: &str) -> String {
         }
     }
     out
-}
-
-/// The first non-empty line of `s`, trimmed.
-pub fn first_line(s: &str) -> &str {
-    s.trim().lines().next().unwrap_or("").trim_end()
 }
 
 /// `● read_file src/main.rs`
@@ -147,23 +143,6 @@ pub fn result_summary(name: &str, content: &str, is_error: bool, metadata: &Valu
         Some(code) => format!("exit {code} · {lines}"),
         None => lines,
     }
-}
-
-/// Added and removed lines in a unified diff (file headers excluded).
-pub fn diff_counts(diff: &str) -> (usize, usize) {
-    let mut added = 0;
-    let mut removed = 0;
-    for line in diff.lines() {
-        if line.starts_with("+++") || line.starts_with("---") {
-            continue;
-        }
-        if line.starts_with('+') {
-            added += 1;
-        } else if line.starts_with('-') {
-            removed += 1;
-        }
-    }
-    (added, removed)
 }
 
 /// Colours a unified diff: additions green, removals red, hunk headers cyan, context

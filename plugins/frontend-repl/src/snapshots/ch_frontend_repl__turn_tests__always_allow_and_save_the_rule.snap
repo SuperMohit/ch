@@ -1,0 +1,19 @@
+---
+source: plugins/frontend-repl/src/turn_tests.rs
+expression: t
+---
+● echo hi
+? echo hi
+  echo needs approval
+  y yes · n no · a always allow `echo:*` · Esc no › always
+  save `echo:*` to .ch/config.toml for future sessions? [y/N] saved
+  ⎿ echo: 1 line
+
+done
+  2.4k in · 68 out · <time>
+--- tool results
+hi (error: false)
+--- saved ["echo:*"]
+--- .ch/config.toml
+[plugins.safety]
+allow = ["echo:*"]

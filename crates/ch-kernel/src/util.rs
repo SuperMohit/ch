@@ -22,6 +22,28 @@ pub fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|&b| b == 0)
 }
 
+/// The first line of `s` after leading whitespace, without trailing whitespace.
+pub fn first_line(s: &str) -> &str {
+    s.trim().lines().next().unwrap_or("").trim_end()
+}
+
+/// Added and removed lines in a unified diff (file headers excluded).
+pub fn diff_counts(diff: &str) -> (usize, usize) {
+    let mut added = 0;
+    let mut removed = 0;
+    for line in diff.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            added += 1;
+        } else if line.starts_with('-') {
+            removed += 1;
+        }
+    }
+    (added, removed)
+}
+
 /// Wraps text in a `<system-reminder>` tag.
 pub fn system_reminder(text: &str) -> String {
     format!("<system-reminder>\n{}\n</system-reminder>", text.trim())
