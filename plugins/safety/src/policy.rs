@@ -175,10 +175,13 @@ impl Policy {
         if let Some(d) = self.deny_or_ask(tool, &targets) {
             return d;
         }
+        // Allow rules see only the resolved path: `src/**` matches the raw
+        // `src/../.git/hooks/pre-commit`.
+        let allow_targets = [rel.as_str()];
         let writes = WRITE_TOOLS.contains(&tool);
         if writes && self.mode != Mode::Bypass && is_sensitive(Path::new(&rel)) {
             // Only a rule naming the path (not a bare `edit_file`) skips the question.
-            if self.allowed(tool, &targets, true) {
+            if self.allowed(tool, &allow_targets, true) {
                 return Decision::Allow;
             }
             return Decision::ask(
@@ -186,7 +189,7 @@ impl Policy {
                 Some(format!("{tool}:{}", globset::escape(&rel))),
             );
         }
-        if self.allowed(tool, &targets, false) {
+        if self.allowed(tool, &allow_targets, false) {
             return Decision::Allow;
         }
         if read_only && !writes {
@@ -268,7 +271,8 @@ impl Policy {
         if let Some(d) = self.deny_or_ask("web_fetch", &targets) {
             return d;
         }
-        if self.allowed("web_fetch", &targets, false) || self.mode == Mode::Bypass {
+        let allow_targets: Vec<&str> = normalized.as_deref().into_iter().collect();
+        if self.allowed("web_fetch", &allow_targets, false) || self.mode == Mode::Bypass {
             return Decision::Allow;
         }
         // Network access is not an edit, so accept-edits still asks: a fetched page
@@ -522,6 +526,20 @@ allow = ["edit_file"]"#,
         assert!(is_ask(&edit(&p, ".env.local")));
         let p = policy(&f, r#"allow = ["edit_file:.env"]"#);
         assert_eq!(edit(&p, ".env"), Decision::Allow);
+    }
+
+    #[test]
+    fn allow_rules_match_the_resolved_path() {
+        let f = fixture();
+        let p = policy(&f, r#"allow = ["edit_file:src/**"]"#);
+        assert_eq!(edit(&p, "src/main.rs"), Decision::Allow);
+        assert_eq!(edit(&p, "src/../src/main.rs"), Decision::Allow);
+        let d = edit(&p, "src/../.git/hooks/pre-commit");
+        assert_eq!(key(&d), Some("edit_file:.git/hooks/pre-commit"));
+        assert!(is_ask(&edit(&p, "src/../.env")));
+        assert_eq!(key(&edit(&p, "src/../Cargo.toml")), Some("edit_file"));
+        let p = policy(&f, r#"deny = ["edit_file:src/../**"]"#);
+        assert!(is_deny(&edit(&p, "src/../Cargo.toml")));
     }
 
     #[test]

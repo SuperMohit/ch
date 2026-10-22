@@ -39,6 +39,8 @@ pub struct Parsed {
     pub segments: Vec<Segment>,
     /// Segments found inside substitutions and `sh -c` strings, at any depth.
     pub nested: Vec<Segment>,
+    /// Something is nested deeper than [`MAX_DEPTH`], so not every part was seen.
+    pub too_deep: bool,
 }
 
 impl Parsed {
@@ -59,7 +61,7 @@ pub fn parse(command: &str) -> Parsed {
 }
 
 fn parse_into(command: &str, depth: usize, out: &mut Parsed, nested: bool) {
-    let mut lx = Lexer::new(command, depth);
+    let mut lx = Lexer::new(command);
     lx.run();
     let mut inner = std::mem::take(&mut lx.inner);
     let segments = std::mem::take(&mut lx.segments);
@@ -73,6 +75,8 @@ fn parse_into(command: &str, depth: usize, out: &mut Parsed, nested: bool) {
         for sub in inner.drain(..) {
             parse_into(&sub, depth + 1, out, true);
         }
+    } else if !inner.is_empty() || segments.iter().any(|s| shell_script_arg(s).is_some()) {
+        out.too_deep = true;
     }
     if nested {
         out.nested.extend(segments);
@@ -113,7 +117,6 @@ struct Lexer<'a> {
     src: &'a str,
     chars: Vec<(usize, char)>,
     pos: usize,
-    depth: usize,
     segments: Vec<Segment>,
     /// Command text found inside substitutions.
     inner: Vec<String>,
@@ -129,12 +132,11 @@ struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-    fn new(src: &'a str, depth: usize) -> Self {
+    fn new(src: &'a str) -> Self {
         Self {
             src,
             chars: src.char_indices().collect(),
             pos: 0,
-            depth,
             segments: Vec::new(),
             inner: Vec::new(),
             seg_start: 0,
@@ -401,9 +403,7 @@ impl<'a> Lexer<'a> {
         for ch in text.chars() {
             self.push_char(ch);
         }
-        if self.depth < MAX_DEPTH {
-            self.inner.push(body);
-        }
+        self.inner.push(body);
     }
 
     fn backtick(&mut self) {
@@ -428,9 +428,7 @@ impl<'a> Lexer<'a> {
         for ch in text.chars() {
             self.push_char(ch);
         }
-        if self.depth < MAX_DEPTH {
-            self.inner.push(body);
-        }
+        self.inner.push(body);
     }
 
     /// After a newline, skips the bodies of any pending heredocs.
@@ -500,13 +498,15 @@ impl<'a> Cmd<'a> {
             }
             let Some(w) = words.get(i) else { break };
             if WRAPPERS.contains(&basename(w)) {
-                // Skip the wrapper and its options / numeric arguments.
                 let mut j = i + 1;
                 while j < words.len()
                     && (words[j].starts_with('-')
                         || is_assignment(&words[j])
                         || words[j].chars().next().is_some_and(|c| c.is_ascii_digit()))
                 {
+                    if is_assignment(&words[j]) {
+                        assignments.push(words[j].as_str());
+                    }
                     j += 1;
                 }
                 if j >= words.len() {
@@ -686,6 +686,12 @@ pub const DENY_LIST: &[DenyRule] = &[
         reason: "Piping a downloaded script into a shell is not allowed. Download it to a \
                  file, read it, and ask the user before running it.",
     },
+    DenyRule {
+        name: "nested too deeply",
+        check: Check::Command(|_, parsed| parsed.too_deep),
+        reason: "The command nests substitutions or `sh -c` scripts too deeply for the \
+                 deny list to check every part. Split it into simpler commands.",
+    },
 ];
 
 /// The first deny-list entry `command` hits.
@@ -779,7 +785,7 @@ fn pipes_download_to_shell(_command: &str, parsed: &Parsed) -> bool {
 const READ_ONLY_PROGRAMS: &[&str] = &[
     "ls", "pwd", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "echo", "which", "file",
     "stat", "du", "df", "whoami", "uname", "basename", "dirname", "realpath", "readlink", "nl",
-    "true", "false", "cmp", "diff", "printenv", "id", "cd", "type", "tac", "cut", "jq",
+    "true", "false", "cmp", "diff", "id", "cd", "type", "tac", "cut", "jq",
 ];
 
 /// `git` subcommands that only read.
@@ -801,11 +807,11 @@ pub fn segment_is_read_only(seg: &Segment) -> bool {
         return false;
     }
     let cmd = Cmd::of(seg);
-    if cmd
-        .assignments
-        .iter()
-        .any(|a| a.starts_with("LD_") || a.starts_with("DYLD_"))
-    {
+    // Environment variables can make an allowlisted program run another one
+    // (`GIT_CONFIG_*` setting `core.fsmonitor`, `HOME` pointing git at another
+    // `.gitconfig`, `LD_PRELOAD`, `RUSTC_WRAPPER`), so only locale and display
+    // settings keep a command read-only.
+    if !cmd.assignments.iter().all(|a| is_display_assignment(a)) {
         return false;
     }
     let p = cmd.program;
@@ -827,7 +833,6 @@ pub fn segment_is_read_only(seg: &Segment) -> bool {
         "tree" => !cmd.has_arg(|a| a == "-o"),
         "sort" => !cmd.has_arg(|a| a == "-o" || a.starts_with("--output")),
         "date" => !cmd.has_arg(|a| a == "-s" || a.starts_with("--set")),
-        "env" => cmd.args.is_empty(),
         "git" => git_is_read_only(&cmd),
         "cargo" => matches!(
             cmd.args.first().map(String::as_str),
@@ -835,6 +840,15 @@ pub fn segment_is_read_only(seg: &Segment) -> bool {
         ),
         _ => false,
     }
+}
+
+fn is_display_assignment(assignment: &str) -> bool {
+    let name = assignment.split_once('=').map_or(assignment, |(n, _)| n);
+    name.starts_with("LC_")
+        || matches!(
+            name,
+            "LANG" | "LANGUAGE" | "TZ" | "NO_COLOR" | "TERM" | "COLUMNS" | "LINES"
+        )
 }
 
 fn git_is_read_only(cmd: &Cmd<'_>) -> bool {
@@ -993,6 +1007,9 @@ mod tests {
             "echo $(sudo id)",
             "sh -c 'git push'",
             "timeout 5 rm -rf /",
+            "echo $(echo $(echo $(echo $(echo $(git push)))))",
+            "echo $(echo $(echo $(echo $(echo $(ls)))))",
+            "eval eval eval eval eval git push",
         ] {
             assert!(deny(cmd).is_some(), "should deny: {cmd}");
         }
@@ -1009,6 +1026,7 @@ mod tests {
             "curl https://example.com -o out.html",
             "echo 'git push'",
             "grep -r sudo .",
+            "echo $(echo $(echo $(echo $(ls))))",
         ] {
             assert_eq!(deny(cmd), None, "should not deny: {cmd}");
         }
@@ -1032,10 +1050,12 @@ mod tests {
             "cat a.txt | grep x | wc -l",
             "cd src && ls",
             "cargo check",
-            "env",
             "echo hi 2>&1",
             "ls >/dev/null",
             "head -n 5 a; tail b",
+            "LANG=C ls",
+            "LC_ALL=C sort a",
+            "NO_COLOR=1 git log",
         ] {
             assert!(ro(cmd), "should be read-only: {cmd}");
         }
@@ -1055,6 +1075,14 @@ mod tests {
             "npm test",
             "sort -o out in",
             "LD_PRELOAD=x.so ls",
+            "env LD_PRELOAD=x.so cat a",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=x git status",
+            "env GIT_CONFIG_GLOBAL=./x git status",
+            "HOME=. git status",
+            "RUSTC_WRAPPER=./x cargo check",
+            "env",
+            "printenv",
+            "printenv ANTHROPIC_API_KEY",
         ] {
             assert!(!ro(cmd), "should not be read-only: {cmd}");
         }

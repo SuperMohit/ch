@@ -175,11 +175,11 @@ fn block(b: &ContentBlock) -> Option<Value> {
         ContentBlock::Thinking {
             thinking,
             signature,
-        } => match signature.as_deref() {
-            Some(sig) => json!({ "type": "thinking", "thinking": thinking, "signature": sig }),
+        } => {
             // Unsigned thinking (from another provider) can't be replayed.
-            None => return None,
-        },
+            let sig = signature.as_deref()?;
+            json!({ "type": "thinking", "thinking": thinking, "signature": sig })
+        }
         ContentBlock::RedactedThinking { data } => {
             json!({ "type": "redacted_thinking", "data": data })
         }

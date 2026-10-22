@@ -178,7 +178,7 @@ impl SessionStore {
                 out.push(m);
             }
         }
-        out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        out.sort_by_key(|m| std::cmp::Reverse(m.updated_at));
         Ok(out)
     }
 
