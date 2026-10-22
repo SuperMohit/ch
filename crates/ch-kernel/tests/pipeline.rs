@@ -957,8 +957,9 @@ async fn saved_sessions_keep_event_ids_and_turn_numbers() {
         .build()
         .unwrap();
     assert_eq!(s2.turn(), 3);
-    s2.history_mut().push(4, Message::user("more"));
-    assert_eq!(s2.history().last().unwrap().id, 4);
+    s2.run_turn("third").await;
+    let last = s2.history().last().unwrap();
+    assert_eq!((last.id, last.turn), (5, 4));
     // Saves go through a temp file of their own, which is renamed away.
     for entry in std::fs::read_dir(dir.path()).unwrap() {
         let name = entry.unwrap().file_name();

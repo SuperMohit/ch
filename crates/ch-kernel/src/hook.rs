@@ -55,17 +55,6 @@ pub enum HookPoint {
 }
 
 impl HookPoint {
-    pub const ALL: [HookPoint; 8] = [
-        Self::SessionStart,
-        Self::UserPrompt,
-        Self::BeforeModel,
-        Self::AfterModel,
-        Self::PreTool,
-        Self::PostTool,
-        Self::TurnEnd,
-        Self::SessionEnd,
-    ];
-
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::SessionStart => "session_start",

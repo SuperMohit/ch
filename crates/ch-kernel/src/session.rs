@@ -171,8 +171,8 @@ impl SessionBuilder {
         let provider = registry.provider(&kcfg.model.provider)?;
         let summ = kcfg.model.summarizer.clone().unwrap_or_default();
         let summarizer = match &summ.provider {
-            Some(id) => Some(registry.provider(id)?),
-            None => Some(provider.clone()),
+            Some(id) => registry.provider(id)?,
+            None => provider.clone(),
         };
         let summarizer_model = summ.id.unwrap_or_else(|| kcfg.model.id.clone());
         let context = registry.context(kcfg.select.context.as_deref())?;
@@ -241,7 +241,6 @@ impl SessionBuilder {
             started: false,
             ended: false,
             pending_reminders: Vec::new(),
-            peak_prompt_tokens: 0,
         })
     }
 }
@@ -271,7 +270,7 @@ pub struct Session {
     events: EventBus,
     provider: Arc<dyn ModelProvider>,
     model: String,
-    summarizer: Option<Arc<dyn ModelProvider>>,
+    summarizer: Arc<dyn ModelProvider>,
     summarizer_model: String,
     context: Arc<dyn ContextStrategy>,
     executor: Option<Arc<dyn Executor>>,
@@ -292,7 +291,6 @@ pub struct Session {
     ended: bool,
     /// One-shot reminders for the next model call (from after_model hooks).
     pending_reminders: Vec<String>,
-    peak_prompt_tokens: u64,
 }
 
 /// A tool call after pre_tool hooks and approval.
@@ -335,9 +333,6 @@ impl Session {
     pub fn history(&self) -> &History {
         &self.history
     }
-    pub fn history_mut(&mut self) -> &mut History {
-        &mut self.history
-    }
     pub fn events(&self) -> &EventBus {
         &self.events
     }
@@ -368,12 +363,6 @@ impl Session {
     }
     pub fn store(&self) -> Option<&SessionStore> {
         self.store.as_ref()
-    }
-    pub fn peak_prompt_tokens(&self) -> u64 {
-        self.peak_prompt_tokens
-    }
-    pub fn context_strategy_id(&self) -> &str {
-        self.context.id()
     }
 
     pub fn context_window(&self) -> u64 {
@@ -952,14 +941,13 @@ impl Session {
 
         let actual = response.usage.prompt_tokens();
         self.calibrator.observe(raw_est, actual);
-        self.peak_prompt_tokens = self.peak_prompt_tokens.max(actual);
-        self.record_usage(&response.usage, "agent");
+        self.record_usage(&response.usage);
         Ok(Ok(response))
     }
 
     /// Records usage and cost from any model call (plugins making their own calls,
     /// like summaries, should report through events; the kernel only counts its own).
-    fn record_usage(&mut self, usage: &Usage, purpose: &str) {
+    fn record_usage(&mut self, usage: &Usage) {
         self.usage.add(usage);
         let cost = self
             .for_configured_model(self.kcfg.model.pricing)
@@ -970,7 +958,7 @@ impl Session {
         self.events.emit(AgentEvent::Usage {
             usage: *usage,
             cost,
-            purpose: purpose.to_string(),
+            purpose: "agent".into(),
         });
     }
 
@@ -1296,16 +1284,6 @@ impl Session {
             tool: tool.map(str::to_string),
             reason: reason.to_string(),
         });
-    }
-
-    /// The approver in use, if any.
-    pub fn approver(&self) -> Option<&Arc<dyn Approver>> {
-        self.approver.as_ref()
-    }
-
-    /// Hooks in execution order.
-    pub fn hooks(&self) -> &[Arc<dyn Hook>] {
-        &self.hooks
     }
 }
 
