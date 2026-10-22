@@ -274,6 +274,10 @@ pub async fn run_with(
     if let Some(snap) = snapshot {
         builder = builder.restore(snap);
     }
+    if let Some(model) = &cli.model {
+        // `--model` also applies to a resumed session, not only to new ones.
+        builder = builder.model(model.clone());
+    }
     let session = builder.build()?;
     frontend.run(session).await
 }

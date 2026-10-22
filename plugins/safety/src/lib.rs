@@ -114,7 +114,7 @@ impl Hook for PermissionHook {
         -100
     }
 
-    async fn on(&self, event: &mut HookEvent, _cx: &Cx) -> HookDecision {
+    async fn on(&self, event: &HookEvent, _cx: &Cx) -> HookDecision {
         let HookEvent::PreTool { call, read_only } = event else {
             return HookDecision::Continue;
         };

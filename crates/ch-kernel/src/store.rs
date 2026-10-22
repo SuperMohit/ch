@@ -21,6 +21,9 @@ pub struct SessionMeta {
     pub updated_at: DateTime<Utc>,
     pub workspace: String,
     pub model: String,
+    /// Id of the model provider `model` ran on; `None` in files saved before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// First user prompt, shortened.
     pub title: String,
     pub turns: u32,
@@ -95,28 +98,38 @@ impl SessionStore {
         fs::create_dir_all(&self.dir)
             .with_context(|| format!("creating {}", self.dir.display()))?;
         let path = self.path_for(&snap.meta.id);
-        let tmp = path.with_extension("jsonl.tmp");
-        {
-            let mut f = std::io::BufWriter::new(fs::File::create(&tmp)?);
-            writeln!(
-                f,
-                "{}",
-                serde_json::to_string(&Line::Meta(snap.meta.clone()))?
-            )?;
-            for ev in snap.history.events() {
-                writeln!(f, "{}", serde_json::to_string(&Line::Event(ev.clone()))?)?;
-            }
-            writeln!(
-                f,
-                "{}",
-                serde_json::to_string(&Line::Totals {
-                    usage: snap.usage,
-                    cost: snap.cost
-                })?
-            )?;
-            f.flush()?;
+        // A temp file of its own, so two processes saving the same session can't
+        // interleave their writes.
+        let tmp = path.with_extension(format!("jsonl.{}.tmp", uuid::Uuid::new_v4().simple()));
+        let written = Self::write(&tmp, snap);
+        if written.is_err() {
+            let _ = fs::remove_file(&tmp);
         }
+        written?;
         fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
+    fn write(tmp: &Path, snap: &SessionSnapshot) -> anyhow::Result<()> {
+        let mut f = std::io::BufWriter::new(fs::File::create(tmp)?);
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string(&Line::Meta(snap.meta.clone()))?
+        )?;
+        for ev in snap.history.events() {
+            writeln!(f, "{}", serde_json::to_string(&Line::Event(ev.clone()))?)?;
+        }
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string(&Line::Totals {
+                usage: snap.usage,
+                cost: snap.cost
+            })?
+        )?;
+        // On disk before the rename, so a crash can't leave an empty session file.
+        f.into_inner()?.sync_all()?;
         Ok(())
     }
 
@@ -144,13 +157,9 @@ impl SessionStore {
             }
         }
         let meta = meta.with_context(|| format!("{} has no meta line", path.display()))?;
-        let mut history = History::new();
-        for e in events {
-            history.push(e.turn, e.message);
-        }
         Ok(SessionSnapshot {
             meta,
-            history,
+            history: History::from_events(events),
             usage,
             cost,
         })
@@ -208,6 +217,7 @@ mod tests {
                 updated_at: now,
                 workspace: "/tmp/my proj".into(),
                 model: "m".into(),
+                provider: Some("p".into()),
                 title: "hi".into(),
                 turns: 1,
             },

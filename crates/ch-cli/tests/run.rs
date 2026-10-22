@@ -65,7 +65,7 @@ impl Hook for Watch {
     fn points(&self) -> &[HookPoint] {
         &[HookPoint::PreTool, HookPoint::PostTool]
     }
-    async fn on(&self, _event: &mut HookEvent, _cx: &Cx) -> HookDecision {
+    async fn on(&self, _event: &HookEvent, _cx: &Cx) -> HookDecision {
         HookDecision::Continue
     }
 }

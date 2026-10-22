@@ -26,7 +26,16 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 ### Fixed
 
+- `ch -c --model <id>` uses the given model. Before, a resumed session kept its saved model. A session saved with a different provider from the configured one now resumes on the configured model, instead of sending the old provider's model id.
+- `[model] context_window` and `pricing` apply only to `model.id`, not to a model picked with `/model` or kept from a resumed session.
+- Hooks at the end of a turn run exactly once. Before, they ran twice when one of them stopped the turn, and not at all after a refusal or a blocked prompt.
+- When a hook stops the turn or the user cancels it, the remaining read-only calls from the same response are no longer run.
+- A note a hook adds after the model's final answer is no longer sent with the next prompt.
+- Session files keep their event ids and turn numbers when they are resumed. Saving writes to a temp file of its own and flushes it to disk before replacing the session file.
+
 ### Security
+
+- Hooks get the event read-only, so a `Rewrite` decision is the only way to change a tool call. Before, a hook could edit the input in place after the permission check had approved it.
 
 - A path-scoped allow rule such as `edit_file:src/**` no longer covers paths that leave its directory through `..`. Before, `src/../.git/hooks/pre-commit` was written without asking, even though it is a sensitive path. Allow rules now match only the resolved path, and for `web_fetch` the normalized URL.
 - Environment variables in front of a read-only command now make it ask, except locale and display settings (`LANG`, `LC_*`, `TZ`, `NO_COLOR`, `TERM`, `COLUMNS`, `LINES`). Before, `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=<cmd> git status` ran `<cmd>` without asking. Assignments after `env` (`env LD_PRELOAD=x cat`) are now checked too.

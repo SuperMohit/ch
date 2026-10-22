@@ -107,6 +107,7 @@ pub struct SessionBuilder {
     store: Option<SessionStore>,
     restore: Option<SessionSnapshot>,
     events: Option<EventBus>,
+    model: Option<String>,
 }
 
 impl SessionBuilder {
@@ -120,7 +121,14 @@ impl SessionBuilder {
             store: None,
             restore: None,
             events: None,
+            model: None,
         }
+    }
+
+    /// Model id; overrides `model.id` and the model of a restored session.
+    pub fn model(mut self, id: impl Into<String>) -> Self {
+        self.model = Some(id.into());
+        self
     }
 
     pub fn workspace(mut self, workspace: impl Into<PathBuf>) -> Self {
@@ -181,14 +189,15 @@ impl SessionBuilder {
         let workspace = Arc::new(self.workspace);
 
         let now = Utc::now();
-        let (id, history, usage, cost, created_at, model) = match self.restore {
+        let (id, history, usage, cost, created_at, model, turn) = match self.restore {
             Some(snap) => (
-                snap.meta.id,
+                snap.meta.id.clone(),
                 snap.history,
                 snap.usage,
                 snap.cost,
                 snap.meta.created_at,
-                snap.meta.model,
+                restored_model(&snap.meta, provider.id(), &kcfg.model.id),
+                snap.meta.turns,
             ),
             None => (
                 self.id.unwrap_or_else(new_session_id),
@@ -197,9 +206,10 @@ impl SessionBuilder {
                 0.0,
                 now,
                 kcfg.model.id.clone(),
+                0,
             ),
         };
-        let turn = history.events().iter().map(|e| e.turn).max().unwrap_or(0);
+        let model = self.model.unwrap_or(model);
 
         Ok(Session {
             id,
@@ -233,6 +243,15 @@ impl SessionBuilder {
             pending_reminders: Vec::new(),
             peak_prompt_tokens: 0,
         })
+    }
+}
+
+/// The model to continue a saved session with: the saved one, unless it ran on another
+/// provider than the configured one (a `claude-*` id means nothing to OpenAI).
+fn restored_model(meta: &SessionMeta, provider: &str, configured: &str) -> String {
+    match &meta.provider {
+        Some(p) if p != provider => configured.to_string(),
+        _ => meta.model.clone(),
     }
 }
 
@@ -358,11 +377,15 @@ impl Session {
     }
 
     pub fn context_window(&self) -> u64 {
-        self.kcfg
-            .model
-            .context_window
+        self.for_configured_model(self.kcfg.model.context_window)
             .or_else(|| self.provider.context_window(&self.model))
             .unwrap_or(self.kcfg.agent.default_context_window)
+    }
+
+    /// A `[model]` setting such as `context_window` or `pricing` describes `model.id`,
+    /// so it doesn't apply after `/model` or a resume switched to another model.
+    fn for_configured_model<T>(&self, setting: Option<T>) -> Option<T> {
+        setting.filter(|_| self.model == self.kcfg.model.id)
     }
 
     /// Forgets the conversation (`/clear`). Usage totals are kept.
@@ -384,6 +407,7 @@ impl Session {
                 updated_at: Utc::now(),
                 workspace: self.workspace.to_string_lossy().to_string(),
                 model: self.model.clone(),
+                provider: Some(self.provider.id().to_string()),
                 title,
                 turns: self.turn,
             },
@@ -395,19 +419,13 @@ impl Session {
 
     /// Replaces this session's conversation with a saved one (`/resume`).
     pub fn restore(&mut self, snap: SessionSnapshot) {
+        self.model = restored_model(&snap.meta, self.provider.id(), &self.kcfg.model.id);
         self.id = snap.meta.id;
         self.created_at = snap.meta.created_at;
-        self.model = snap.meta.model;
+        self.turn = snap.meta.turns;
         self.history = snap.history;
         self.usage = snap.usage;
         self.cost = snap.cost;
-        self.turn = self
-            .history
-            .events()
-            .iter()
-            .map(|e| e.turn)
-            .max()
-            .unwrap_or(0);
         self.pending_reminders.clear();
     }
 
@@ -560,26 +578,20 @@ impl Session {
             prompt = text;
         }
         self.emit_notes(&outcome);
-        match outcome.verdict {
+        let denied = match outcome.verdict {
             Verdict::Deny { hook, reason } => {
                 self.emit_denied(&hook, None, &reason);
-                return self
-                    .finish_turn(TerminationReason::PromptDenied { reason }, 0, String::new())
-                    .await;
+                Some(TerminationReason::PromptDenied { reason })
             }
-            Verdict::Stop { hook, reason } => {
-                return self
-                    .finish_turn(
-                        TerminationReason::HookStop {
-                            source: hook,
-                            reason,
-                        },
-                        0,
-                        String::new(),
-                    )
-                    .await;
-            }
-            Verdict::Continue | Verdict::Ask { .. } => {}
+            Verdict::Stop { hook, reason } => Some(TerminationReason::HookStop {
+                source: hook,
+                reason,
+            }),
+            Verdict::Continue | Verdict::Ask { .. } => None,
+        };
+        if let Some(reason) = denied {
+            self.turn_end_hooks(&reason, 0, "", &cx0).await;
+            return self.finish_turn(reason, 0, String::new()).await;
         }
         let mut user = Message::user(prompt);
         for (_, note) in &outcome.notes {
@@ -590,6 +602,8 @@ impl Session {
         let max_steps = self.kcfg.agent.max_steps.max(1);
         let mut final_text = String::new();
         let mut step: u32 = 0;
+        // Whether turn_end hooks already ran for the way this turn ends.
+        let mut turn_end_ran = false;
         let reason = loop {
             if cancel.is_cancelled() {
                 break TerminationReason::Cancelled;
@@ -709,6 +723,7 @@ impl Session {
                 };
                 let outcome = run_hooks(&self.hooks, &mut ev, &cx).await;
                 self.emit_notes(&outcome);
+                turn_end_ran = true;
                 match outcome.verdict {
                     Verdict::Stop { hook, reason } => {
                         break TerminationReason::HookStop {
@@ -720,6 +735,8 @@ impl Session {
                         Some(notes) if !cancel.is_cancelled() => {
                             self.history
                                 .push(turn, Message::user(system_reminder(&notes)));
+                            // The turn goes on, so it hasn't ended yet.
+                            turn_end_ran = false;
                             continue;
                         }
                         _ => break TerminationReason::Done,
@@ -746,16 +763,28 @@ impl Session {
             }
         };
 
-        if reason != TerminationReason::Done {
+        if !turn_end_ran {
             let cx = self.cx(step, cancel.clone());
-            let mut ev = HookEvent::TurnEnd {
-                reason: reason.clone(),
-                steps: step,
-                final_text: final_text.clone(),
-            };
-            let _ = run_hooks(&self.hooks, &mut ev, &cx).await;
+            self.turn_end_hooks(&reason, step, &final_text, &cx).await;
         }
         self.finish_turn(reason, step, final_text).await
+    }
+
+    /// Runs turn_end hooks for a turn that ends anyway: their decisions can't change it.
+    async fn turn_end_hooks(
+        &self,
+        reason: &TerminationReason,
+        steps: u32,
+        final_text: &str,
+        cx: &Cx,
+    ) {
+        let mut ev = HookEvent::TurnEnd {
+            reason: reason.clone(),
+            steps,
+            final_text: final_text.to_string(),
+        };
+        let outcome = run_hooks(&self.hooks, &mut ev, cx).await;
+        self.emit_notes(&outcome);
     }
 
     async fn finish_turn(
@@ -765,6 +794,9 @@ impl Session {
         final_text: String,
     ) -> TurnResult {
         self.cancel.finish();
+        // Reminders from after_model hooks belong to this turn's next call, which
+        // won't happen.
+        self.pending_reminders.clear();
         self.events.emit(AgentEvent::TurnEnd {
             turn: self.turn,
             reason: reason.clone(),
@@ -929,7 +961,9 @@ impl Session {
     /// like summaries, should report through events; the kernel only counts its own).
     fn record_usage(&mut self, usage: &Usage, purpose: &str) {
         self.usage.add(usage);
-        let cost = self.kcfg.model.pricing.map(|p| p.cost(usage));
+        let cost = self
+            .for_configured_model(self.kcfg.model.pricing)
+            .map(|p| p.cost(usage));
         if let Some(c) = cost {
             self.cost += c;
         }
@@ -1030,21 +1064,26 @@ impl Session {
 
         let sem = Arc::new(Semaphore::new(self.kcfg.agent.max_parallel_readonly.max(1)));
         for batch in batches {
-            if cx.cancel.is_cancelled() || stop.is_some() {
-                let why = if stop.is_some() {
-                    "Not run: the turn was stopped by a hook."
-                } else {
-                    "Not run: the user cancelled the turn."
-                };
-                for call in batch {
-                    self.emit_tool_end(&call, &ToolOutput::error(why), 0);
-                    results.push(tool_result(&call.id, ToolOutput::error(why)));
-                }
-                continue;
-            }
-
             let mut prepared = Vec::with_capacity(batch.len());
             for call in batch {
+                // Checked per call, so a stop or a cancel also skips the rest of a
+                // read-only batch.
+                let skip = if stop.is_some() {
+                    Some("Not run: the turn was stopped by a hook.")
+                } else if cx.cancel.is_cancelled() {
+                    Some("Not run: the user cancelled the turn.")
+                } else {
+                    None
+                };
+                if let Some(why) = skip {
+                    prepared.push(Prepared::Done {
+                        call,
+                        output: ToolOutput::error(why),
+                        denied: true,
+                        notes: Vec::new(),
+                    });
+                    continue;
+                }
                 let (p, s) = self.prepare_call(call, cx).await;
                 if stop.is_none() {
                     stop = s;
@@ -1143,6 +1182,7 @@ impl Session {
             read_only: spec.read_only,
         };
         let outcome = run_hooks(&self.hooks, &mut ev, cx).await;
+        self.emit_notes(&outcome);
         let HookEvent::PreTool { call, .. } = ev else {
             unreachable!("hooks cannot change the event kind")
         };
