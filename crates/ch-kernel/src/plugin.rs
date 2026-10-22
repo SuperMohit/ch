@@ -131,18 +131,10 @@ impl RegisterCx<'_> {
             .push((self.plugin_id.clone(), Arc::new(h)));
     }
 
-    pub fn add_hook_arc(&mut self, h: Arc<dyn Hook>) {
-        self.builder.hooks.push((self.plugin_id.clone(), h));
-    }
-
     pub fn add_prompt(&mut self, p: impl PromptContributor + 'static) {
         self.builder
             .prompts
             .push((self.plugin_id.clone(), Arc::new(p)));
-    }
-
-    pub fn add_prompt_arc(&mut self, p: Arc<dyn PromptContributor>) {
-        self.builder.prompts.push((self.plugin_id.clone(), p));
     }
 
     pub fn add_context(&mut self, c: impl ContextStrategy + 'static) {
@@ -155,10 +147,6 @@ impl RegisterCx<'_> {
         self.builder
             .commands
             .push((self.plugin_id.clone(), Arc::new(c)));
-    }
-
-    pub fn add_command_arc(&mut self, c: Arc<dyn Command>) {
-        self.builder.commands.push((self.plugin_id.clone(), c));
     }
 
     pub fn add_sink(&mut self, s: impl EventSink + 'static) {
@@ -179,18 +167,10 @@ impl RegisterCx<'_> {
             .push((self.plugin_id.clone(), Arc::new(a)));
     }
 
-    pub fn add_approver_arc(&mut self, a: Arc<dyn Approver>) {
-        self.builder.approvers.push((self.plugin_id.clone(), a));
-    }
-
     pub fn add_frontend(&mut self, f: impl Frontend + 'static) {
         self.builder
             .frontends
             .push((self.plugin_id.clone(), Arc::new(f)));
-    }
-
-    pub fn add_frontend_arc(&mut self, f: Arc<dyn Frontend>) {
-        self.builder.frontends.push((self.plugin_id.clone(), f));
     }
 
     /// Shares typed state with other plugins. Errors if the type is already provided.

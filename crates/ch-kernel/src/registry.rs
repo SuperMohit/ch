@@ -65,12 +65,6 @@ pub struct Registry {
     pub services: Arc<Services>,
 }
 
-/// How a single-slot extension point was resolved.
-pub enum Selection<T: ?Sized> {
-    Found(Arc<T>),
-    None,
-}
-
 impl RegistryBuilder {
     /// Registers the enabled subset of `plugins` and validates the result.
     ///
@@ -203,26 +197,18 @@ impl RegistryBuilder {
     }
 
     fn finish(mut self, plugins: Vec<PluginStatus>) -> anyhow::Result<Registry> {
-        // Commands that yield give way to any other command with the same name.
-        let names: Vec<(String, bool)> = self
+        let firm: HashSet<String> = self
             .commands
             .iter()
-            .map(|(_, c)| (c.name().to_string(), c.yields_on_conflict()))
+            .filter(|(_, c)| !c.yields_on_conflict())
+            .map(|(_, c)| c.name().to_string())
             .collect();
-        let mut i = 0;
         self.commands.retain(|(plugin, c)| {
-            let (name, yields) = &names[i];
-            i += 1;
-            let clash = names
-                .iter()
-                .enumerate()
-                .any(|(j, (n, y))| j != i - 1 && n == name && !*y);
-            if *yields && clash {
+            let hidden = c.yields_on_conflict() && firm.contains(c.name());
+            if hidden {
                 tracing::warn!(plugin = %plugin, command = %c.name(), "command hidden by another plugin's command of the same name");
-                false
-            } else {
-                true
             }
+            !hidden
         });
         check_unique("tool", self.tools.iter().map(|(p, t)| (p, t.spec().name)))?;
         check_unique(
@@ -335,12 +321,12 @@ fn pick<T: ?Sized>(
     items: &Tagged<T>,
     id_of: impl Fn(&T) -> &str,
     wanted: Option<&str>,
-) -> anyhow::Result<Selection<T>> {
+) -> anyhow::Result<Option<Arc<T>>> {
     match wanted {
         Some(w) => items
             .iter()
             .find(|(_, x)| id_of(x) == w)
-            .map(|(_, x)| Selection::Found(x.clone()))
+            .map(|(_, x)| Some(x.clone()))
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "no {kind} named `{w}` (available: {})",
@@ -352,8 +338,8 @@ fn pick<T: ?Sized>(
                 )
             }),
         None => match items.len() {
-            0 => Ok(Selection::None),
-            1 => Ok(Selection::Found(items[0].1.clone())),
+            0 => Ok(None),
+            1 => Ok(Some(items[0].1.clone())),
             _ => bail!(
                 "several {kind}s are registered ({}); choose one with `select.{}`",
                 items
@@ -406,36 +392,22 @@ impl Registry {
     /// The context strategy; the passthrough strategy when no plugin provides one.
     pub fn context(&self, wanted: Option<&str>) -> anyhow::Result<Arc<dyn ContextStrategy>> {
         Ok(
-            match pick("context strategy", &self.contexts, |c| c.id(), wanted)? {
-                Selection::Found(c) => c,
-                Selection::None => Arc::new(PassthroughContext),
-            },
+            pick("context strategy", &self.contexts, |c| c.id(), wanted)?
+                .unwrap_or_else(|| Arc::new(PassthroughContext)),
         )
     }
 
     pub fn executor(&self, wanted: Option<&str>) -> anyhow::Result<Option<Arc<dyn Executor>>> {
-        Ok(
-            match pick("executor", &self.executors, |e| e.id(), wanted)? {
-                Selection::Found(e) => Some(e),
-                Selection::None => None,
-            },
-        )
+        pick("executor", &self.executors, |e| e.id(), wanted)
     }
 
     pub fn approver(&self, wanted: Option<&str>) -> anyhow::Result<Option<Arc<dyn Approver>>> {
-        Ok(
-            match pick("approver", &self.approvers, |a| a.id(), wanted)? {
-                Selection::Found(a) => Some(a),
-                Selection::None => None,
-            },
-        )
+        pick("approver", &self.approvers, |a| a.id(), wanted)
     }
 
     pub fn frontend(&self, wanted: Option<&str>) -> anyhow::Result<Arc<dyn Frontend>> {
-        match pick("frontend", &self.frontends, |f| f.id(), wanted)? {
-            Selection::Found(f) => Ok(f),
-            Selection::None => bail!("no frontend plugin is enabled"),
-        }
+        pick("frontend", &self.frontends, |f| f.id(), wanted)?
+            .context("no frontend plugin is enabled")
     }
 
     pub fn enabled_plugin_ids(&self) -> Vec<String> {
