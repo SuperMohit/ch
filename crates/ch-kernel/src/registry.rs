@@ -316,8 +316,10 @@ fn topo_order(statuses: &[PluginStatus]) -> anyhow::Result<Vec<String>> {
     Ok(done)
 }
 
+/// `key` is the `select.<key>` setting that chooses among `items`.
 fn pick<T: ?Sized>(
     kind: &str,
+    key: &str,
     items: &Tagged<T>,
     id_of: impl Fn(&T) -> &str,
     wanted: Option<&str>,
@@ -341,13 +343,12 @@ fn pick<T: ?Sized>(
             0 => Ok(None),
             1 => Ok(Some(items[0].1.clone())),
             _ => bail!(
-                "several {kind}s are registered ({}); choose one with `select.{}`",
+                "several {kind}s are registered ({}); choose one with `select.{key}`",
                 items
                     .iter()
                     .map(|(_, x)| id_of(x))
                     .collect::<Vec<_>>()
                     .join(", "),
-                kind.replace(' ', "_")
             ),
         },
     }
@@ -391,22 +392,26 @@ impl Registry {
 
     /// The context strategy; the passthrough strategy when no plugin provides one.
     pub fn context(&self, wanted: Option<&str>) -> anyhow::Result<Arc<dyn ContextStrategy>> {
-        Ok(
-            pick("context strategy", &self.contexts, |c| c.id(), wanted)?
-                .unwrap_or_else(|| Arc::new(PassthroughContext)),
-        )
+        Ok(pick(
+            "context strategy",
+            "context",
+            &self.contexts,
+            |c| c.id(),
+            wanted,
+        )?
+        .unwrap_or_else(|| Arc::new(PassthroughContext)))
     }
 
     pub fn executor(&self, wanted: Option<&str>) -> anyhow::Result<Option<Arc<dyn Executor>>> {
-        pick("executor", &self.executors, |e| e.id(), wanted)
+        pick("executor", "executor", &self.executors, |e| e.id(), wanted)
     }
 
     pub fn approver(&self, wanted: Option<&str>) -> anyhow::Result<Option<Arc<dyn Approver>>> {
-        pick("approver", &self.approvers, |a| a.id(), wanted)
+        pick("approver", "approver", &self.approvers, |a| a.id(), wanted)
     }
 
     pub fn frontend(&self, wanted: Option<&str>) -> anyhow::Result<Arc<dyn Frontend>> {
-        pick("frontend", &self.frontends, |f| f.id(), wanted)?
+        pick("frontend", "frontend", &self.frontends, |f| f.id(), wanted)?
             .context("no frontend plugin is enabled")
     }
 
