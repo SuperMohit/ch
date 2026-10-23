@@ -210,6 +210,11 @@ impl RegistryBuilder {
             }
             !hidden
         });
+        for (plugin, tool) in &self.tools {
+            tool.spec()
+                .validate()
+                .map_err(|e| anyhow::anyhow!("plugin `{plugin}`: {e}"))?;
+        }
         check_unique("tool", self.tools.iter().map(|(p, t)| (p, t.spec().name)))?;
         check_unique(
             "command",

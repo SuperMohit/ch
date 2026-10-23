@@ -39,6 +39,9 @@ pub fn assert_tool_conforms(tool: &dyn Tool) {
 
 /// [`assert_tool_conforms`] for a bare spec (external tools, MCP tools).
 pub fn assert_spec_conforms(spec: &ToolSpec) {
+    if let Err(e) = spec.validate() {
+        panic!("{e}");
+    }
     let name = &spec.name;
     if !is_snake_case(name) {
         panic!(
@@ -324,10 +327,17 @@ mod tests {
 
     #[test]
     fn bad_names() {
-        for n in ["BadName", "bad-name", "bad__name", "_x", "x_", ""] {
+        for n in ["BadName", "bad-name", "bad__name", "_x", "x_"] {
             let t = spec_with(|s| s.name = n.into());
             let msg = panics(move || assert_tool_conforms(&t));
             assert!(msg.contains("snake_case"), "{msg}");
+        }
+        // What model APIs reject is checked by the kernel first.
+        for n in ["", "a.b", &"x".repeat(65)] {
+            let n = n.to_string();
+            let t = spec_with(move |s| s.name = n.clone());
+            let msg = panics(move || assert_tool_conforms(&t));
+            assert!(msg.contains("1 to 64"), "{msg}");
         }
     }
 
