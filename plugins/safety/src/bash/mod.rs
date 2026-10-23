@@ -33,36 +33,31 @@ pub struct Segment {
     pub raw: String,
     /// Words with quotes removed (redirections excluded).
     pub words: Vec<String>,
-    /// The operator joining this segment to the previous one.
     pub op_before: Option<Op>,
-    /// Contains `$(...)`, backticks or `<(...)`.
+    /// Contains `$(...)`, backticks, `<(...)` or `>(...)`.
     pub has_substitution: bool,
     /// Redirects output to a file (`>`/`>>` to anything but `/dev/null` or an fd).
     pub writes_file: bool,
 }
 
-/// A split command line.
 #[derive(Debug, Clone, Default)]
 pub struct Parsed {
     /// Top-level segments, in order.
     pub segments: Vec<Segment>,
-    /// Segments found inside substitutions and `sh -c` strings, at any depth.
+    /// Segments found inside substitutions, `sh -c` strings and `eval` arguments, at any depth.
     pub nested: Vec<Segment>,
     /// Something is nested deeper than [`MAX_DEPTH`], so not every part was seen.
     pub too_deep: bool,
 }
 
 impl Parsed {
-    /// Top-level and nested segments.
     pub fn all(&self) -> impl Iterator<Item = &Segment> {
         self.segments.iter().chain(self.nested.iter())
     }
 }
 
-/// Nesting depth for substitutions and `sh -c` strings.
 const MAX_DEPTH: usize = 4;
 
-/// Splits `command` into segments.
 pub fn parse(command: &str) -> Parsed {
     let mut parsed = Parsed::default();
     parse_into(command, 0, &mut parsed, false);
@@ -70,18 +65,19 @@ pub fn parse(command: &str) -> Parsed {
 }
 
 fn parse_into(command: &str, depth: usize, out: &mut Parsed, nested: bool) {
-    let (segments, inner) = lexer::split(command);
-    // Look inside `sh -c '...'` and `eval ...`.
+    let (segments, substitution_bodies) = lexer::split(command);
     if depth < MAX_DEPTH {
         for seg in &segments {
             if let Some(script) = shell_script_arg(seg) {
                 parse_into(&script, depth + 1, out, true);
             }
         }
-        for sub in inner {
+        for sub in substitution_bodies {
             parse_into(&sub, depth + 1, out, true);
         }
-    } else if !inner.is_empty() || segments.iter().any(|s| shell_script_arg(s).is_some()) {
+    } else if !substitution_bodies.is_empty()
+        || segments.iter().any(|s| shell_script_arg(s).is_some())
+    {
         out.too_deep = true;
     }
     if nested {
@@ -91,7 +87,6 @@ fn parse_into(command: &str, depth: usize, out: &mut Parsed, nested: bool) {
     }
 }
 
-/// The script of `sh -c '<script>'` or `eval <args>`, if `seg` is one.
 fn shell_script_arg(seg: &Segment) -> Option<String> {
     let cmd = Cmd::of(seg);
     if cmd.program == "eval" {
@@ -113,7 +108,6 @@ fn is_harmless_target(target: &str) -> bool {
     matches!(target, "/dev/null" | "/dev/stdout" | "/dev/stderr")
 }
 
-/// Shells whose `-c` argument is itself a command line.
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish", "ash"];
 
 #[cfg(test)]

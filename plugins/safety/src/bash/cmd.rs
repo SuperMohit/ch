@@ -1,13 +1,9 @@
-//! A segment seen as a program with arguments.
-
 use super::Segment;
 
-/// Words skipped at the start of a segment before the real program.
 const KEYWORDS: &[&str] = &[
     "!", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until",
 ];
 
-/// Programs that run the rest of their arguments as a command.
 const WRAPPERS: &[&str] = &[
     "env", "nohup", "time", "nice", "command", "exec", "builtin", "timeout", "xargs", "stdbuf",
 ];
@@ -50,7 +46,6 @@ impl<'a> Cmd<'a> {
                     j += 1;
                 }
                 if j >= words.len() {
-                    // A bare wrapper (`env`, `time`) is the command itself.
                     break;
                 }
                 i = j;
@@ -108,7 +103,6 @@ fn is_assignment(word: &str) -> bool {
     }
 }
 
-/// `git`'s subcommand and its arguments, skipping global options.
 pub(super) fn git_subcommand<'a>(cmd: &Cmd<'a>) -> Option<(&'a str, &'a [String])> {
     let args = cmd.args;
     let mut i = 0;

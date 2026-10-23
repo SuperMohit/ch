@@ -1,8 +1,3 @@
-//! Pins what the bash checks decide for a corpus of commands: every segment the
-//! splitter finds, the deny list's verdict, the read-only allowlist, the "always
-//! allow" key and the policy's decision. Restructuring `bash` must leave the snapshot
-//! unchanged.
-
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -13,7 +8,6 @@ use crate::path_guard::PathGuard;
 use crate::policy::{Decision, Policy, SafetyConfig};
 
 const CORPUS: &[&str] = &[
-    // Splitting and quoting.
     "cd src && ls | wc -l; echo 'a && b' || true & pwd",
     "echo \"x; y\" | grep 'a|b'",
     "git commit -m \"fix it\" && npm test",
@@ -23,7 +17,6 @@ const CORPUS: &[&str] = &[
     "echo \"esc \\\" \\$HOME \\` \\\\ \\n\"",
     "echo a\\ b \\\nc",
     "echo #not-a-comment # a comment\nls",
-    // Redirections.
     "ls > out.txt",
     "ls 2>&1 >/dev/null",
     "cat < in.txt",
@@ -42,7 +35,6 @@ const CORPUS: &[&str] = &[
     "cat <<A <<B\na\nA\nb\nB\npwd",
     "ls >/dev/stdout 2>/dev/stderr",
     "ls 10> f",
-    // Substitutions and nesting.
     "echo $(rm -rf /tmp/x) `whoami`",
     "echo \"$(git status)\"",
     "diff <(ls a) <(ls b)",
@@ -60,7 +52,6 @@ const CORPUS: &[&str] = &[
     "echo $(echo $(echo $(echo $(ls))))",
     "eval eval eval eval eval git push",
     "sh -c \"sh -c 'sh -c \\\"sh -c ls\\\"'\"",
-    // Program detection.
     "FOO=1 timeout 10 env -i sudo ls",
     "env",
     "time",
@@ -74,7 +65,6 @@ const CORPUS: &[&str] = &[
     "{ ls; }",
     "2=x ls",
     "_X=1 ls",
-    // Deny list.
     "rm -rf /",
     "rm -rf /*",
     "rm -fr ~",
@@ -120,7 +110,6 @@ const CORPUS: &[&str] = &[
     "timeout 5 rm -rf /",
     "echo 'git push'",
     "grep -r sudo .",
-    // Read-only allowlist.
     "ls -la",
     "git status",
     "git diff HEAD~1 -- src",
@@ -171,7 +160,6 @@ const CORPUS: &[&str] = &[
     "FOO=1 npm run build",
     "ls *.rs",
     "npm test && make",
-    // Odd input.
     "",
     " ",
     "\\",

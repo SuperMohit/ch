@@ -1,17 +1,12 @@
-//! The built-in read-only allowlist, and the rule "always allow" offers for the rest.
-
 use super::cmd::git_subcommand;
 use super::{Cmd, Segment};
 
-/// Programs that only read, whatever their arguments (output redirection and
-/// substitutions are checked separately).
 const READ_ONLY_PROGRAMS: &[&str] = &[
     "ls", "pwd", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "echo", "which", "file",
     "stat", "du", "df", "whoami", "uname", "basename", "dirname", "realpath", "readlink", "nl",
     "true", "false", "cmp", "diff", "id", "cd", "type", "tac", "cut", "jq",
 ];
 
-/// `git` subcommands that only read.
 const READ_ONLY_GIT: &[&str] = &[
     "status",
     "diff",
@@ -39,7 +34,6 @@ pub fn segment_is_read_only(seg: &Segment) -> bool {
     }
     let p = cmd.program;
     if p.is_empty() {
-        // An empty segment (e.g. between `(` and `)`) does nothing.
         return cmd.assignments.is_empty();
     }
     if READ_ONLY_PROGRAMS.contains(&p) {
@@ -80,7 +74,6 @@ fn git_is_read_only(cmd: &Cmd<'_>) -> bool {
         return false;
     }
     let Some((sub, rest)) = git_subcommand(cmd) else {
-        // `git --version` and friends.
         return true;
     };
     if rest

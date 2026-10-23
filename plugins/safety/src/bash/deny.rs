@@ -1,17 +1,11 @@
-//! The built-in deny list: commands that are never run, whatever the mode or rules.
-
 use super::cmd::git_subcommand;
 use super::{Cmd, Op, Parsed, SHELLS, Segment, is_harmless_target};
 
-/// What a deny-list entry looks at.
 pub enum Check {
-    /// One simple command (every top-level and nested segment is checked).
     Segment(fn(&Cmd<'_>) -> bool),
-    /// The whole command line.
     Command(fn(&str, &Parsed) -> bool),
 }
 
-/// One entry of the built-in deny list.
 pub struct DenyRule {
     pub name: &'static str,
     pub check: Check,
@@ -147,7 +141,6 @@ fn rm_recursive_root(c: &Cmd<'_>) -> bool {
 
 fn is_fork_bomb(command: &str, _parsed: &Parsed) -> bool {
     let compact: String = command.chars().filter(|c| !c.is_whitespace()).collect();
-    // `name(){ name|name& };name`
     let mut rest = compact.as_str();
     while let Some(idx) = rest.find("(){") {
         let name_start = rest[..idx]
@@ -174,7 +167,6 @@ fn pipes_download_to_shell(_command: &str, parsed: &Parsed) -> bool {
             if !is_shell(seg) {
                 continue;
             }
-            // `curl ... | sh`
             let mut j = i;
             while j > 0 && segs[j].op_before == Some(Op::Pipe) {
                 j -= 1;
@@ -182,7 +174,6 @@ fn pipes_download_to_shell(_command: &str, parsed: &Parsed) -> bool {
                     return true;
                 }
             }
-            // `sh -c "$(curl ...)"` / `bash <(curl ...)`
             if seg.has_substitution && (seg.raw.contains("curl") || seg.raw.contains("wget")) {
                 return true;
             }

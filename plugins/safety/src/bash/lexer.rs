@@ -1,18 +1,15 @@
-//! Splits one command line into segments, noting redirections and substitutions.
-
 use super::{Op, Segment, is_harmless_target};
 
-/// Splits `src` into segments, and returns the text inside its command substitutions.
 pub(super) fn split(src: &str) -> (Vec<Segment>, Vec<String>) {
     let mut lx = Lexer::new(src);
     lx.run();
-    (lx.segments, lx.inner)
+    (lx.segments, lx.substitution_bodies)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Redirect {
     Output,
-    /// `>&` / `<&`: the target is an fd or (for `>&file`) a file.
+    /// `>&`: the target is an fd, or a file for `>&file`.
     Dup,
     Input,
     Heredoc,
@@ -24,9 +21,7 @@ struct Lexer<'a> {
     chars: Vec<(usize, char)>,
     pos: usize,
     segments: Vec<Segment>,
-    /// Command text found inside substitutions.
-    inner: Vec<String>,
-    // current segment
+    substitution_bodies: Vec<String>,
     seg_start: usize,
     words: Vec<String>,
     word: Option<String>,
@@ -44,7 +39,7 @@ impl<'a> Lexer<'a> {
             chars: src.char_indices().collect(),
             pos: 0,
             segments: Vec::new(),
-            inner: Vec::new(),
+            substitution_bodies: Vec::new(),
             seg_start: 0,
             words: Vec::new(),
             word: None,
@@ -109,8 +104,6 @@ impl<'a> Lexer<'a> {
         self.redirect = None;
     }
 
-    /// Ends the current segment at `self.pos`, skips `len` operator chars, and starts
-    /// the next segment after them.
     fn operator(&mut self, len: usize, op: Op) {
         let at = self.pos;
         self.end_segment(at, Some(op));
@@ -154,7 +147,7 @@ impl<'a> Lexer<'a> {
                                     self.pos += 1;
                                 }
                             }
-                            '$' if self.peek(1) == Some('(') => self.substitution(1),
+                            '$' if self.peek(1) == Some('(') => self.substitution(),
                             '`' => self.backtick(),
                             _ => {
                                 self.push_char(ch);
@@ -171,8 +164,8 @@ impl<'a> Lexer<'a> {
                     }
                     self.pos += 2;
                 }
-                '$' if self.peek(1) == Some('(') => self.substitution(1),
-                '<' | '>' if self.peek(1) == Some('(') => self.substitution(1),
+                '$' if self.peek(1) == Some('(') => self.substitution(),
+                '<' | '>' if self.peek(1) == Some('(') => self.substitution(),
                 '`' => self.backtick(),
                 '#' if self.word.is_none() => {
                     while let Some(ch) = self.peek(0) {
@@ -275,12 +268,10 @@ impl<'a> Lexer<'a> {
         self.redirect = Some(kind);
     }
 
-    /// `$(...)`, `<(...)` or `>(...)` starting at `self.pos`; `skip` is the length of
-    /// the prefix before the `(`.
-    fn substitution(&mut self, skip: usize) {
+    fn substitution(&mut self) {
         self.has_substitution = true;
         let start = self.pos;
-        self.pos += skip + 1;
+        self.pos += 2;
         let body_start = self.pos;
         let mut depth = 1usize;
         let mut quote: Option<char> = None;
@@ -323,8 +314,6 @@ impl<'a> Lexer<'a> {
         self.end_substitution(start, body_start);
     }
 
-    /// Ends a substitution whose closing character is at `self.pos`: its text stays in
-    /// the current word, and its body (from `body_start`) is kept to be checked too.
     fn end_substitution(&mut self, start: usize, body_start: usize) {
         let body_end = self.pos.min(self.chars.len());
         let body = self.src[self.byte_at(body_start)..self.byte_at(body_end)].to_string();
@@ -333,10 +322,9 @@ impl<'a> Lexer<'a> {
         for ch in text.chars() {
             self.push_char(ch);
         }
-        self.inner.push(body);
+        self.substitution_bodies.push(body);
     }
 
-    /// After a newline, skips the bodies of any pending heredocs.
     fn skip_heredoc_bodies(&mut self) {
         let delims = std::mem::take(&mut self.heredocs);
         for delim in delims {
