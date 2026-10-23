@@ -550,6 +550,76 @@ async fn hooks_before_a_rewrite_judge_the_rewritten_input() {
     );
 }
 
+/// Each approval request's reason and key.
+type Asked = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+/// Records each approval request and answers "always".
+struct AlwaysApprover(Asked);
+
+#[async_trait::async_trait]
+impl Approver for AlwaysApprover {
+    fn id(&self) -> &str {
+        "always"
+    }
+    async fn ask(&self, request: &ApprovalRequest) -> Approval {
+        let asked = (request.reason.clone(), request.key.clone());
+        self.0.lock().unwrap().push(asked);
+        Approval::AllowAlways
+    }
+}
+
+#[tokio::test]
+async fn always_allow_covers_only_the_hook_that_asked() {
+    let asked: Asked = Default::default();
+    let a2 = asked.clone();
+    let plugins = vec![plugin("perm", move |cx| {
+        cx.add_hook(ScriptedHook {
+            id: "perm",
+            priority: 0,
+            points: vec![HookPoint::PreTool],
+            log: Default::default(),
+            decide: Box::new(|_| HookDecision::ask("writes", Some("slow_write".into()))),
+        });
+        cx.add_hook(ScriptedHook {
+            id: "extra",
+            priority: 1,
+            points: vec![HookPoint::PreTool],
+            log: Default::default(),
+            decide: Box::new(|ev| match ev {
+                HookEvent::PreTool { call, .. } if call.input["ms"] == 2 => {
+                    HookDecision::ask("extra check", None)
+                }
+                _ => HookDecision::Continue,
+            }),
+        });
+        cx.add_approver(AlwaysApprover(a2.clone()));
+        Ok(())
+    })];
+    let call = |id, ms| Ok(tool_reply(&[(id, "slow_write", json!({ "ms": ms }))]));
+    let mut h = harness(
+        vec![
+            call("t1", 2),
+            call("t2", 1),
+            call("t3", 2),
+            call("t4", 1),
+            Ok(text_reply("ok")),
+        ],
+        plugins,
+        config(),
+    );
+    h.session.run_turn("go").await;
+    assert_eq!(
+        *asked.lock().unwrap(),
+        [
+            // Both hooks ask: one prompt, and no single key covers both.
+            ("writes; extra check".to_string(), None),
+            ("writes".to_string(), Some("slow_write".to_string())),
+            // "slow_write" is always allowed now, but the other hook still asks.
+            ("extra check".to_string(), None),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn ask_goes_to_approver_and_always_is_remembered() {
     let log: Log = Default::default();
