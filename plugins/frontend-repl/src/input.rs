@@ -10,9 +10,10 @@ use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle;
 
 use reedline::{
-    ColumnarMenu, Completer, Emacs, FileBackedHistory, KeyCode, KeyModifiers, MenuBuilder, Prompt,
-    PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, Reedline, ReedlineEvent,
-    ReedlineMenu, Signal, Span, Suggestion, ValidationResult, Validator, default_emacs_keybindings,
+    ColumnarMenu, Completer, EditCommand, Emacs, FileBackedHistory, KeyCode, KeyModifiers,
+    MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, Reedline,
+    ReedlineEvent, ReedlineMenu, Signal, Span, Suggestion, ValidationResult, Validator,
+    default_emacs_keybindings,
 };
 use tokio::sync::oneshot;
 
@@ -22,6 +23,37 @@ pub enum Input {
     Line(String),
     CtrlC,
     CtrlD,
+}
+
+/// Text typed while a turn or a command runs, which becomes the start of the next
+/// prompt. It is never sent on its own: Enter adds a line break.
+#[derive(Debug, Default)]
+pub struct TypeAhead(String);
+
+impl TypeAhead {
+    pub fn push(&mut self, key: &crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return;
+        }
+        match key.code {
+            KeyCode::Char(c) => self.0.push(c),
+            KeyCode::Enter => self.0.push('\n'),
+            KeyCode::Backspace => {
+                self.0.pop();
+            }
+            _ => {}
+        }
+    }
+
+    /// The text so far, without trailing line breaks; empties the buffer.
+    pub fn take(&mut self) -> String {
+        let text = std::mem::take(&mut self.0);
+        text.trim_end_matches('\n').to_string()
+    }
 }
 
 /// Input lines ending in `\` continue on the next line.
@@ -153,7 +185,8 @@ fn build_editor(history: Option<(PathBuf, usize)>, commands: Vec<(String, String
     editor
 }
 
-type Request = oneshot::Sender<std::io::Result<Input>>;
+/// Text to start the prompt with, and where to send the answer.
+type Request = (String, oneshot::Sender<std::io::Result<Input>>);
 
 /// The line editor on its own thread.
 pub struct LineEditor {
@@ -170,7 +203,10 @@ impl LineEditor {
             .spawn(move || {
                 let mut editor = build_editor(history, commands);
                 let prompt = ReplPrompt;
-                while let Ok(reply) = rx.recv() {
+                while let Ok((start, reply)) = rx.recv() {
+                    if !start.is_empty() {
+                        editor.run_edit_commands(&[EditCommand::InsertString(start)]);
+                    }
                     let result = editor.read_line(&prompt).map(|sig| match sig {
                         Signal::Success(line) => Input::Line(line),
                         Signal::CtrlD => Input::CtrlD,
@@ -187,13 +223,13 @@ impl LineEditor {
         }
     }
 
-    /// Reads one entry from the user.
-    pub async fn read(&self) -> anyhow::Result<Input> {
+    /// Reads one entry from the user, starting with `start` already typed.
+    pub async fn read(&self, start: String) -> anyhow::Result<Input> {
         let Some(tx) = &self.tx else {
             anyhow::bail!("the line editor could not be started");
         };
         let (reply, answer) = oneshot::channel();
-        tx.send(reply)
+        tx.send((start, reply))
             .map_err(|_| anyhow::anyhow!("the line editor stopped"))?;
         Ok(answer
             .await

@@ -33,6 +33,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 - In the REPL, Esc or Ctrl-C cancels a running slash command such as `/compact`. Before, Ctrl-C during a command killed `ch` without saving the session.
 - A tool call whose approval prompt was interrupted is answered "Not run: the user cancelled the turn." Before, the model was told the user had denied it and not to retry it.
 - The REPL exits with code 1 when its line editor fails, instead of 0.
+- Text typed in the REPL while a turn or a slash command runs is kept and fills the next prompt, unsent, so you can edit it or press Enter. Before, it was thrown away. Keys typed before an approval question appears no longer answer it, and an Esc pressed just before the question still interrupts the turn.
 - The REPL shows warnings and other events emitted outside a turn, such as by a slash command like `/compact` or by a plugin while `ch` waits for input. Before, it only listened during a turn, so those were never shown.
 
 - `ch -c --model <id>` uses the given model. Before, a resumed session kept its saved model. A session saved with a different provider from the configured one now resumes on the configured model, instead of sending the old provider's model id.

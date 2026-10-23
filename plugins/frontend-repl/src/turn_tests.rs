@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use crate::RuleSaved;
 use crate::approval::{ApprovalBridge, ReplApprover};
 use crate::format::strip_ansi;
+use crate::input::TypeAhead;
 use crate::repl::{run_command, run_turn};
 use crate::terminal::{KeyPoller, Term};
 
@@ -315,6 +316,7 @@ async fn transcript(script: Vec<ModelResponse>, steps: Vec<Step>) -> String {
         &mut events,
         &mut approvals,
         &mut term,
+        &mut TypeAhead::default(),
         Some(KeyPoller::from_keys(rx)),
     )
     .await;
@@ -435,19 +437,31 @@ async fn esc_cancels_a_slash_command_but_not_the_next_turn() {
     let (tx, rx) = mpsc::unbounded_channel();
     tx.send(key(KeyCode::Esc)).unwrap();
     let keys = Some(KeyPoller::from_keys(rx));
-    let result = run_command(&mut session, "/slow", &mut events, &mut term, keys).await;
-    assert_eq!(result.unwrap().unwrap(), Outcome::Message("stopped".into()));
+    let mut typed = TypeAhead::default();
+    let result = run_command(
+        &mut session,
+        "/slow",
+        &mut events,
+        &mut term,
+        &mut typed,
+        keys,
+    );
+    assert_eq!(
+        result.await.unwrap().unwrap(),
+        Outcome::Message("stopped".into())
+    );
 
     let mut approvals = bridge.take_receiver().unwrap();
-    let turn = run_turn(
+    run_turn(
         &mut session,
         "go".into(),
         &mut events,
         &mut approvals,
         &mut term,
+        &mut typed,
         None,
-    );
-    turn.await;
+    )
+    .await;
     let text = screen.text();
     assert!(text.contains("still here"), "{text}");
     assert!(!text.contains("interrupted"), "{text}");
@@ -460,8 +474,102 @@ async fn events_from_a_command_are_shown() {
     let mut events = session.events().subscribe();
     let screen = Screen::default();
     let mut term = Term::capture(screen.clone(), || Some((80, 24)));
-    let result = run_command(&mut session, "/warn", &mut events, &mut term, None).await;
-    assert_eq!(result.unwrap().unwrap(), Outcome::Done);
+    let mut typed = TypeAhead::default();
+    let result = run_command(
+        &mut session,
+        "/warn",
+        &mut events,
+        &mut term,
+        &mut typed,
+        None,
+    );
+    assert_eq!(result.await.unwrap().unwrap(), Outcome::Done);
     let text = screen.text();
     assert!(text.contains("⚠ from a command"), "{text}");
+}
+
+#[tokio::test]
+async fn text_typed_during_a_command_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _bridge) = new_session(vec![], dir.path(), Default::default());
+    let mut events = session.events().subscribe();
+    let mut term = Term::capture(Screen::default(), || Some((80, 24)));
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut keys = chars("ab");
+    keys.push(key(KeyCode::Backspace));
+    keys.extend(chars("c"));
+    keys.push(key(KeyCode::Enter));
+    keys.extend(chars("d"));
+    keys.push(key(KeyCode::Enter));
+    keys.push(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
+    keys.push(key(KeyCode::Esc));
+    for k in keys {
+        tx.send(k).unwrap();
+    }
+    let mut typed = TypeAhead::default();
+    let poller = Some(KeyPoller::from_keys(rx));
+    let result = run_command(
+        &mut session,
+        "/slow",
+        &mut events,
+        &mut term,
+        &mut typed,
+        poller,
+    );
+    assert_eq!(
+        result.await.unwrap().unwrap(),
+        Outcome::Message("stopped".into())
+    );
+    assert_eq!(typed.take(), "ac\nd");
+    assert_eq!(typed.take(), "");
+}
+
+#[tokio::test]
+async fn keys_typed_before_an_approval_prompt_dont_answer_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, bridge) = new_session(echo_then_done(), dir.path(), Default::default());
+    let mut approvals = bridge.take_receiver().unwrap();
+    let mut events = session.events().subscribe();
+    let screen = Screen::default();
+    let mut term = Term::capture(screen.clone(), || Some((80, 24)));
+    let (tx, rx) = mpsc::unbounded_channel();
+    // Typed before the question appears: "y" would approve it.
+    for k in chars("yes") {
+        tx.send(k).unwrap();
+    }
+    let answer = {
+        let screen = screen.clone();
+        tokio::spawn(async move {
+            while !screen.text().contains("y yes") {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            tx.send(key(KeyCode::Esc)).unwrap();
+            std::future::pending::<()>().await;
+        })
+    };
+    let mut typed = TypeAhead::default();
+    run_turn(
+        &mut session,
+        "go".into(),
+        &mut events,
+        &mut approvals,
+        &mut term,
+        &mut typed,
+        Some(KeyPoller::from_keys(rx)),
+    )
+    .await;
+    answer.abort();
+    assert_eq!(typed.take(), "yes");
+    let results: Vec<String> = session
+        .history()
+        .events()
+        .iter()
+        .flat_map(|e| e.message.content.clone())
+        .filter_map(|b| match b {
+            ContentBlock::ToolResult { content, .. } => Some(content),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert!(results[0].contains("denied"), "{results:?}");
 }
