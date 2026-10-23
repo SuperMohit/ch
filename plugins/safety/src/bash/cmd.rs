@@ -97,6 +97,7 @@ impl<'a> Cmd<'a> {
             let a = args[i].as_str();
             if a == "-C"
                 || a == "-c"
+                || a == "--config-env"
                 || a == "--git-dir"
                 || a == "--work-tree"
                 || a == "--namespace"

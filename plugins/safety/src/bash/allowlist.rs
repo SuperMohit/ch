@@ -71,8 +71,12 @@ fn is_display_assignment(assignment: &str) -> bool {
 }
 
 fn git_is_read_only(cmd: &Cmd<'_>) -> bool {
-    // `-c key=value` can set a pager or hook that runs arbitrary code.
-    if cmd.args.iter().any(|a| a == "-c") {
+    // `-c key=value` and `--config-env` can set a pager or hook that runs arbitrary code.
+    if cmd
+        .args
+        .iter()
+        .any(|a| a == "-c" || a == "--config-env" || a.starts_with("--config-env="))
+    {
         return false;
     }
     let Some((sub, rest)) = cmd.git_subcommand() else {
@@ -160,6 +164,8 @@ mod tests {
             "git commit -m x",
             "git branch new-feature",
             "git -c core.pager=evil log",
+            "TERM=x git --config-env=core.fsmonitor=TERM status",
+            "git --config-env core.pager=TERM log",
             "rg --pre ./x foo",
             "env FOO=1 make",
             "echo $(rm a)",

@@ -55,6 +55,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 ### Security
 
+- `git --config-env` makes a git command ask before running, as `git -c` does. Before, `TERM='<cmd>' git --config-env=core.fsmonitor=TERM status` ran `<cmd>` without asking, and with the two-word form, `git --config-env a.b=C push`, the deny list missed the push.
 - The `bash` permission check looks inside heredocs, whose `$(...)` and backticks the shell runs when the delimiter is unquoted (`<<EOF`, not `<<'EOF'`). Before, `cat <<EOF` with `$(rm -rf ~)` in the body ran without asking, as a read-only `cat`, and the deny list never saw the `rm`.
 - The trust prompt shows a project's setting names and values with control and bidi characters escaped. Before, a quoted key holding escape codes could move the cursor and redraw the prompt over the settings you were being asked to trust.
 - `ch` refuses a `.ch/config.toml` that is a symlink to a file outside the project, and a parse error in the project config gives the line number without quoting the line. Before, a project could make `ch` print a line of any readable file, such as a credentials file, to the terminal and the logs.
