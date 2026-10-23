@@ -149,7 +149,9 @@ fn merge_tables(base: &mut Table, overlay: Table) {
     }
 }
 
-/// Settings the kernel itself reads. Unknown keys are ignored (they belong to plugins).
+/// Settings the kernel itself reads. Unknown top-level keys and `plugins.*` tables are
+/// ignored (they belong to plugins); an unknown key in `model`, `agent` or `select` is an
+/// error, so a misspelled setting doesn't silently do nothing.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KernelConfig {
@@ -160,7 +162,7 @@ pub struct KernelConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
     /// Id of the `ModelProvider` plugin.
     pub provider: String,
@@ -191,7 +193,7 @@ impl Default for ModelConfig {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SummarizerConfig {
     /// Defaults to the agent's provider.
     pub provider: Option<String>,
@@ -201,7 +203,7 @@ pub struct SummarizerConfig {
 
 /// USD per million tokens.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Pricing {
     pub input: f64,
     pub output: f64,
@@ -220,7 +222,7 @@ impl Pricing {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AgentConfig {
     /// Maximum model calls per user turn.
     pub max_steps: u32,
@@ -254,7 +256,7 @@ pub struct PluginsConfig {
 
 /// Picks among several registered implementations of a single-slot extension point.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SelectConfig {
     pub context: Option<String>,
     pub executor: Option<String>,
@@ -341,6 +343,24 @@ mod tests {
         assert_eq!(k.agent.max_steps, 300);
         assert_eq!(k.agent.tool_result_max_chars, 24_000);
         assert_eq!(k.model.max_output_tokens, 16_384);
+    }
+
+    #[test]
+    fn unknown_kernel_keys_are_errors() {
+        for (toml, key) in [
+            (
+                "[select]\ncontext_strategy = \"staged\"",
+                "context_strategy",
+            ),
+            ("[model]\nmax_tokens = 1", "max_tokens"),
+            ("[model.pricing]\ninput_price = 1.0", "input_price"),
+            ("[agent]\nmax_step = 3", "max_step"),
+        ] {
+            let err = format!("{:#}", Config::parse(toml).unwrap().kernel().unwrap_err());
+            assert!(err.contains(key), "{toml}: {err}");
+        }
+        let c = Config::parse("custom = 1\n[plugins.context]\nstrategy = \"staged\"").unwrap();
+        assert!(c.kernel().is_ok());
     }
 
     #[test]
