@@ -18,6 +18,14 @@ enum Redirect {
     HereString,
 }
 
+struct Heredoc {
+    delim: String,
+    /// The delimiter is unquoted, so the shell expands the body.
+    expands: bool,
+    /// The index of the segment that reads it.
+    segment: usize,
+}
+
 struct Lexer<'a> {
     src: &'a str,
     chars: Vec<(usize, char)>,
@@ -27,11 +35,13 @@ struct Lexer<'a> {
     seg_start: usize,
     words: Vec<String>,
     word: Option<String>,
+    /// The current word has quotes or backslashes in it.
+    quoted: bool,
     op_before: Option<Op>,
     has_substitution: bool,
     writes_file: bool,
     redirect: Option<Redirect>,
-    heredocs: Vec<String>,
+    heredocs: Vec<Heredoc>,
 }
 
 impl<'a> Lexer<'a> {
@@ -45,6 +55,7 @@ impl<'a> Lexer<'a> {
             seg_start: 0,
             words: Vec::new(),
             word: None,
+            quoted: false,
             op_before: None,
             has_substitution: false,
             writes_file: false,
@@ -66,6 +77,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn end_word(&mut self) {
+        let quoted = std::mem::take(&mut self.quoted);
         let Some(w) = self.word.take() else {
             return;
         };
@@ -82,7 +94,11 @@ impl<'a> Lexer<'a> {
                 }
             }
             Some(Redirect::Input) | Some(Redirect::HereString) => {}
-            Some(Redirect::Heredoc) => self.heredocs.push(w),
+            Some(Redirect::Heredoc) => self.heredocs.push(Heredoc {
+                delim: w,
+                expands: !quoted,
+                segment: self.segments.len(),
+            }),
         }
     }
 
@@ -118,6 +134,7 @@ impl<'a> Lexer<'a> {
             match c {
                 '\'' => {
                     self.word.get_or_insert_with(String::new);
+                    self.quoted = true;
                     self.pos += 1;
                     while let Some(ch) = self.peek(0) {
                         self.pos += 1;
@@ -129,6 +146,7 @@ impl<'a> Lexer<'a> {
                 }
                 '"' => {
                     self.word.get_or_insert_with(String::new);
+                    self.quoted = true;
                     self.pos += 1;
                     while let Some(ch) = self.peek(0) {
                         match ch {
@@ -161,7 +179,10 @@ impl<'a> Lexer<'a> {
                 '\\' => {
                     match self.peek(1) {
                         Some('\n') => {}
-                        Some(n) => self.push_char(n),
+                        Some(n) => {
+                            self.push_char(n);
+                            self.quoted = true;
+                        }
                         None => {}
                     }
                     self.pos += 2;
@@ -331,8 +352,9 @@ impl<'a> Lexer<'a> {
     }
 
     fn skip_heredoc_bodies(&mut self) {
-        let delims = std::mem::take(&mut self.heredocs);
-        for delim in delims {
+        for heredoc in std::mem::take(&mut self.heredocs) {
+            let body_start = self.pos;
+            let mut body_end = self.pos;
             loop {
                 let line_start = self.pos;
                 let mut line_end = self.pos;
@@ -344,13 +366,40 @@ impl<'a> Lexer<'a> {
                 }
                 let line = &self.src[self.byte_at(line_start)..self.byte_at(line_end)];
                 self.pos = (line_end + 1).min(self.chars.len());
-                if line.trim() == delim || self.pos >= self.chars.len() {
+                if line.trim() == heredoc.delim {
                     break;
+                }
+                body_end = line_end;
+                if self.pos >= self.chars.len() {
+                    break;
+                }
+            }
+            if heredoc.expands {
+                let body = &self.src[self.byte_at(body_start)..self.byte_at(body_end)];
+                let bodies = heredoc_substitutions(body);
+                if !bodies.is_empty() {
+                    self.segments[heredoc.segment].has_substitution = true;
+                    self.substitution_bodies.extend(bodies);
                 }
             }
         }
         self.seg_start = self.byte_at(self.pos);
     }
+}
+
+/// The command substitutions in an unquoted heredoc's body, which the shell runs
+/// while reading it.
+fn heredoc_substitutions(body: &str) -> Vec<String> {
+    let mut lx = Lexer::new(body);
+    while let Some(c) = lx.peek(0) {
+        match c {
+            '\\' => lx.pos += 2,
+            '$' if lx.peek(1) == Some('(') => lx.substitution(),
+            '`' => lx.backtick(),
+            _ => lx.pos += 1,
+        }
+    }
+    lx.substitution_bodies
 }
 
 #[cfg(test)]
@@ -394,6 +443,25 @@ mod tests {
         assert!(!parse("cat < in.txt").segments[0].writes_file);
         assert!(parse("echo hi >> log").segments[0].writes_file);
         assert!(parse("echo hi &> log").segments[0].writes_file);
+    }
+
+    #[test]
+    fn unquoted_heredoc_bodies_are_checked_for_substitutions() {
+        let p = parse("cat <<EOF | wc -l\n$(rm -rf ~) `whoami`\nEOF\nls");
+        assert!(p.segments[0].has_substitution);
+        assert!(!p.segments[1].has_substitution);
+        let nested: Vec<_> = p.nested.iter().map(|s| Cmd::of(s).program).collect();
+        assert_eq!(nested, ["rm", "whoami"]);
+        for delim in ["'EOF'", "\"EOF\"", "\\EOF", "E\"O\"F"] {
+            let p = parse(&format!("cat <<{delim}\n$(rm -rf ~)\nEOF"));
+            assert!(p.nested.is_empty(), "{delim}");
+            assert!(!p.segments[0].has_substitution, "{delim}");
+        }
+        assert!(
+            parse("cat <<EOF\n\\$(rm x) \\`id\\` $HOME\nEOF")
+                .nested
+                .is_empty()
+        );
     }
 
     #[test]
