@@ -46,6 +46,11 @@ pub struct TurnResult {
     pub steps: u32,
 }
 
+/// Responses in a row whose tool calls were cut off by the output limit before the turn
+/// stops. Each one is retried, so without a cap a model that keeps sending too-large
+/// calls would use up `agent.max_steps`.
+const MAX_CUT_OFF_TOOL_CALLS: u32 = 3;
+
 pub struct Session {
     id: String,
     registry: Arc<Registry>,
@@ -372,6 +377,7 @@ impl Session {
         let mut final_text = String::new();
         let mut step: u32 = 0;
         let mut reminders = Vec::new();
+        let mut cut_off_in_a_row = 0;
         let (reason, turn_end_ran) = loop {
             if cancel.is_cancelled() {
                 break (TerminationReason::Cancelled, false);
@@ -453,8 +459,22 @@ impl Session {
                      several smaller ones."
                 );
                 self.history.push(turn, not_run(&calls, &why));
+                cut_off_in_a_row += 1;
+                if cut_off_in_a_row >= MAX_CUT_OFF_TOOL_CALLS {
+                    break (
+                        TerminationReason::Error {
+                            message: format!(
+                                "the model reached its output limit ({limit} tokens) in the \
+                                 middle of a tool call {cut_off_in_a_row} times in a row; raise \
+                                 model.max_output_tokens or ask for smaller changes"
+                            ),
+                        },
+                        false,
+                    );
+                }
                 continue;
             }
+            cut_off_in_a_row = 0;
             if calls.is_empty() {
                 // The model finished: turn_end hooks may ask it to keep going.
                 let mut ev = HookEvent::TurnEnd {
