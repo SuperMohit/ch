@@ -1477,3 +1477,38 @@ async fn tool_input_streaming_emits_throttled_progress() {
     assert!(progress.windows(2).all(|w| w[0] < w[1]), "{progress:?}");
     assert!(*progress.last().unwrap() <= 8000);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_session_open_in_one_process_cant_be_opened_in_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path());
+    let h = harness(vec![Ok(text_reply("one"))], vec![], config());
+    let (registry, cfg) = (h.session.registry().clone(), h.session.config().clone());
+    let open = || Session::builder(registry.clone(), cfg.clone()).store(store.clone());
+
+    let mut first = open().build().unwrap();
+    first.run_turn("first").await;
+    let snap = store.load(first.id()).unwrap();
+    match open().restore(snap.clone()).build() {
+        Ok(_) => panic!("opened a session that is in use"),
+        Err(e) => assert!(
+            format!("{e:#}").contains("open in another ch process"),
+            "{e:#}"
+        ),
+    }
+
+    let mut other = open().build().unwrap();
+    let other_id = other.id().to_string();
+    assert!(other.restore(snap.clone()).is_err());
+    assert_eq!(
+        other.id(),
+        other_id,
+        "a failed /resume keeps the current session"
+    );
+
+    let first_id = first.id().to_string();
+    drop(first);
+    other.restore(snap).unwrap();
+    assert_eq!(other.id(), first_id);
+}

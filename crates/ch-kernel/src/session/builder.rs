@@ -127,6 +127,7 @@ impl SessionBuilder {
             ),
         };
         let model = self.model.unwrap_or(model);
+        let lock = self.store.as_ref().map(|s| s.lock(&id)).transpose()?;
 
         Ok(Session {
             id,
@@ -153,6 +154,7 @@ impl SessionBuilder {
             calibrator: TokenCalibrator::default(),
             always_allow: HashSet::new(),
             store: self.store,
+            _lock: lock,
             created_at,
             sink_tasks: Vec::new(),
             started: false,

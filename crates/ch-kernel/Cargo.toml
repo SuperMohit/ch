@@ -24,5 +24,8 @@ toml.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["fs"] }
+
 [dev-dependencies]
 tempfile.workspace = true

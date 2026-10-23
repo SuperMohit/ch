@@ -25,7 +25,7 @@ use crate::history::History;
 use crate::hook::{Hook, HookEvent, HookOutcome, Verdict, run_hooks};
 use crate::model::ModelProvider;
 use crate::registry::Registry;
-use crate::store::{SessionMeta, SessionSnapshot, SessionStore};
+use crate::store::{SessionLock, SessionMeta, SessionSnapshot, SessionStore};
 use crate::tokens::TokenCalibrator;
 use crate::tool::{Tool, ToolOutput, ToolSpec};
 use crate::types::{ContentBlock, Message, Role, StopReason, TerminationReason, ToolCall, Usage};
@@ -71,6 +71,7 @@ pub struct Session {
     calibrator: TokenCalibrator,
     always_allow: HashSet<String>,
     store: Option<SessionStore>,
+    _lock: Option<SessionLock>,
     created_at: chrono::DateTime<Utc>,
     sink_tasks: Vec<JoinHandle<()>>,
     started: bool,
@@ -173,7 +174,11 @@ impl Session {
     }
 
     /// Replaces this session's conversation with a saved one (`/resume`).
-    pub fn restore(&mut self, snap: SessionSnapshot) {
+    /// Fails, leaving this session as it was, when another process has `snap` open.
+    pub fn restore(&mut self, snap: SessionSnapshot) -> anyhow::Result<()> {
+        if let Some(store) = &self.store {
+            self._lock = Some(store.lock(&snap.meta.id)?);
+        }
         self.model = restored_model(&snap.meta, self.provider.id(), &self.kcfg.model.id);
         self.id = snap.meta.id;
         self.created_at = snap.meta.created_at;
@@ -181,6 +186,7 @@ impl Session {
         self.history = snap.history;
         self.usage = snap.usage;
         self.cost = snap.cost;
+        Ok(())
     }
 
     pub fn save(&self) -> anyhow::Result<()> {

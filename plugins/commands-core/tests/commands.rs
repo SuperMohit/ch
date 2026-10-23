@@ -264,6 +264,8 @@ async fn resume_lists_and_loads_sessions() {
     s.run_turn("first task").await;
     s.save().unwrap();
     let old_id = s.id().to_string();
+    // Closed, as when that ch exits; an open session can't be resumed elsewhere.
+    drop(s);
 
     let mut s2 = session(CONFIG, Some(store));
     s2.run_turn("second task").await;

@@ -32,6 +32,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 - When a hook stops the turn or the user cancels it, the remaining read-only calls from the same response are no longer run.
 - A note a hook adds after the model's final answer is no longer sent with the next prompt.
 - Session files keep their event ids and turn numbers when they are resumed. Saving writes to a temp file of its own and flushes it to disk before replacing the session file.
+- A session can only be open in one `ch` at a time. A second `ch -c` (or `/resume`) for a session another process has open now stops with a message, instead of both processes saving over each other's turns. The lock is released when `ch` exits, even after a crash.
 
 ### Security
 
