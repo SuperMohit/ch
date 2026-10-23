@@ -2,6 +2,10 @@
 //!
 //! Line 1 is a `meta` record, then one `event` record per history event, then a final
 //! `totals` record. The file is rewritten after every turn.
+//!
+//! A process that has a session open holds an exclusive lock on `<id>.lock` next to
+//! it, so a second `ch -c` can't load the same session and overwrite its turns. The
+//! operating system drops the lock when the process exits, even after a crash.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -27,6 +31,32 @@ pub struct SessionMeta {
     /// First user prompt, shortened.
     pub title: String,
     pub turns: u32,
+}
+
+/// Held while a process has a session open; see [`SessionStore::lock`].
+pub struct SessionLock {
+    #[cfg(unix)]
+    _lock: nix::fcntl::Flock<fs::File>,
+}
+
+impl SessionLock {
+    #[cfg(unix)]
+    fn acquire(file: fs::File, id: &str) -> anyhow::Result<Self> {
+        use nix::fcntl::{Flock, FlockArg};
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => Ok(Self { _lock: lock }),
+            Err((_, nix::errno::Errno::EWOULDBLOCK)) => anyhow::bail!(
+                "session `{id}` is open in another ch process. Start a new session, or \
+                 pick another one with `ch -r`"
+            ),
+            Err((_, e)) => Err(e).with_context(|| format!("locking session `{id}`")),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn acquire(_file: fs::File, _id: &str) -> anyhow::Result<Self> {
+        Ok(Self {})
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +113,20 @@ impl SessionStore {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Locks session `id` for this process until the [`SessionLock`] is dropped.
+    pub fn lock(&self, id: &str) -> anyhow::Result<SessionLock> {
+        fs::create_dir_all(&self.dir)
+            .with_context(|| format!("creating {}", self.dir.display()))?;
+        let path = self.dir.join(format!("{id}.lock"));
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        SessionLock::acquire(file, id)
     }
 
     pub fn path_for(&self, id: &str) -> PathBuf {
@@ -239,5 +283,25 @@ mod tests {
         assert_eq!(loaded.meta, snap.meta);
         assert_eq!(store.list().unwrap().len(), 1);
         assert_eq!(store.latest().unwrap().unwrap().id, "s1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_session_can_be_locked_once_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let held = store.lock("s1").unwrap();
+        let err = store.lock("s1").err().unwrap();
+        assert!(
+            format!("{err:#}").contains("open in another ch process"),
+            "{err:#}"
+        );
+        assert!(store.lock("s2").is_ok());
+        drop(held);
+        assert!(store.lock("s1").is_ok());
+        assert!(
+            store.list().unwrap().is_empty(),
+            "lock files are not sessions"
+        );
     }
 }

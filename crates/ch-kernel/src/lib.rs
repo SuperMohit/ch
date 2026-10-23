@@ -44,7 +44,7 @@ pub use prompt::PromptContributor;
 pub use registry::{PluginStatus, Registry, RegistryBuilder};
 pub use services::Services;
 pub use session::{CancelHandle, Session, SessionBuilder, TurnResult};
-pub use store::{SessionMeta, SessionSnapshot, SessionStore};
+pub use store::{SessionLock, SessionMeta, SessionSnapshot, SessionStore};
 pub use tokens::{TokenCalibrator, estimate_tokens};
 pub use tool::{Tool, ToolOutput, ToolSpec};
 pub use types::{ContentBlock, Message, Role, StopReason, TerminationReason, ToolCall, Usage};

@@ -320,7 +320,9 @@ impl Command for Resume {
         }
         let title = snap.meta.title.clone();
         let turns = snap.meta.turns;
-        cx.session.restore(snap);
+        if let Err(e) = cx.session.restore(snap) {
+            return Ok(Outcome::Message(format!("Couldn't resume `{id}`: {e:#}")));
+        }
         let title = if title.is_empty() {
             String::new()
         } else {
