@@ -39,6 +39,8 @@
 //! path (`edit_file:.env`) does.
 
 pub mod bash;
+#[cfg(test)]
+mod bash_pin;
 pub mod file_state;
 pub mod path_guard;
 pub mod policy;
