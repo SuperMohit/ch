@@ -227,6 +227,15 @@ impl Policy {
         if let Some(d) = self.deny_or_ask("bash", &targets) {
             return d;
         }
+        if parsed.all().next().is_none() && self.mode != Mode::Bypass {
+            return Decision::ask(
+                format!(
+                    "no command was found in `{}` to check",
+                    ch_kernel::util::truncate_middle(command.trim(), 120)
+                ),
+                None,
+            );
+        }
         // Allow rules only count part by part, so `bash:git commit *` can't
         // smuggle in `git commit -m x && rm -rf src`.
         let unapproved: Vec<&Segment> = parsed
@@ -288,8 +297,13 @@ impl Policy {
                     Some(format!("web_fetch:{}/*", globset::escape(&origin))),
                 )
             }
-            // Let the tool report the bad URL.
-            None => Decision::Allow,
+            None => Decision::ask(
+                format!(
+                    "`{}` has no host to approve",
+                    ch_kernel::util::truncate_middle(raw.trim(), 120)
+                ),
+                None,
+            ),
         }
     }
 
@@ -569,6 +583,29 @@ allow = ["edit_file"]"#,
         assert_eq!(bash(&p, "ls > /dev/null; cat a | wc -l"), Decision::Allow);
         assert!(is_ask(&bash(&p, "ls > out.txt")));
         assert!(is_deny(&bash(&p, "ls; sudo rm -rf /")));
+    }
+
+    #[test]
+    fn calls_with_nothing_to_check_ask() {
+        let f = fixture();
+        let p = policy(&f, r#"mode = "accept-edits""#);
+        for cmd in ["", "   ", ";", "&&", "()"] {
+            let d = bash(&p, cmd);
+            assert!(is_ask(&d), "{cmd:?}: {d:?}");
+            assert_eq!(key(&d), None, "{cmd:?}");
+        }
+        assert!(is_ask(&p.decide("bash", &json!({}), false)));
+        for url in ["", "not a url", "file:///etc/passwd", "data:text/plain,x"] {
+            let d = p.decide("web_fetch", &json!({ "url": url }), true);
+            assert!(is_ask(&d), "{url:?}: {d:?}");
+            assert_eq!(key(&d), None, "{url:?}");
+        }
+        let p = policy(&f, r#"mode = "bypass""#);
+        assert_eq!(bash(&p, ""), Decision::Allow);
+        assert_eq!(
+            p.decide("web_fetch", &json!({"url": "not a url"}), true),
+            Decision::Allow
+        );
     }
 
     #[test]
