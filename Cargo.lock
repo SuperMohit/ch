@@ -474,6 +474,7 @@ dependencies = [
  "ch-kernel",
  "ch-testkit",
  "globset",
+ "insta",
  "serde",
  "serde_json",
  "sha2",
