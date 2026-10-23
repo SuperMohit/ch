@@ -6,6 +6,11 @@
 //! returned. Background processes that keep the pipes open don't hang the call: once
 //! the shell exits, reading stops after a short drain timeout.
 //!
+//! Provider API keys are removed from the commands' environment: `ANTHROPIC_API_KEY`,
+//! `OPENAI_API_KEY`, and any variable a `[plugins.<id>] api_key_env` setting names.
+//! There is deliberately no setting to pass them through, since a project's
+//! `.ch/config.toml` could otherwise expose the user's key to the model.
+//!
 //! ```toml
 //! [plugins.executor-local]
 //! max_output_bytes = 2097152   # per stream
@@ -19,10 +24,10 @@ mod group;
 
 use std::sync::Arc;
 
-use ch_kernel::{Plugin, PluginManifest, RegisterCx};
+use ch_kernel::{Config, Plugin, PluginManifest, RegisterCx};
 use serde::Deserialize;
 
-pub use executor::LocalExecutor;
+pub use executor::{DEFAULT_KEY_VARS, LocalExecutor};
 
 /// `[plugins.executor-local]` settings.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -61,9 +66,22 @@ impl Plugin for ExecutorLocalPlugin {
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
         let config: LocalExecutorConfig = cx.config()?;
-        cx.add_executor(LocalExecutor::new(config));
+        let keys = api_key_vars(cx.full_config());
+        cx.add_executor(LocalExecutor::new(config).hide_env(keys));
         Ok(())
     }
+}
+
+/// The variables named by `api_key_env` in any `[plugins.<id>]` section.
+pub fn api_key_vars(config: &Config) -> Vec<String> {
+    let Some(plugins) = config.get_value("plugins").and_then(|v| v.as_table()) else {
+        return Vec::new();
+    };
+    plugins
+        .values()
+        .filter_map(|section| section.get("api_key_env")?.as_str())
+        .map(str::to_string)
+        .collect()
 }
 
 /// The plugin, for the CLI's plugin list.

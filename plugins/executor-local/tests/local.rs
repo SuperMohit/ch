@@ -90,6 +90,52 @@ async fn env_includes_request_and_fixed_values() {
 }
 
 #[tokio::test]
+async fn hidden_variables_are_not_in_the_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    // HOME is always set, so it stands in for an API key here.
+    assert!(std::env::var_os("HOME").is_some());
+    let req = || {
+        request(
+            "printf '%s' \"${HOME-unset}\"",
+            dir.path(),
+            Duration::from_secs(5),
+        )
+    };
+    let visible = LocalExecutor::default()
+        .run(req(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_ne!(visible.stdout, "unset");
+    let hidden = LocalExecutor::default()
+        .hide_env(["HOME".to_string()])
+        .run(req(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(hidden.stdout, "unset");
+}
+
+#[test]
+fn api_key_variables_come_from_any_plugin_section() {
+    let cfg = ch_kernel::Config::parse(
+        r#"
+        [plugins]
+        enable = ["provider-openai"]
+        [plugins.provider-anthropic]
+        api_key_env = "WORK_ANTHROPIC_KEY"
+        [plugins.provider-openai]
+        api_key_env = "OPENROUTER_API_KEY"
+        base_url = "https://openrouter.ai/api/v1"
+        "#,
+    )
+    .unwrap();
+    let mut vars = ch_executor_local::api_key_vars(&cfg);
+    vars.sort();
+    assert_eq!(vars, ["OPENROUTER_API_KEY", "WORK_ANTHROPIC_KEY"]);
+    assert!(ch_executor_local::api_key_vars(&ch_kernel::Config::default()).is_empty());
+    assert!(ch_executor_local::DEFAULT_KEY_VARS.contains(&"ANTHROPIC_API_KEY"));
+}
+
+#[tokio::test]
 async fn stdin_is_null_unless_given() {
     let dir = tempfile::tempdir().unwrap();
     // With no stdin, `cat` sees EOF immediately instead of hanging.
