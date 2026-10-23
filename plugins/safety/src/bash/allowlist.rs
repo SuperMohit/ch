@@ -1,6 +1,8 @@
 use super::cmd::git_subcommand;
 use super::{Cmd, Segment};
 
+/// Programs that only read, whatever their arguments (output redirection and
+/// substitutions are checked separately).
 const READ_ONLY_PROGRAMS: &[&str] = &[
     "ls", "pwd", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "echo", "which", "file",
     "stat", "du", "df", "whoami", "uname", "basename", "dirname", "realpath", "readlink", "nl",
@@ -33,6 +35,7 @@ pub fn segment_is_read_only(seg: &Segment) -> bool {
         return false;
     }
     let p = cmd.program;
+    // No program (`fi`, `}`, `''`, a lone redirection): nothing runs.
     if p.is_empty() {
         return cmd.assignments.is_empty();
     }
@@ -74,6 +77,7 @@ fn git_is_read_only(cmd: &Cmd<'_>) -> bool {
         return false;
     }
     let Some((sub, rest)) = git_subcommand(cmd) else {
+        // Only global options, such as `git --version`.
         return true;
     };
     if rest

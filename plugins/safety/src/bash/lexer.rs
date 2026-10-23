@@ -1,5 +1,7 @@
 use super::{Op, Segment, is_harmless_target};
 
+/// Splits `src` into segments, and returns the text inside its command substitutions
+/// for the caller to check too.
 pub(super) fn split(src: &str) -> (Vec<Segment>, Vec<String>) {
     let mut lx = Lexer::new(src);
     lx.run();
@@ -268,6 +270,7 @@ impl<'a> Lexer<'a> {
         self.redirect = Some(kind);
     }
 
+    /// `$(...)`, `<(...)` or `>(...)` starting at `self.pos`.
     fn substitution(&mut self) {
         self.has_substitution = true;
         let start = self.pos;
@@ -314,6 +317,8 @@ impl<'a> Lexer<'a> {
         self.end_substitution(start, body_start);
     }
 
+    /// Ends a substitution whose closing character is at `self.pos` (or the input has
+    /// run out): its text stays in the current word, and its body is kept to be checked.
     fn end_substitution(&mut self, start: usize, body_start: usize) {
         let body_end = self.pos.min(self.chars.len());
         let body = self.src[self.byte_at(body_start)..self.byte_at(body_end)].to_string();

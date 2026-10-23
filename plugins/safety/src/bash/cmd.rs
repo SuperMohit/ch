@@ -12,7 +12,8 @@ const WRAPPERS: &[&str] = &[
 /// assignments and wrappers like `env`, `timeout` or `xargs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cmd<'a> {
-    /// The program's base name (`/usr/bin/git` → `git`); empty for an empty segment.
+    /// The program's base name (`/usr/bin/git` → `git`); empty when the segment has
+    /// none (`fi`, `''`, a lone redirection).
     pub program: &'a str,
     pub args: &'a [String],
     /// Leading `VAR=value` assignments.
@@ -45,6 +46,7 @@ impl<'a> Cmd<'a> {
                     }
                     j += 1;
                 }
+                // A bare wrapper (`env`, `time`) is the command itself.
                 if j >= words.len() {
                     break;
                 }

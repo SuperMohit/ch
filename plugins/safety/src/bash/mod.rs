@@ -1,11 +1,12 @@
 //! A small shell-command splitter plus the built-in bash deny list and read-only
 //! allowlist.
 //!
-//! This is not a shell parser. It splits a command line on `&&`, `||`, `;`, `|`, `&`
-//! and newlines (respecting quotes), notes command substitutions and file-writing
-//! redirections, and looks into `$(...)`, backticks and `sh -c '...'` strings so the
-//! deny list can't be dodged by nesting. Anything it doesn't understand is treated as
-//! "not read-only", which only means the user gets asked.
+//! This is not a shell parser. It splits a command line on `&&`, `||`, `;`, `;;`, `|`,
+//! `|&`, `&`, `(`, `)` and newlines (respecting quotes), notes command substitutions and
+//! file-writing redirections, and looks into `$(...)`, backticks, `<(...)`, `>(...)`,
+//! `sh -c '...'` strings and `eval` arguments so the deny list can't be dodged by
+//! nesting. Where it reads a command differently from the shell, the command can be
+//! misjudged in either direction; `bash_pin.rs` records the known cases.
 
 mod allowlist;
 mod cmd;
@@ -36,7 +37,8 @@ pub struct Segment {
     pub op_before: Option<Op>,
     /// Contains `$(...)`, backticks, `<(...)` or `>(...)`.
     pub has_substitution: bool,
-    /// Redirects output to a file (`>`/`>>` to anything but `/dev/null` or an fd).
+    /// Redirects output to a file (`>`, `>>`, `>|`, `&>`, `<>` or `>&file`), unless the
+    /// target is an fd, `/dev/null`, `/dev/stdout` or `/dev/stderr`.
     pub writes_file: bool,
 }
 
@@ -44,7 +46,8 @@ pub struct Segment {
 pub struct Parsed {
     /// Top-level segments, in order.
     pub segments: Vec<Segment>,
-    /// Segments found inside substitutions, `sh -c` strings and `eval` arguments, at any depth.
+    /// Segments found inside substitutions, `sh -c` strings and `eval` arguments, up to
+    /// [`MAX_DEPTH`] levels down.
     pub nested: Vec<Segment>,
     /// Something is nested deeper than [`MAX_DEPTH`], so not every part was seen.
     pub too_deep: bool,

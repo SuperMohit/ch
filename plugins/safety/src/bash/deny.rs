@@ -1,8 +1,11 @@
 use super::cmd::git_subcommand;
 use super::{Cmd, Op, Parsed, SHELLS, Segment, is_harmless_target};
 
+/// What a deny-list entry looks at.
 pub enum Check {
+    /// One simple command; every top-level and nested segment is checked.
     Segment(fn(&Cmd<'_>) -> bool),
+    /// The whole command line. The check must look into `parsed.nested` itself.
     Command(fn(&str, &Parsed) -> bool),
 }
 
