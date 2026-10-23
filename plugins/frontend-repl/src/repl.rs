@@ -1,7 +1,7 @@
 //! The REPL loop and the turn runner.
 
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use ch_kernel::{AgentEvent, Outcome, Session, TerminationReason};
@@ -16,13 +16,13 @@ use crate::input::{Input, LineEditor, TypeAhead, normalize_input};
 use crate::markdown::render_message;
 use crate::terminal::{KeyPoller, Term, install_panic_hook, next_key};
 use crate::view::TurnView;
-use crate::{ReplConfig, ReplOptions, RuleSaved};
+use crate::{ReplOptions, RuleSaved};
 
 /// Runs the interactive loop until the user exits.
 pub(crate) async fn run_repl(
     mut session: Session,
     approvals: &mut UnboundedReceiver<Pending>,
-    config: &ReplConfig,
+    history: Option<(PathBuf, usize)>,
     options: ReplOptions,
 ) -> anyhow::Result<i32> {
     if !std::io::stdin().is_terminal() {
@@ -39,12 +39,9 @@ pub(crate) async fn run_repl(
         .iter()
         .map(|(_, c)| (c.name().to_string(), c.description().to_string()))
         .collect();
-    let history = config.history_path().map(|p| {
-        if let Some(dir) = p.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        (p, config.history_size)
-    });
+    if let Some(dir) = history.as_ref().and_then(|(p, _)| p.parent()) {
+        let _ = std::fs::create_dir_all(dir);
+    }
     let mut editor = LineEditor::spawn(history, commands);
     let mut term = Term::new();
     // One receiver for the whole REPL, so events emitted outside a turn (by a slash

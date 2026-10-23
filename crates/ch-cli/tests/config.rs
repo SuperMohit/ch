@@ -267,6 +267,34 @@ fn invalid_config_file_names_the_file() {
 }
 
 #[test]
+fn a_bad_project_config_is_reported_without_its_contents() {
+    let f = fixture(None, Some("ok = 1\naws_secret = AKIASECRET\n"));
+    let msg = format!(
+        "{:#}",
+        build_config(&f.paths, &Overrides::default(), &settings()).unwrap_err()
+    );
+    assert!(msg.contains(".ch/config.toml (line 2)"), "{msg}");
+    assert!(!msg.contains("AKIASECRET"), "{msg}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_project_config_linked_from_outside_is_refused() {
+    let f = fixture(None, None);
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("credentials");
+    fs::write(&secret, "aws_secret = AKIASECRET\n").unwrap();
+    fs::create_dir_all(f.paths.workspace.join(".ch")).unwrap();
+    std::os::unix::fs::symlink(&secret, f.paths.project_config()).unwrap();
+    let msg = format!(
+        "{:#}",
+        build_config(&f.paths, &Overrides::default(), &settings()).unwrap_err()
+    );
+    assert!(msg.contains("points outside the workspace"), "{msg}");
+    assert!(!msg.contains("AKIASECRET"), "{msg}");
+}
+
+#[test]
 fn paths_layout() {
     let p = Paths {
         home: Path::new("/h").into(),
@@ -407,13 +435,26 @@ fn project_without_restricted_settings_needs_no_trust() {
 fn a_rule_saved_from_the_repl_keeps_trust() {
     // Nothing restricted at first, then the REPL saves one allow rule.
     let f = fixture(None, Some("[agent]\nmax_steps = 3\n"));
-    let start = toml::Table::new();
+    let mut trusted = toml::Table::new();
     fs::write(
         f.paths.project_config(),
         "[agent]\nmax_steps = 3\n[plugins.safety]\nallow = [\"bash:cargo test *\"]\n",
     )
     .unwrap();
-    assert!(trust_saved_rule(&f.paths, &settings(), &start, "bash:cargo test *").unwrap());
+    assert!(trust_saved_rule(&f.paths, &settings(), &mut trusted, "bash:cargo test *").unwrap());
+    let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
+    assert!(matches!(
+        loaded.project,
+        ProjectTrust::Trusted { saved: true, .. }
+    ));
+
+    // A second rule saved in the same session keeps it trusted too.
+    fs::write(
+        f.paths.project_config(),
+        "[agent]\nmax_steps = 3\n[plugins.safety]\nallow = [\"bash:cargo test *\", \"bash:make *\"]\n",
+    )
+    .unwrap();
+    assert!(trust_saved_rule(&f.paths, &settings(), &mut trusted, "bash:make *").unwrap());
     let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
     assert!(matches!(
         loaded.project,
@@ -427,7 +468,9 @@ fn a_rule_saved_from_the_repl_keeps_trust() {
         "[plugins.safety]\nmode = \"bypass\"\nallow = [\"bash:cargo test *\"]\n",
     )
     .unwrap();
-    assert!(!trust_saved_rule(&f.paths, &settings(), &start, "bash:cargo test *").unwrap());
+    let mut trusted = toml::Table::new();
+    assert!(!trust_saved_rule(&f.paths, &settings(), &mut trusted, "bash:cargo test *").unwrap());
+    assert!(trusted.is_empty(), "a failed check keeps the baseline");
     let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
     assert!(matches!(loaded.project, ProjectTrust::Untrusted { .. }));
 }

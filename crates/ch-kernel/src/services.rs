@@ -3,7 +3,13 @@
 use std::any::{Any, TypeId, type_name};
 use std::collections::HashMap;
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Where `ch` keeps the user's own files (`$CH_HOME`, or `~/.ch`). The program that runs
+/// the session provides it; plugins look for user-level files under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChHome(pub PathBuf);
 
 #[derive(Default, Clone)]
 pub struct Services {

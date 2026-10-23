@@ -49,6 +49,24 @@ pub fn system_reminder(text: &str) -> String {
     format!("<system-reminder>\n{}\n</system-reminder>", text.trim())
 }
 
+/// Replaces `path` with `bytes` so that readers see the old file or the new one, never
+/// a partial write: the bytes go to a unique temp file next to it, reach the disk, and
+/// are renamed over it.
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let written = std::fs::File::create(&tmp).and_then(|mut f| {
+        f.write_all(bytes)?;
+        f.sync_all()
+    });
+    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,5 +90,18 @@ mod tests {
     fn binary_detection() {
         assert!(looks_binary(b"ab\0cd"));
         assert!(!looks_binary(b"plain text"));
+    }
+
+    #[test]
+    fn write_atomic_replaces_the_file_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.toml");
+        std::fs::write(&path, "old").unwrap();
+        write_atomic(&path, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(names.len(), 1);
+        assert!(write_atomic(&dir.path().join("missing/f"), b"x").is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

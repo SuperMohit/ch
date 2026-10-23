@@ -142,25 +142,50 @@ pub fn settings_hash(settings: &Table) -> String {
         .collect()
 }
 
-/// One `key.path = value` line per setting, for showing the user what they would trust.
-pub fn describe(settings: &Table) -> Vec<String> {
-    let mut lines = Vec::new();
-    describe_into(settings, "", &mut lines);
-    lines
+/// One `(key.path, value)` per setting, for showing the user what they would trust.
+/// The project chose these keys and values, so nothing in them can move the cursor or
+/// reorder text: keys that aren't bare TOML keys are quoted, and control and bidi
+/// characters are shown escaped.
+pub fn describe(settings: &Table) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    describe_into(settings, "", &mut out);
+    out
 }
 
-fn describe_into(table: &Table, prefix: &str, out: &mut Vec<String>) {
+fn describe_into(table: &Table, prefix: &str, out: &mut Vec<(String, String)>) {
     for (key, value) in table {
-        let path = if prefix.is_empty() {
+        let key = if !key.is_empty()
+            && key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
             key.clone()
+        } else {
+            printable(&format!("{key:?}"))
+        };
+        let path = if prefix.is_empty() {
+            key
         } else {
             format!("{prefix}.{key}")
         };
         match value {
             Value::Table(t) => describe_into(t, &path, out),
-            other => out.push(format!("{path} = {other}")),
+            other => out.push((path, printable(&other.to_string()))),
         }
     }
+}
+
+fn printable(text: &str) -> String {
+    let bidi = |c: char| matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+    text.chars()
+        .map(|c| {
+            if c.is_control() || bidi(c) {
+                c.escape_unicode().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 /// Appends `values` to the list at `path` in `config`, skipping duplicates.
@@ -266,7 +291,8 @@ impl TrustStore {
         let text = format!(
             "# Projects whose .ch/config.toml settings you trusted. Managed by ch.\n\n{body}"
         );
-        std::fs::write(&self.path, text).with_context(|| format!("writing {}", self.path.display()))
+        ch_kernel::util::write_atomic(&self.path, text.as_bytes())
+            .with_context(|| format!("writing {}", self.path.display()))
     }
 }
 
@@ -280,10 +306,7 @@ mod tests {
     }
 
     fn keys(t: &Table) -> Vec<String> {
-        let mut keys: Vec<String> = describe(t)
-            .into_iter()
-            .map(|l| l.split(" = ").next().unwrap().to_string())
-            .collect();
+        let mut keys: Vec<String> = describe(t).into_iter().map(|(k, _)| k).collect();
         keys.sort();
         keys
     }
@@ -415,7 +438,33 @@ mod tests {
         let layer = split("[plugins.provider-anthropic]\nbase_url = \"https://evil.example\"");
         assert_eq!(
             describe(&layer.restricted),
-            ["plugins.provider-anthropic.base_url = \"https://evil.example\""]
+            [(
+                "plugins.provider-anthropic.base_url".to_string(),
+                "\"https://evil.example\"".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn describe_escapes_what_could_redraw_the_prompt() {
+        let layer = split(
+            r#"
+            [plugins."zz\u001b[1A\r\u001b[2K\u2066 plugins.x"]
+            y_command = "a\nb\u202ec"
+            "#,
+        );
+        let shown = describe(&layer.restricted);
+        assert_eq!(shown.len(), 1);
+        let (key, value) = &shown[0];
+        let line = format!("{key} = {value}");
+        assert!(
+            !line.chars().any(|c| c.is_control() || c == '\u{202e}'),
+            "{line:?}"
+        );
+        assert!(key.starts_with("plugins.\"zz\\u{1b}[1A"), "{key}");
+        assert!(
+            value.contains("\\u{a}") && value.contains("\\u{202e}"),
+            "{value}"
         );
     }
 

@@ -38,11 +38,11 @@ mod terminal;
 mod turn_tests;
 mod view;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ch_kernel::{Frontend, Plugin, PluginManifest, RegisterCx, Session};
+use ch_kernel::{ChHome, Frontend, Plugin, PluginManifest, RegisterCx, Session};
 use serde::{Deserialize, Serialize};
 
 use approval::{ApprovalBridge, ReplApprover};
@@ -70,21 +70,13 @@ impl Default for ReplConfig {
 }
 
 impl ReplConfig {
-    /// The history file to use, if a home directory can be found.
-    pub fn history_path(&self) -> Option<PathBuf> {
+    /// The history file to use; by default `history` in the ch home `home`.
+    pub fn history_path(&self, home: Option<&Path>) -> Option<PathBuf> {
         match &self.history_file {
             Some(p) => Some(expand_home(p)),
-            None => ch_home().map(|h| h.join("history")),
+            None => home.map(|h| h.join("history")),
         }
     }
-}
-
-/// `$CH_HOME`, or `~/.ch`.
-pub fn ch_home() -> Option<PathBuf> {
-    std::env::var_os("CH_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".ch")))
 }
 
 fn expand_home(p: &str) -> PathBuf {
@@ -120,7 +112,8 @@ fn resolve_options(session: &Session) -> ReplOptions {
 /// The `repl` frontend.
 pub struct ReplFrontend {
     bridge: Arc<ApprovalBridge>,
-    config: ReplConfig,
+    /// The history file and how many entries it keeps.
+    history: Option<(PathBuf, usize)>,
 }
 
 #[async_trait]
@@ -136,7 +129,8 @@ impl Frontend for ReplFrontend {
         };
         let options = resolve_options(&session);
         self.bridge.set_active(true);
-        let result = repl::run_repl(session, &mut approvals, &self.config, options).await;
+        let history = self.history.clone();
+        let result = repl::run_repl(session, &mut approvals, history, options).await;
         self.bridge.set_active(false);
         self.bridge.return_receiver(approvals);
         result
@@ -159,10 +153,14 @@ impl Plugin for FrontendReplPlugin {
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
         let config: ReplConfig = cx.config()?;
+        let home = cx.service::<ChHome>();
+        let history = config
+            .history_path(home.as_ref().map(|h| h.0.as_path()))
+            .map(|p| (p, config.history_size));
         let bridge = Arc::new(ApprovalBridge::new());
         cx.add_frontend(ReplFrontend {
             bridge: bridge.clone(),
-            config,
+            history,
         });
         cx.add_approver(ReplApprover { bridge });
         Ok(())
@@ -196,6 +194,12 @@ mod tests {
             history_file: Some("/tmp/h".into()),
             ..Default::default()
         };
-        assert_eq!(c.history_path(), Some(PathBuf::from("/tmp/h")));
+        assert_eq!(c.history_path(None), Some(PathBuf::from("/tmp/h")));
+        let c = ReplConfig::default();
+        assert_eq!(
+            c.history_path(Some(Path::new("/h/.ch"))),
+            Some(PathBuf::from("/h/.ch/history"))
+        );
+        assert_eq!(c.history_path(None), None);
     }
 }

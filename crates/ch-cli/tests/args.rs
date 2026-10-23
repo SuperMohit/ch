@@ -1,7 +1,7 @@
 //! Argument parsing, prompt resolution and frontend/approver selection.
 
 use ch_cli::Cli;
-use ch_cli::app::{Selection, resolve_print_prompt, select};
+use ch_cli::app::{Selection, StdinUse, resolve_print_prompt, select};
 use ch_cli::args::{ApproverArg, OutputFormatArg, PermissionMode};
 use ch_cli::config::Overrides;
 use ch_cli::sessions::{Resume, parse_choice};
@@ -123,8 +123,13 @@ fn choosing_a_session_number() {
 
 #[test]
 fn print_prompt_sources() {
-    let no_stdin = || -> anyhow::Result<String> { panic!("stdin must not be read") };
-    let stdin = |s: &'static str| move || -> anyhow::Result<String> { Ok(s.to_string()) };
+    let no_stdin = |_| -> anyhow::Result<String> { panic!("stdin must not be read") };
+    let stdin = |s: &'static str, expected: StdinUse| {
+        move |usage| -> anyhow::Result<String> {
+            assert_eq!(usage, expected);
+            Ok(s.to_string())
+        }
+    };
 
     let cli = parse(&["-p", "task"]);
     assert_eq!(resolve_print_prompt(&cli, false, no_stdin).unwrap(), "task");
@@ -138,24 +143,28 @@ fn print_prompt_sources() {
     // `-` reads stdin only.
     let cli = parse(&["-p", "-"]);
     assert_eq!(
-        resolve_print_prompt(&cli, false, stdin("from stdin\n")).unwrap(),
+        resolve_print_prompt(&cli, false, stdin("from stdin\n", StdinUse::Task)).unwrap(),
         "from stdin\n"
     );
     // Piped stdin is appended to a given prompt, or used alone.
     let cli = parse(&["-p", "review this"]);
     assert_eq!(
-        resolve_print_prompt(&cli, true, stdin("diff text\n")).unwrap(),
+        resolve_print_prompt(&cli, true, stdin("diff text\n", StdinUse::Extra)).unwrap(),
         "review this\n\ndiff text"
     );
     let cli = parse(&["-p"]);
     assert_eq!(
-        resolve_print_prompt(&cli, true, stdin("only stdin")).unwrap(),
+        resolve_print_prompt(&cli, true, stdin("only stdin", StdinUse::Task)).unwrap(),
         "only stdin"
     );
     // Nothing at all.
     let e = resolve_print_prompt(&cli, false, no_stdin).unwrap_err();
     assert!(e.to_string().contains("no task given"));
-    assert!(resolve_print_prompt(&cli, true, stdin("  \n")).is_err());
+    assert!(resolve_print_prompt(&cli, true, stdin("  \n", StdinUse::Task)).is_err());
+    // An unquoted task would lose its second word.
+    let cli = parse(&["-p", "fix", "tests"]);
+    let e = resolve_print_prompt(&cli, false, no_stdin).unwrap_err();
+    assert!(e.to_string().contains("ch -p \"fix tests\""), "{e}");
 }
 
 #[test]
