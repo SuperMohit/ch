@@ -2,7 +2,8 @@
 
 use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use ch_kernel::{
@@ -49,21 +50,34 @@ pub fn select(cli: &Cli, kcfg: &KernelConfig) -> Selection {
     Selection { frontend, approver }
 }
 
+/// What piped stdin is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdinUse {
+    /// It is the task (`-p -`, or no prompt given): read all of it.
+    Task,
+    /// It is added to a prompt given on the command line.
+    Extra,
+}
+
 /// The task for `-p`: the `-p` value or PROMPT, with piped stdin appended (or used
 /// alone when the prompt is `-` or missing).
 pub fn resolve_print_prompt(
     cli: &Cli,
     stdin_piped: bool,
-    read_stdin: impl FnOnce() -> anyhow::Result<String>,
+    read_stdin: impl FnOnce(StdinUse) -> anyhow::Result<String>,
 ) -> anyhow::Result<String> {
-    let given = match &cli.print {
-        Some(Some(p)) => Some(p.clone()),
-        _ => cli.prompt.clone(),
+    let given = match (&cli.print, &cli.prompt) {
+        (Some(Some(p)), Some(rest)) => bail!(
+            "`-p` took `{p}` as the task and `{rest}` was left over; quote the whole task: \
+             ch -p \"{p} {rest}\""
+        ),
+        (Some(Some(p)), None) => Some(p.clone()),
+        (_, prompt) => prompt.clone(),
     };
     let prompt = match given.as_deref() {
-        Some("-") => read_stdin()?,
+        Some("-") => read_stdin(StdinUse::Task)?,
         Some(p) if stdin_piped => {
-            let input = read_stdin()?;
+            let input = read_stdin(StdinUse::Extra)?;
             if input.trim().is_empty() {
                 p.to_string()
             } else {
@@ -71,7 +85,7 @@ pub fn resolve_print_prompt(
             }
         }
         Some(p) => p.to_string(),
-        None if stdin_piped => read_stdin()?,
+        None if stdin_piped => read_stdin(StdinUse::Task)?,
         None => String::new(),
     };
     if prompt.trim().is_empty() {
@@ -80,12 +94,77 @@ pub fn resolve_print_prompt(
     Ok(prompt)
 }
 
-fn read_all_stdin() -> anyhow::Result<String> {
-    let mut s = String::new();
-    std::io::stdin()
-        .read_to_string(&mut s)
-        .context("reading the task from stdin")?;
-    Ok(s)
+/// How long piped stdin may stay silent before a prompt from the command line runs
+/// without it.
+const EXTRA_STDIN_WAIT: Duration = Duration::from_secs(3);
+
+fn read_process_stdin(usage: StdinUse) -> anyhow::Result<String> {
+    let wait = match usage {
+        StdinUse::Task => None,
+        StdinUse::Extra => Some(EXTRA_STDIN_WAIT),
+    };
+    match read_unless_silent(std::io::stdin(), wait).context("reading stdin")? {
+        Some(text) => Ok(text),
+        None => {
+            eprintln!(
+                "ch: nothing arrived on stdin within {}s, so the task runs without it. \
+                 Redirect stdin from /dev/null to skip the wait.",
+                EXTRA_STDIN_WAIT.as_secs()
+            );
+            Ok(String::new())
+        }
+    }
+}
+
+/// Reads `reader` to the end, or returns `None` if its first byte doesn't arrive within
+/// `wait`: a stdin that is open but never written (ssh, a parent process) must not
+/// block the run. The reader thread is left blocked in that case.
+fn read_unless_silent(
+    mut reader: impl Read + Send + 'static,
+    wait: Option<Duration>,
+) -> anyhow::Result<Option<String>> {
+    enum Progress {
+        Started,
+        Done(std::io::Result<Vec<u8>>),
+    }
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = vec![0; 8192];
+        let n = match reader.read(&mut bytes) {
+            Ok(n) => n,
+            Err(e) => {
+                let _ = tx.send(Progress::Done(Err(e)));
+                return;
+            }
+        };
+        bytes.truncate(n);
+        if n > 0 {
+            let _ = tx.send(Progress::Started);
+            if let Err(e) = reader.read_to_end(&mut bytes) {
+                let _ = tx.send(Progress::Done(Err(e)));
+                return;
+            }
+        }
+        let _ = tx.send(Progress::Done(Ok(bytes)));
+    });
+    let first = match wait {
+        Some(wait) => match rx.recv_timeout(wait) {
+            Ok(p) => p,
+            Err(mpsc::RecvTimeoutError::Timeout) => return Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => bail!("the stdin reader stopped"),
+        },
+        None => rx.recv().context("the stdin reader stopped")?,
+    };
+    let done = match first {
+        Progress::Started => rx.recv().context("the stdin reader stopped")?,
+        done => done,
+    };
+    let Progress::Done(bytes) = done else {
+        bail!("the stdin reader stopped");
+    };
+    Ok(Some(
+        String::from_utf8(bytes?).context("stdin is not UTF-8")?,
+    ))
 }
 
 /// Prints the numbered session list to stderr and reads the choice from stdin.
@@ -230,10 +309,10 @@ pub async fn run_with(
     if cli.is_print() {
         let prompt = match stdin {
             Stdin::Process => {
-                resolve_print_prompt(&cli, !std::io::stdin().is_terminal(), read_all_stdin)?
+                resolve_print_prompt(&cli, !std::io::stdin().is_terminal(), read_process_stdin)?
             }
-            Stdin::Text(text) => resolve_print_prompt(&cli, true, move || Ok(text))?,
-            Stdin::None => resolve_print_prompt(&cli, false, || Ok(String::new()))?,
+            Stdin::Text(text) => resolve_print_prompt(&cli, true, move |_| Ok(text))?,
+            Stdin::None => resolve_print_prompt(&cli, false, |_| Ok(String::new()))?,
         };
         print_options(
             &mut services,
@@ -280,4 +359,40 @@ pub async fn run_with(
     }
     let session = builder.build()?;
     frontend.run(session).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn piped_stdin_that_stays_silent_is_skipped() {
+        let wait = Some(Duration::from_millis(50));
+        let (reader, writer) = std::io::pipe().unwrap();
+        assert_eq!(read_unless_silent(reader, wait).unwrap(), None);
+        drop(writer);
+
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        writer.write_all(b"diff text").unwrap();
+        let slow = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            writer.write_all(b" and more").unwrap();
+        });
+        assert_eq!(
+            read_unless_silent(reader, wait).unwrap().as_deref(),
+            Some("diff text and more")
+        );
+        slow.join().unwrap();
+
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(writer);
+        assert_eq!(
+            read_unless_silent(reader, wait).unwrap().as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            read_unless_silent(&b"task"[..], None).unwrap().as_deref(),
+            Some("task")
+        );
+    }
 }
