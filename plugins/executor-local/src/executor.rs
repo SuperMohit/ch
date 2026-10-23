@@ -24,10 +24,16 @@ const FIXED_ENV: &[(&str, &str)] = &[
     ("TERM", "dumb"),
 ];
 
+/// Variables the built-in providers read their API key from by default.
+pub const DEFAULT_KEY_VARS: &[&str] = &["ANTHROPIC_API_KEY", "OPENAI_API_KEY"];
+
 /// Runs `/bin/sh -c <command>` in a new process group on this machine.
 #[derive(Debug, Clone)]
 pub struct LocalExecutor {
     config: LocalExecutorConfig,
+    /// Removed from every command's environment, so the model can't read the
+    /// provider's API key with `printenv` or `echo $VAR`.
+    hidden_env: Vec<String>,
 }
 
 impl Default for LocalExecutor {
@@ -45,10 +51,23 @@ enum Ending {
 
 impl LocalExecutor {
     pub fn new(config: LocalExecutorConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            hidden_env: DEFAULT_KEY_VARS.iter().map(|v| v.to_string()).collect(),
+        }
     }
 
-    fn build_command(request: &ExecRequest) -> Command {
+    /// Also removes `names` from every command's environment.
+    pub fn hide_env(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        for name in names {
+            if !self.hidden_env.contains(&name) {
+                self.hidden_env.push(name);
+            }
+        }
+        self
+    }
+
+    fn build_command(&self, request: &ExecRequest) -> Command {
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c")
             .arg(&request.command)
@@ -61,6 +80,9 @@ impl LocalExecutor {
             } else {
                 Stdio::null()
             });
+        for name in &self.hidden_env {
+            cmd.env_remove(name);
+        }
         for (k, v) in &request.env {
             cmd.env(k, v);
         }
@@ -108,7 +130,7 @@ impl Executor for LocalExecutor {
         cancel: CancellationToken,
     ) -> anyhow::Result<ExecResult> {
         let started = Instant::now();
-        let mut child = Self::build_command(&request).spawn().with_context(|| {
+        let mut child = self.build_command(&request).spawn().with_context(|| {
             format!(
                 "failed to start /bin/sh in {}",
                 request.cwd.as_path().display()
