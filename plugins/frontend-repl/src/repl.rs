@@ -4,7 +4,8 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Instant;
 
-use ch_kernel::{Outcome, Session, TerminationReason};
+use ch_kernel::{AgentEvent, Outcome, Session, TerminationReason};
+use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -46,6 +47,9 @@ pub(crate) async fn run_repl(
     });
     let mut editor = LineEditor::spawn(history, commands);
     let mut term = Term::new();
+    // One receiver for the whole REPL, so events emitted outside a turn (by a slash
+    // command, or by a plugin while waiting at the prompt) are shown too.
+    let mut events = session.events().subscribe();
 
     banner(&mut term, &session);
     if let Some(prompt) = options.initial_prompt.filter(|p| !p.trim().is_empty()) {
@@ -53,6 +57,7 @@ pub(crate) async fn run_repl(
         run_turn(
             &mut session,
             prompt,
+            &mut events,
             approvals,
             &mut term,
             KeyPoller::start(),
@@ -63,6 +68,7 @@ pub(crate) async fn run_repl(
     let mut ctrl_c_once = false;
     let mut code = 0;
     loop {
+        show_events(&mut events, &mut term);
         let input = match editor.read().await {
             Ok(i) => i,
             Err(e) => {
@@ -89,7 +95,15 @@ pub(crate) async fn run_repl(
         if line.is_empty() {
             continue;
         }
-        if let Some(result) = run_command(&mut session, &line, KeyPoller::start()).await {
+        let command = run_command(
+            &mut session,
+            &line,
+            &mut events,
+            &mut term,
+            KeyPoller::start(),
+        )
+        .await;
+        if let Some(result) = command {
             match result {
                 Ok(Outcome::Done) => {}
                 Ok(Outcome::Message(text)) => term.write(&render_message(&text)),
@@ -97,6 +111,7 @@ pub(crate) async fn run_repl(
                     run_turn(
                         &mut session,
                         prompt,
+                        &mut events,
                         approvals,
                         &mut term,
                         KeyPoller::start(),
@@ -108,7 +123,15 @@ pub(crate) async fn run_repl(
             }
             continue;
         }
-        run_turn(&mut session, line, approvals, &mut term, KeyPoller::start()).await;
+        run_turn(
+            &mut session,
+            line,
+            &mut events,
+            approvals,
+            &mut term,
+            KeyPoller::start(),
+        )
+        .await;
     }
 
     editor.shutdown();
@@ -116,21 +139,25 @@ pub(crate) async fn run_repl(
     Ok(code)
 }
 
-/// Runs a slash command with Esc and Ctrl-C cancelling it, as they do a turn. The
-/// terminal would otherwise be in cooked mode, where Ctrl-C kills `ch` before the
-/// session is saved.
+/// Runs a slash command with Esc and Ctrl-C cancelling it, as they do a turn, and shows
+/// the events it emits. The terminal would otherwise be in cooked mode, where Ctrl-C
+/// kills `ch` before the session is saved.
 pub(crate) async fn run_command(
     session: &mut Session,
     line: &str,
+    events: &mut Receiver<AgentEvent>,
+    term: &mut Term,
     mut keys: Option<KeyPoller>,
 ) -> Option<anyhow::Result<Outcome>> {
     let cancel = session.cancel_handle();
+    let mut view = TurnView::new();
     let result = {
         let fut = session.run_command(line);
         tokio::pin!(fut);
         loop {
             tokio::select! {
                 result = &mut fut => break result,
+                Ok(ev) = events.recv() => term.apply(view.handle(&ev)),
                 key = next_key(&mut keys) => match key {
                     Some(k) if is_interrupt_key(&k) => cancel.cancel(),
                     Some(_) => {}
@@ -140,10 +167,19 @@ pub(crate) async fn run_command(
         }
     };
     drop(keys);
+    drain(events, &mut view, term);
+    term.apply(view.finish());
     // A command that runs no turn leaves the cancel pending, where it would cancel
     // the next turn instead.
     cancel.clear_pending();
     result
+}
+
+/// Shows events emitted since the last turn or command.
+fn show_events(events: &mut Receiver<AgentEvent>, term: &mut Term) {
+    let mut view = TurnView::new();
+    drain(events, &mut view, term);
+    term.apply(view.finish());
 }
 
 fn banner(term: &mut Term, session: &Session) {
@@ -180,11 +216,11 @@ fn shorten_home(path: &Path) -> String {
 pub(crate) async fn run_turn(
     session: &mut Session,
     prompt: String,
+    events: &mut Receiver<AgentEvent>,
     approvals: &mut UnboundedReceiver<Pending>,
     term: &mut Term,
     mut keys: Option<KeyPoller>,
 ) {
-    let mut events = session.events().subscribe();
     let cancel = session.cancel_handle();
     let workspace = session.workspace().clone();
     let on_saved = session.registry().services.get::<RuleSaved>();
@@ -219,7 +255,7 @@ pub(crate) async fn run_turn(
                 },
                 Some(pending) = approvals.recv() => {
                     // Render what led up to the request (its tool line) first.
-                    drain(&mut events, &mut view, term);
+                    drain(events, &mut view, term);
                     term.apply(view.finish());
                     let answer =
                         ask(&pending.request, &mut keys, term, &workspace, on_saved.as_deref()).await;
@@ -232,7 +268,7 @@ pub(crate) async fn run_turn(
             }
         }
     };
-    drain(&mut events, &mut view, term);
+    drain(events, &mut view, term);
     term.apply(view.finish());
     drop(keys);
 
@@ -246,11 +282,7 @@ pub(crate) async fn run_turn(
     }
 }
 
-fn drain(
-    events: &mut tokio::sync::broadcast::Receiver<ch_kernel::AgentEvent>,
-    view: &mut TurnView,
-    term: &mut Term,
-) {
+fn drain(events: &mut Receiver<AgentEvent>, view: &mut TurnView, term: &mut Term) {
     loop {
         match events.try_recv() {
             Ok(ev) => term.apply(view.handle(&ev)),
