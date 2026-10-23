@@ -48,6 +48,9 @@ const CORPUS: &[&str] = &[
     "ls 10> f",
     "ls >&/dev/null",
     "cat <<'EOF'\n$(rm -rf ~)\nEOF\nls",
+    "cat <<EOF\n$(rm -rf ~)\nEOF",
+    "cat <<EOF | wc -l\n`sudo id`\nEOF",
+    "cat <<EOF\n\\$(rm x) $HOME\nEOF",
     "cat <<\"EOF\"\nx\nEOF",
     "cat <<EOF\nx",
     // Substitutions and nesting.
@@ -195,7 +198,6 @@ const CORPUS: &[&str] = &[
     "ls *.rs",
     "npm test && make",
     // Known gaps: classified wrongly today, so a fix shows up here as a deliberate diff.
-    "cat <<EOF\n$(rm -rf ~)\nEOF",
     "echo $'\\' '; rm -rf ~ #'",
     "TERM=x git --config-env=core.fsmonitor=TERM status",
     "timeout -s KILL 5 rm -rf /",
