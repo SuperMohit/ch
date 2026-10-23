@@ -225,6 +225,11 @@ impl KeyPoller {
     pub async fn next(&mut self) -> Option<KeyEvent> {
         self.rx.recv().await
     }
+
+    /// Key presses already read but not yet taken.
+    pub fn take_pending(&mut self) -> Vec<KeyEvent> {
+        std::iter::from_fn(|| self.rx.try_recv().ok()).collect()
+    }
 }
 
 impl Drop for KeyPoller {

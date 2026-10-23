@@ -12,7 +12,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::approval::{Pending, is_interrupt_key};
 use crate::ask::ask;
 use crate::format::{bold, dim, footer, red};
-use crate::input::{Input, LineEditor, normalize_input};
+use crate::input::{Input, LineEditor, TypeAhead, normalize_input};
 use crate::markdown::render_message;
 use crate::terminal::{KeyPoller, Term, install_panic_hook, next_key};
 use crate::view::TurnView;
@@ -50,6 +50,7 @@ pub(crate) async fn run_repl(
     // One receiver for the whole REPL, so events emitted outside a turn (by a slash
     // command, or by a plugin while waiting at the prompt) are shown too.
     let mut events = session.events().subscribe();
+    let mut typed = TypeAhead::default();
 
     banner(&mut term, &session);
     if let Some(prompt) = options.initial_prompt.filter(|p| !p.trim().is_empty()) {
@@ -60,6 +61,7 @@ pub(crate) async fn run_repl(
             &mut events,
             approvals,
             &mut term,
+            &mut typed,
             KeyPoller::start(),
         )
         .await;
@@ -69,7 +71,7 @@ pub(crate) async fn run_repl(
     let mut code = 0;
     loop {
         show_events(&mut events, &mut term);
-        let input = match editor.read().await {
+        let input = match editor.read(typed.take()).await {
             Ok(i) => i,
             Err(e) => {
                 term.line(&red(&format!("error: {e:#}")));
@@ -100,6 +102,7 @@ pub(crate) async fn run_repl(
             &line,
             &mut events,
             &mut term,
+            &mut typed,
             KeyPoller::start(),
         )
         .await;
@@ -114,6 +117,7 @@ pub(crate) async fn run_repl(
                         &mut events,
                         approvals,
                         &mut term,
+                        &mut typed,
                         KeyPoller::start(),
                     )
                     .await;
@@ -129,6 +133,7 @@ pub(crate) async fn run_repl(
             &mut events,
             approvals,
             &mut term,
+            &mut typed,
             KeyPoller::start(),
         )
         .await;
@@ -147,6 +152,7 @@ pub(crate) async fn run_command(
     line: &str,
     events: &mut Receiver<AgentEvent>,
     term: &mut Term,
+    typed: &mut TypeAhead,
     mut keys: Option<KeyPoller>,
 ) -> Option<anyhow::Result<Outcome>> {
     let cancel = session.cancel_handle();
@@ -160,7 +166,7 @@ pub(crate) async fn run_command(
                 Ok(ev) = events.recv() => term.apply(view.handle(&ev)),
                 key = next_key(&mut keys) => match key {
                     Some(k) if is_interrupt_key(&k) => cancel.cancel(),
-                    Some(_) => {}
+                    Some(k) => typed.push(&k),
                     None => keys = None,
                 },
             }
@@ -219,6 +225,7 @@ pub(crate) async fn run_turn(
     events: &mut Receiver<AgentEvent>,
     approvals: &mut UnboundedReceiver<Pending>,
     term: &mut Term,
+    typed: &mut TypeAhead,
     mut keys: Option<KeyPoller>,
 ) {
     let cancel = session.cancel_handle();
@@ -249,7 +256,7 @@ pub(crate) async fn run_turn(
                         term.apply(view.finish());
                         term.line(&dim("  ⎿ interrupting…"));
                     }
-                    Some(_) => {}
+                    Some(k) => typed.push(&k),
                     // The key reader died; keep going without it.
                     None => keys = None,
                 },
@@ -257,6 +264,22 @@ pub(crate) async fn run_turn(
                     // Render what led up to the request (its tool line) first.
                     drain(events, &mut view, term);
                     term.apply(view.finish());
+                    // Keys typed before the question are type-ahead or an interrupt,
+                    // never its answer.
+                    let pending_keys = keys.as_mut().map(KeyPoller::take_pending);
+                    for key in pending_keys.unwrap_or_default() {
+                        if is_interrupt_key(&key) && !interrupted {
+                            interrupted = true;
+                            cancel.cancel();
+                            term.line(&dim("  ⎿ interrupting…"));
+                        } else {
+                            typed.push(&key);
+                        }
+                    }
+                    if interrupted {
+                        // The turn is being cancelled, which answers the request.
+                        continue;
+                    }
                     let answer =
                         ask(&pending.request, &mut keys, term, &workspace, on_saved.as_deref()).await;
                     if answer.cancel_turn {
