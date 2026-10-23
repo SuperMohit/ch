@@ -35,7 +35,9 @@ pub use events::{AgentEvent, CompactionKind, EventBus, EventSink};
 pub use executor::{ExecRequest, ExecResult, Executor};
 pub use frontend::Frontend;
 pub use history::{Event, EventId, History};
-pub use hook::{Hook, HookDecision, HookEvent, HookOutcome, HookPoint, Verdict, run_hooks};
+pub use hook::{
+    Hook, HookAsk, HookDecision, HookEvent, HookOutcome, HookPoint, Verdict, run_hooks,
+};
 pub use model::{
     ModelError, ModelEvent, ModelProvider, ModelRequest, ModelResponse, ModelStream, complete,
 };

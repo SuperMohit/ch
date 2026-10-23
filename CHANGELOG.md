@@ -45,6 +45,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 ### Security
 
+- When several hooks ask about the same tool call, "always allow" covers only the hook it was given for. Before, only the first hook's question was kept, so an "always allow" for the permission check also approved a later hook's question without asking. Several open questions are shown in one prompt that can only be allowed once.
 - Commands run by `bash` no longer see the provider API keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and any variable named by an `api_key_env` setting are removed from their environment. Before, `echo $ANTHROPIC_API_KEY` showed the key to the model without asking.
 - Hooks get the event read-only, so a `Rewrite` decision is the only way to change a tool call. Before, a hook could edit the input in place after the permission check had approved it.
 - A `bash` call with no command in it (empty, or only `;` or `&&`) and a `web_fetch` URL that can't be parsed or has no host now ask before running in `ask` and `accept-edits` modes. Before, the permission check allowed them and relied on the tool to reject them.

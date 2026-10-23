@@ -41,7 +41,7 @@ async fn hook_applies_the_policy() {
     );
     let v = verdict("", "bash", json!({"command": "npm test"}), false).await;
     assert!(
-        matches!(&v, Verdict::Ask { key: Some(k), .. } if k == "bash:npm test *"),
+        matches!(&v, Verdict::Ask { asks } if matches!(asks.as_slice(), [a] if a.key.as_deref() == Some("bash:npm test *"))),
         "{v:?}"
     );
     let v = verdict("", "bash", json!({"command": "git status"}), false).await;

@@ -9,7 +9,8 @@
 //!
 //! - `Deny` and `Stop` end the chain immediately; later hooks don't run.
 //! - `Ask` is remembered and the chain continues; the result is `Ask` unless a later hook
-//!   denies or stops. The first `Ask` reason (and key) is kept.
+//!   denies or stops. Every hook's ask is kept, so an "always allow" given for one
+//!   hook's key never approves another hook's ask.
 //! - `Rewrite(input)` replaces the tool input (pre_tool) or the prompt text (user_prompt,
 //!   input must be a string) and the chain continues.
 //! - `AppendNote(text)` notes are concatenated in order.
@@ -196,15 +197,22 @@ pub enum Verdict {
         hook: String,
         reason: String,
     },
+    /// Every hook that asked, in chain order (never empty).
     Ask {
-        hook: String,
-        reason: String,
-        key: Option<String>,
+        asks: Vec<HookAsk>,
     },
     Stop {
         hook: String,
         reason: String,
     },
+}
+
+/// One hook's request for approval.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookAsk {
+    pub hook: String,
+    pub reason: String,
+    pub key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -254,7 +262,7 @@ async fn run_chain(
 ) -> (HookOutcome, bool) {
     let point = event.point();
     let mut notes = Vec::new();
-    let mut ask: Option<Verdict> = None;
+    let mut asks = Vec::new();
     let mut rewritten = false;
     for hook in hooks.iter().filter(|h| h.points().contains(&point)) {
         let decision = hook.on(event, cx).await;
@@ -269,15 +277,11 @@ async fn run_chain(
                 let verdict = Verdict::Stop { hook: id, reason };
                 return (HookOutcome { verdict, notes }, rewritten);
             }
-            HookDecision::Ask { reason, key } => {
-                if ask.is_none() {
-                    ask = Some(Verdict::Ask {
-                        hook: id,
-                        reason,
-                        key,
-                    });
-                }
-            }
+            HookDecision::Ask { reason, key } => asks.push(HookAsk {
+                hook: id,
+                reason,
+                key,
+            }),
             HookDecision::Rewrite { input } if allow_rewrite => {
                 rewritten |= apply_rewrite(event, input, &id);
             }
@@ -287,7 +291,11 @@ async fn run_chain(
             HookDecision::AppendNote { text } => notes.push((id, text)),
         }
     }
-    let verdict = ask.unwrap_or(Verdict::Continue);
+    let verdict = if asks.is_empty() {
+        Verdict::Continue
+    } else {
+        Verdict::Ask { asks }
+    };
     (HookOutcome { verdict, notes }, rewritten)
 }
 

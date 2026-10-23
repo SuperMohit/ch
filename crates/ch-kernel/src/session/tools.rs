@@ -202,10 +202,28 @@ impl Session {
                 let msg = format!("Not run: {reason}");
                 (deny(call, msg, notes), Some((hook, reason)))
             }
-            Verdict::Ask { reason, key, .. } => {
-                if key.as_ref().is_some_and(|k| self.always_allow.contains(k)) {
-                    return (Prepared::Run { call, tool, notes }, None);
-                }
+            Verdict::Ask { asks } => {
+                // An "always allow" covers only the ask it was given for.
+                let pending: Vec<_> = asks
+                    .into_iter()
+                    .filter(|a| {
+                        !a.key
+                            .as_ref()
+                            .is_some_and(|k| self.always_allow.contains(k))
+                    })
+                    .collect();
+                let (reason, key) = match pending.as_slice() {
+                    [] => return (Prepared::Run { call, tool, notes }, None),
+                    [one] => (one.reason.clone(), one.key.clone()),
+                    // No single key covers several asks, so "always" isn't offered.
+                    many => (
+                        many.iter()
+                            .map(|a| a.reason.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                        None,
+                    ),
+                };
                 let Some(approver) = self.approver.clone() else {
                     let msg = format!(
                         "Not run: this call needs approval ({reason}), but no one can approve \
