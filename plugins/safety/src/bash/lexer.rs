@@ -302,14 +302,7 @@ impl<'a> Lexer<'a> {
             }
             self.pos += 1;
         }
-        let body_end = self.pos.min(self.chars.len());
-        let body = self.src[self.byte_at(body_start)..self.byte_at(body_end)].to_string();
-        self.pos = (self.pos + 1).min(self.chars.len());
-        let text = self.src[self.byte_at(start)..self.byte_at(self.pos)].to_string();
-        for ch in text.chars() {
-            self.push_char(ch);
-        }
-        self.inner.push(body);
+        self.end_substitution(start, body_start);
     }
 
     fn backtick(&mut self) {
@@ -327,6 +320,12 @@ impl<'a> Lexer<'a> {
             }
             self.pos += 1;
         }
+        self.end_substitution(start, body_start);
+    }
+
+    /// Ends a substitution whose closing character is at `self.pos`: its text stays in
+    /// the current word, and its body (from `body_start`) is kept to be checked too.
+    fn end_substitution(&mut self, start: usize, body_start: usize) {
         let body_end = self.pos.min(self.chars.len());
         let body = self.src[self.byte_at(body_start)..self.byte_at(body_end)].to_string();
         self.pos = (self.pos + 1).min(self.chars.len());
