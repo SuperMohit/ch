@@ -38,7 +38,7 @@
 //! A bare allow rule like `edit_file` does not cover sensitive paths; a rule naming the
 //! path (`edit_file:.env`) does.
 
-pub mod bash;
+mod bash;
 #[cfg(test)]
 mod bash_pin;
 pub mod file_state;

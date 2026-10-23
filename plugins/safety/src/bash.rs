@@ -619,7 +619,9 @@ pub const DENY_LIST: &[DenyRule] = &[
     },
     DenyRule {
         name: "git push",
-        check: Check::Segment(|c| c.program == "git" && git_sub_is(c, "push")),
+        check: Check::Segment(|c| {
+            c.program == "git" && git_subcommand(c).is_some_and(|(s, _)| s == "push")
+        }),
         reason: "Pushing is not allowed from the agent. Commit locally and tell the user \
                  the branch is ready to push.",
     },
@@ -700,10 +702,6 @@ pub fn denied(command: &str, parsed: &Parsed) -> Option<&'static DenyRule> {
         Check::Segment(f) => parsed.all().any(|s| f(&Cmd::of(s))),
         Check::Command(f) => f(command, parsed),
     })
-}
-
-fn git_sub_is(c: &Cmd<'_>, sub: &str) -> bool {
-    git_subcommand(c).is_some_and(|(s, _)| s == sub)
 }
 
 fn is_root_or_home(arg: &str) -> bool {
@@ -884,11 +882,6 @@ fn git_is_read_only(cmd: &Cmd<'_>) -> bool {
     }
 }
 
-/// Whether every part of `parsed` (including nested parts) is read-only.
-pub fn is_read_only(parsed: &Parsed) -> bool {
-    parsed.all().all(segment_is_read_only)
-}
-
 /// The allow rule that "always allow" for this segment would add, e.g.
 /// `bash:git commit *` for `git commit -m x`, `bash:make *` for `make`.
 pub fn ask_key(seg: &Segment) -> String {
@@ -1033,7 +1026,7 @@ mod tests {
     }
 
     fn ro(cmd: &str) -> bool {
-        is_read_only(&parse(cmd))
+        parse(cmd).all().all(segment_is_read_only)
     }
 
     #[test]
@@ -1121,7 +1114,7 @@ mod tests {
         ] {
             let p = parse(cmd);
             let _ = denied(cmd, &p);
-            let _ = is_read_only(&p);
+            let _ = p.all().all(segment_is_read_only);
             for s in p.all() {
                 let _ = ask_key(s);
             }
