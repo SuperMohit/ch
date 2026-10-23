@@ -117,13 +117,14 @@ impl FileState {
         );
     }
 
-    /// Ok if the agent may change `path`: it doesn't exist yet, or it was fully read
-    /// and is unchanged on disk since. The error tells the model what to do.
-    pub fn check_writable(&self, path: &Path) -> Result<(), String> {
+    /// Ok if the agent may change `path`: it doesn't exist yet (`None`), or it was fully
+    /// read and is unchanged on disk since (`Some` of the bytes that were checked, so the
+    /// caller changes exactly what was verified). The error tells the model what to do.
+    pub fn check_writable(&self, path: &Path) -> Result<Option<Vec<u8>>, String> {
         let shown = self.display(path);
         let current = match std::fs::read(path) {
             Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(format!("Could not read `{shown}` to check it: {e}.")),
         };
         let map = self.lock();
@@ -146,7 +147,7 @@ impl FileState {
                  line)."
             ));
         }
-        Ok(())
+        Ok(Some(current))
     }
 
     /// Records that the agent wrote `content` to `path`; it counts as fully read.
@@ -199,7 +200,14 @@ mod tests {
     #[test]
     fn new_files_are_writable() {
         let (dir, fs, _) = setup();
-        assert!(fs.check_writable(&dir.path().join("new.txt")).is_ok());
+        assert_eq!(fs.check_writable(&dir.path().join("new.txt")), Ok(None));
+    }
+
+    #[test]
+    fn writable_returns_the_checked_bytes() {
+        let (_d, fs, path) = setup();
+        fs.record_read(&path, b"one\ntwo\n", true);
+        assert_eq!(fs.check_writable(&path), Ok(Some(b"one\ntwo\n".to_vec())));
     }
 
     #[test]
