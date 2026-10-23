@@ -118,8 +118,9 @@ impl FileState {
     }
 
     /// Ok if the agent may change `path`: it doesn't exist yet (`None`), or it was fully
-    /// read and is unchanged on disk since (`Some` of the bytes that were checked, so the
-    /// caller changes exactly what was verified). The error tells the model what to do.
+    /// read, is unchanged on disk since and has no other hard links (`Some` of the bytes
+    /// that were checked, so the caller changes exactly what was verified). The error
+    /// tells the model what to do.
     pub fn check_writable(&self, path: &Path) -> Result<Option<Vec<u8>>, String> {
         let shown = self.display(path);
         let current = match std::fs::read(path) {
@@ -127,6 +128,15 @@ impl FileState {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(format!("Could not read `{shown}` to check it: {e}.")),
         };
+        // A hard link is the same file under another name, maybe outside the workspace,
+        // where the path checks can't see it.
+        if let Some(links) = hard_links(path).filter(|&n| n > 1) {
+            return Err(format!(
+                "`{shown}` has {links} hard links, so changing it would also change the file \
+                 under its other names, which may be outside the workspace. The file tools \
+                 don't change hard-linked files; if the change is intended, use bash."
+            ));
+        }
         let map = self.lock();
         let Some(entry) = map.get(path) else {
             return Err(format!(
@@ -173,6 +183,17 @@ impl FileState {
     }
 }
 
+#[cfg(unix)]
+fn hard_links(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.nlink())
+}
+
+#[cfg(not(unix))]
+fn hard_links(_path: &Path) -> Option<u64> {
+    None
+}
+
 /// Sorts and merges overlapping or adjacent inclusive ranges.
 fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
     ranges.sort_unstable();
@@ -201,6 +222,21 @@ mod tests {
     fn new_files_are_writable() {
         let (dir, fs, _) = setup();
         assert_eq!(fs.check_writable(&dir.path().join("new.txt")), Ok(None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_linked_files_are_not_writable() {
+        let (_d, fs, path) = setup();
+        let bytes = std::fs::read(&path).unwrap();
+        fs.record_read(&path, &bytes, true);
+        let outside = tempfile::tempdir().unwrap();
+        let other = outside.path().join("other.txt");
+        std::fs::hard_link(&path, &other).unwrap();
+        let err = fs.check_writable(&path).unwrap_err();
+        assert!(err.contains("has 2 hard links"), "{err}");
+        std::fs::remove_file(&other).unwrap();
+        assert!(fs.check_writable(&path).is_ok());
     }
 
     #[test]

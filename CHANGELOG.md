@@ -50,6 +50,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 ### Security
 
+- `edit_file` and `write_file` refuse to change a file that has more than one hard link (on Unix). A hard link is the same file under another name, possibly outside the workspace, such as a dotfile or a package manager's shared store, so editing it changed that file too. Reading a hard-linked file still works.
 - When several hooks ask about the same tool call, "always allow" covers only the hook it was given for. Before, only the first hook's question was kept, so an "always allow" for the permission check also approved a later hook's question without asking. Several open questions are shown in one prompt that can only be allowed once.
 - Commands run by `bash` no longer see the provider API keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and any variable named by an `api_key_env` setting are removed from their environment. Before, `echo $ANTHROPIC_API_KEY` showed the key to the model without asking.
 - Hooks get the event read-only, so a `Rewrite` decision is the only way to change a tool call. Before, a hook could edit the input in place after the permission check had approved it.

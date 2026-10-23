@@ -12,6 +12,10 @@ const MAX_SYMLINKS: usize = 40;
 ///
 /// Paths that don't exist yet (a file about to be written) are resolved by following
 /// the existing part physically and appending the rest.
+///
+/// Hard links can't be seen from a path: a file inside the workspace may be the same
+/// file as one outside it. Reading one is allowed. [`crate::FileState::check_writable`]
+/// refuses to change a file with more than one link (on Unix).
 #[derive(Debug, Clone)]
 pub struct PathGuard {
     root: PathBuf,

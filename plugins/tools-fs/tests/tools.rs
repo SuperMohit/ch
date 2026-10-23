@@ -565,6 +565,33 @@ async fn symlink_escape_is_rejected() {
     assert!(out.content.starts_with("No matches"), "{}", out.content);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn hard_linked_files_are_not_changed() {
+    let ws = Ws::new();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("bashrc");
+    std::fs::write(&target, "export A=1\n").unwrap();
+    std::fs::hard_link(&target, ws.path("rc")).unwrap();
+    // Reading through the link is allowed; changing it isn't.
+    ws.ok("read_file", json!({"path": "rc"})).await;
+    let err = ws
+        .err(
+            "edit_file",
+            json!({"path": "rc", "old_text": "A=1", "new_text": "A=2"}),
+        )
+        .await;
+    assert!(err.contains("2 hard links"), "{err}");
+    let err = ws
+        .err(
+            "write_file",
+            json!({"path": "rc", "content": "x", "overwrite": true}),
+        )
+        .await;
+    assert!(err.contains("2 hard links"), "{err}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "export A=1\n");
+}
+
 #[tokio::test]
 async fn path_escape_is_rejected() {
     let ws = Ws::new();
