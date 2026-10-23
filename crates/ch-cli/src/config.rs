@@ -111,7 +111,7 @@ pub fn build_config(
         files.push(paths.user_config());
     }
     let mut project = ProjectTrust::NothingToTrust;
-    if let Some(table) = read_table(&paths.project_config())? {
+    if let Some(table) = read_project_config(paths)? {
         files.push(paths.project_config());
         let ProjectLayer {
             mut open,
@@ -160,7 +160,7 @@ pub fn trust_saved_rule(
     trusted: &mut Table,
     rule: &str,
 ) -> anyhow::Result<bool> {
-    let Some(table) = read_table(&paths.project_config())? else {
+    let Some(table) = read_project_config(paths)? else {
         return Ok(false);
     };
     let now = ProjectLayer::split(table, settings).restricted;
@@ -178,17 +178,41 @@ pub fn trust_saved_rule(
     Ok(true)
 }
 
-/// Parses a TOML file if it exists.
-fn read_table(path: &Path) -> anyhow::Result<Option<Table>> {
-    if !path.exists() {
-        return Ok(None);
+/// Parses the project's `.ch/config.toml`, if there is one. It is refused when it
+/// resolves outside the workspace, and a parse error gives the line but not its text:
+/// the error may end up in a CI log, and the file could be any file on the machine.
+fn read_project_config(paths: &Paths) -> anyhow::Result<Option<Table>> {
+    let path = paths.project_config();
+    let real = match std::fs::canonicalize(&path) {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading config {}", path.display())),
+    };
+    let root = std::fs::canonicalize(&paths.workspace).unwrap_or_else(|_| paths.workspace.clone());
+    if !real.starts_with(&root) {
+        bail!(
+            "{} points outside the workspace, to {}; ch only reads a project config inside \
+             the project. Put shared settings in {} instead.",
+            path.display(),
+            real.display(),
+            paths.user_config().display()
+        );
     }
-    let text = std::fs::read_to_string(path)
+    let text = std::fs::read_to_string(&real)
         .with_context(|| format!("reading config {}", path.display()))?;
-    let table = text
-        .parse()
-        .with_context(|| format!("parsing config {}", path.display()))?;
-    Ok(Some(table))
+    match text.parse::<Table>() {
+        Ok(table) => Ok(Some(table)),
+        Err(e) => {
+            let line = e.span().map_or(0, |s| {
+                text[..s.start.min(text.len())].matches('\n').count() + 1
+            });
+            bail!(
+                "parsing config {} (line {line}): {}",
+                path.display(),
+                e.message()
+            )
+        }
+    }
 }
 
 /// Applies the command-line layers to an already merged config.

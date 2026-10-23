@@ -267,6 +267,34 @@ fn invalid_config_file_names_the_file() {
 }
 
 #[test]
+fn a_bad_project_config_is_reported_without_its_contents() {
+    let f = fixture(None, Some("ok = 1\naws_secret = AKIASECRET\n"));
+    let msg = format!(
+        "{:#}",
+        build_config(&f.paths, &Overrides::default(), &settings()).unwrap_err()
+    );
+    assert!(msg.contains(".ch/config.toml (line 2)"), "{msg}");
+    assert!(!msg.contains("AKIASECRET"), "{msg}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_project_config_linked_from_outside_is_refused() {
+    let f = fixture(None, None);
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("credentials");
+    fs::write(&secret, "aws_secret = AKIASECRET\n").unwrap();
+    fs::create_dir_all(f.paths.workspace.join(".ch")).unwrap();
+    std::os::unix::fs::symlink(&secret, f.paths.project_config()).unwrap();
+    let msg = format!(
+        "{:#}",
+        build_config(&f.paths, &Overrides::default(), &settings()).unwrap_err()
+    );
+    assert!(msg.contains("points outside the workspace"), "{msg}");
+    assert!(!msg.contains("AKIASECRET"), "{msg}");
+}
+
+#[test]
 fn paths_layout() {
     let p = Paths {
         home: Path::new("/h").into(),
