@@ -15,7 +15,8 @@ use crate::terminal::{KeyPoller, Term};
 /// The user's answer at the approval prompt.
 pub(crate) struct Answer {
     pub approval: Approval,
-    /// Ctrl-C: cancel the turn as well.
+    /// Ctrl-C: cancel the turn. The kernel then answers the call itself, so
+    /// `approval` is not used.
     pub cancel_turn: bool,
 }
 
@@ -67,9 +68,7 @@ pub(crate) async fn ask(
             Some(ApprovalKey::Cancel) => {
                 term.line(&red("cancelled"));
                 return Answer {
-                    approval: Approval::Deny {
-                        reason: Some("the user interrupted the turn".into()),
-                    },
+                    approval: Approval::Deny { reason: None },
                     cancel_turn: true,
                 };
             }

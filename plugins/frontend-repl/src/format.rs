@@ -117,7 +117,7 @@ pub fn tool_end_lines(
 }
 
 /// A one-line description of a tool result: `120 lines`, `exit 1 · 3 lines`, `+3 -1`,
-/// or `error: <first line>`.
+/// or for an error its first line (`exit 1: …` for bash, `timed out: …`).
 pub fn result_summary(name: &str, content: &str, is_error: bool, metadata: &Value) -> String {
     let exit = metadata.get("exit_code").and_then(Value::as_i64);
     let timed_out = metadata.get("timed_out") == Some(&Value::Bool(true));
