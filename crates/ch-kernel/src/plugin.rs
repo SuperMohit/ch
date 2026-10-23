@@ -36,6 +36,10 @@ pub struct PluginManifest {
     /// Enabled unless disabled in config. Plugins that need credentials (telemetry)
     /// default to off and are turned on with `plugins.enable`.
     pub default_enabled: bool,
+    /// Keys of `[plugins.<id>]` a project's `.ch/config.toml` may set without the
+    /// user's trust. List only settings that can't loosen a check, run a command, read
+    /// a path, or choose an endpoint or a credential; every other key needs trust.
+    pub project_settings: Vec<String>,
 }
 
 impl PluginManifest {
@@ -48,6 +52,7 @@ impl PluginManifest {
             requires: Vec::new(),
             provides: Vec::new(),
             default_enabled: true,
+            project_settings: Vec::new(),
         }
     }
 
@@ -68,6 +73,11 @@ impl PluginManifest {
 
     pub fn default_enabled(mut self, on: bool) -> Self {
         self.default_enabled = on;
+        self
+    }
+
+    pub fn project_settings(mut self, keys: &[&str]) -> Self {
+        self.project_settings = keys.iter().map(|s| s.to_string()).collect();
         self
     }
 }

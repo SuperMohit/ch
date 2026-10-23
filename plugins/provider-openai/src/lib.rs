@@ -238,6 +238,14 @@ impl Plugin for OpenAiPlugin {
             "OpenAI-compatible chat-completions model provider (OpenAI, OpenRouter, vLLM, SGLang)",
         )
         .provides(&["provider:openai"])
+        .project_settings(&[
+            "max_retries",
+            "timeout_secs",
+            "retry_base_ms",
+            "context_window",
+            "reasoning_effort",
+            "max_tokens_field",
+        ])
     }
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {

@@ -17,7 +17,7 @@ use crate::config::{
 use crate::list::format_plugin_list;
 use crate::plugins::{OnRuleSaved, print_options, repl_options};
 use crate::sessions::{Resume, format_session_list, load, parse_choice};
-use crate::trust::{TrustStore, describe};
+use crate::trust::{ProjectSettings, TrustStore, describe};
 
 /// Which frontend and approver to use.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,7 +179,8 @@ pub async fn run_with(
     }
 
     let overrides = Overrides::from_cli(&cli);
-    let mut loaded = build_config(&paths, &overrides)?;
+    let project_settings = ProjectSettings::of(&plugins);
+    let mut loaded = build_config(&paths, &overrides, &project_settings)?;
     if let ProjectTrust::Untrusted { settings, hash } = &loaded.project {
         let interactive = matches!(stdin, Stdin::Process)
             && !cli.is_print()
@@ -189,7 +190,7 @@ pub async fn run_with(
         if interactive {
             if confirm_trust(&describe(settings))? {
                 TrustStore::new(&paths.home).trust(&workspace, hash)?;
-                loaded = build_config(&paths, &overrides)?;
+                loaded = build_config(&paths, &overrides, &project_settings)?;
             } else {
                 eprintln!("ch: not applying them this session.");
             }
@@ -246,7 +247,7 @@ pub async fn run_with(
         let on_rule_saved = trusted_settings.map(|settings| {
             let paths = paths.clone();
             Box::new(move |rule: &str| {
-                if let Err(e) = trust_saved_rule(&paths, &settings, rule) {
+                if let Err(e) = trust_saved_rule(&paths, &project_settings, &settings, rule) {
                     tracing::warn!("keeping the project trusted after saving a rule: {e:#}");
                 }
             }) as OnRuleSaved

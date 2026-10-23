@@ -70,6 +70,7 @@ impl Plugin for SafetyPlugin {
             "Path guard, read-before-write tracking and the allow/ask/deny permission policy",
         )
         .provides(&["service:PathGuard", "service:FileState", "hook:pre_tool"])
+        .project_settings(&["ask", "deny"])
     }
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {

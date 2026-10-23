@@ -55,6 +55,7 @@ impl Plugin for PromptBasePlugin {
             "Base system prompt and a tool-rules block generated from the active tools",
         )
         .provides(&["prompt"])
+        .project_settings(&["append"])
     }
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
