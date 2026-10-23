@@ -110,14 +110,14 @@ fn pick_interactively(sessions: &[SessionMeta]) -> anyhow::Result<usize> {
 }
 
 /// Shows the project's restricted settings on stderr and asks whether to trust them.
-fn confirm_trust(lines: &[String]) -> anyhow::Result<bool> {
+fn confirm_trust(settings: &[(String, String)]) -> anyhow::Result<bool> {
     let mut err = std::io::stderr();
     let _ = writeln!(
         err,
         "ch: this project's .ch/config.toml changes settings that need your trust:"
     );
-    for line in lines {
-        let _ = writeln!(err, "  {line}");
+    for (key, value) in settings {
+        let _ = writeln!(err, "  {key} = {value}");
     }
     let _ = write!(
         err,
@@ -195,10 +195,7 @@ pub async fn run_with(
                 eprintln!("ch: not applying them this session.");
             }
         } else {
-            let keys: Vec<String> = describe(settings)
-                .iter()
-                .map(|l| l.split(" = ").next().unwrap_or(l).to_string())
-                .collect();
+            let keys: Vec<String> = describe(settings).into_iter().map(|(k, _)| k).collect();
             eprintln!(
                 "ch: ignoring settings in .ch/config.toml that need your trust: {}. Run `ch` \
                  in a terminal to review and trust them, or pass --trust-project.",
