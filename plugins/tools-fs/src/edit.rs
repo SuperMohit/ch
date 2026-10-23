@@ -120,12 +120,10 @@ impl EditFile {
             }
             Err(e) => return ToolOutput::error(format!("Could not open `{rel}`: {e}.")),
         }
-        if let Err(msg) = ctx.state.check_writable(&path) {
-            return ToolOutput::error(msg);
-        }
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(e) => return ToolOutput::error(format!("Could not read `{rel}`: {e}.")),
+        let bytes = match ctx.state.check_writable(&path) {
+            Ok(Some(b)) => b,
+            Ok(None) => return not_found(ctx, &path, "Use write_file to create a new file."),
+            Err(msg) => return ToolOutput::error(msg),
         };
         if ch_kernel::util::looks_binary(&bytes) {
             return ToolOutput::error(format!(

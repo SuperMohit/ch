@@ -93,12 +93,9 @@ impl WriteFile {
                          with overwrite=true."
                     ));
                 }
-                if let Err(msg) = ctx.state.check_writable(&path) {
-                    return ToolOutput::error(msg);
-                }
-                match std::fs::read(&path) {
-                    Ok(b) => Some(String::from_utf8_lossy(&b).into_owned()),
-                    Err(e) => return ToolOutput::error(format!("Could not read `{rel}`: {e}.")),
+                match ctx.state.check_writable(&path) {
+                    Ok(b) => b.map(|b| String::from_utf8_lossy(&b).into_owned()),
+                    Err(msg) => return ToolOutput::error(msg),
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
