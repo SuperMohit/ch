@@ -244,8 +244,10 @@ pub async fn run_with(
     } else {
         let on_rule_saved = trusted_settings.map(|settings| {
             let paths = paths.clone();
+            let trusted = std::sync::Mutex::new(settings);
             Box::new(move |rule: &str| {
-                if let Err(e) = trust_saved_rule(&paths, &project_settings, &settings, rule) {
+                let mut trusted = trusted.lock().unwrap_or_else(|p| p.into_inner());
+                if let Err(e) = trust_saved_rule(&paths, &project_settings, &mut trusted, rule) {
                     tracing::warn!("keeping the project trusted after saving a rule: {e:#}");
                 }
             }) as OnRuleSaved

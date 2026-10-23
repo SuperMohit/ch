@@ -152,12 +152,12 @@ pub fn build_config(
 
 /// Called after the user saves `rule` to the project's allow list from the REPL. If the
 /// project's restricted settings are now exactly `trusted` plus that rule, records trust
-/// for them so the next run doesn't ask about a change the user made. Returns whether it
-/// did.
+/// for them so the next run doesn't ask about a change the user made, and makes them the
+/// new `trusted` for the next rule. Returns whether it did.
 pub fn trust_saved_rule(
     paths: &Paths,
     settings: &ProjectSettings,
-    trusted: &Table,
+    trusted: &mut Table,
     rule: &str,
 ) -> anyhow::Result<bool> {
     let Some(table) = read_table(&paths.project_config())? else {
@@ -174,6 +174,7 @@ pub fn trust_saved_rule(
         return Ok(false);
     }
     TrustStore::new(&paths.home).trust(&paths.workspace, &crate::trust::settings_hash(&now))?;
+    *trusted = now;
     Ok(true)
 }
 

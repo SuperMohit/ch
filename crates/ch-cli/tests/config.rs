@@ -407,13 +407,26 @@ fn project_without_restricted_settings_needs_no_trust() {
 fn a_rule_saved_from_the_repl_keeps_trust() {
     // Nothing restricted at first, then the REPL saves one allow rule.
     let f = fixture(None, Some("[agent]\nmax_steps = 3\n"));
-    let start = toml::Table::new();
+    let mut trusted = toml::Table::new();
     fs::write(
         f.paths.project_config(),
         "[agent]\nmax_steps = 3\n[plugins.safety]\nallow = [\"bash:cargo test *\"]\n",
     )
     .unwrap();
-    assert!(trust_saved_rule(&f.paths, &settings(), &start, "bash:cargo test *").unwrap());
+    assert!(trust_saved_rule(&f.paths, &settings(), &mut trusted, "bash:cargo test *").unwrap());
+    let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
+    assert!(matches!(
+        loaded.project,
+        ProjectTrust::Trusted { saved: true, .. }
+    ));
+
+    // A second rule saved in the same session keeps it trusted too.
+    fs::write(
+        f.paths.project_config(),
+        "[agent]\nmax_steps = 3\n[plugins.safety]\nallow = [\"bash:cargo test *\", \"bash:make *\"]\n",
+    )
+    .unwrap();
+    assert!(trust_saved_rule(&f.paths, &settings(), &mut trusted, "bash:make *").unwrap());
     let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
     assert!(matches!(
         loaded.project,
@@ -427,7 +440,9 @@ fn a_rule_saved_from_the_repl_keeps_trust() {
         "[plugins.safety]\nmode = \"bypass\"\nallow = [\"bash:cargo test *\"]\n",
     )
     .unwrap();
-    assert!(!trust_saved_rule(&f.paths, &settings(), &start, "bash:cargo test *").unwrap());
+    let mut trusted = toml::Table::new();
+    assert!(!trust_saved_rule(&f.paths, &settings(), &mut trusted, "bash:cargo test *").unwrap());
+    assert!(trusted.is_empty(), "a failed check keeps the baseline");
     let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
     assert!(matches!(loaded.project, ProjectTrust::Untrusted { .. }));
 }
