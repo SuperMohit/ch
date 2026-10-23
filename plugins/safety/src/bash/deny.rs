@@ -207,6 +207,7 @@ mod tests {
             "ls && sudo rm x",
             "git push origin main",
             "git -C repo push",
+            "git --config-env a.b=C push",
             "git reset --hard HEAD~1",
             "git clean -fdx",
             "git clean --force",

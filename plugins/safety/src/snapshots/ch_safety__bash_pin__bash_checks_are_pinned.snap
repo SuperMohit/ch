@@ -430,6 +430,10 @@ expression: out
   top raw="git --namespace n push" words=["git", "--namespace", "n", "push"] op=None sub=false writes=false program="git" assignments=[] normalized="git --namespace n push" read_only=false key="bash:git *"
   too_deep=false denied=Some("git push")
   policy: deny: `git --namespace n push` is on the built-in deny list (git push). Pushing is not allowed from the agent. Commit locally and tell the user the branch is ready to push.
+"git --config-env a.b=C push"
+  top raw="git --config-env a.b=C push" words=["git", "--config-env", "a.b=C", "push"] op=None sub=false writes=false program="git" assignments=[] normalized="git --config-env a.b=C push" read_only=false key="bash:git *"
+  too_deep=false denied=Some("git push")
+  policy: deny: `git --config-env a.b=C push` is on the built-in deny list (git push). Pushing is not allowed from the agent. Commit locally and tell the user the branch is ready to push.
 "git reset --hard HEAD~1"
   top raw="git reset --hard HEAD~1" words=["git", "reset", "--hard", "HEAD~1"] op=None sub=false writes=false program="git" assignments=[] normalized="git reset --hard HEAD~1" read_only=false key="bash:git reset *"
   too_deep=false denied=Some("git reset --hard")
@@ -629,6 +633,14 @@ expression: out
   top raw="git -c core.pager=evil log" words=["git", "-c", "core.pager=evil", "log"] op=None sub=false writes=false program="git" assignments=[] normalized="git -c core.pager=evil log" read_only=false key="bash:git *"
   too_deep=false denied=None
   policy: ask Some("bash:git *"): `git -c core.pager=evil log` is not on the read-only allowlist
+"TERM=x git --config-env=core.fsmonitor=TERM status"
+  top raw="TERM=x git --config-env=core.fsmonitor=TERM status" words=["TERM=x", "git", "--config-env=core.fsmonitor=TERM", "status"] op=None sub=false writes=false program="git" assignments=["TERM=x"] normalized="git --config-env=core.fsmonitor=TERM status" read_only=false key="bash:git *"
+  too_deep=false denied=None
+  policy: ask Some("bash:git *"): `TERM=x git --config-env=core.fsmonitor=TERM status` is not on the read-only allowlist
+"git --config-env core.pager=TERM log"
+  top raw="git --config-env core.pager=TERM log" words=["git", "--config-env", "core.pager=TERM", "log"] op=None sub=false writes=false program="git" assignments=[] normalized="git --config-env core.pager=TERM log" read_only=false key="bash:git *"
+  too_deep=false denied=None
+  policy: ask Some("bash:git *"): `git --config-env core.pager=TERM log` is not on the read-only allowlist
 "rg foo src"
   top raw="rg foo src" words=["rg", "foo", "src"] op=None sub=false writes=false program="rg" assignments=[] normalized="rg foo src" read_only=true key="bash:rg foo *"
   too_deep=false denied=None
@@ -795,10 +807,6 @@ expression: out
   policy: allow
 "echo $'\\' '; rm -rf ~ #'"
   top raw="echo $'\\' '; rm -rf ~ #'" words=["echo", "$\\", "; rm -rf ~ #"] op=None sub=false writes=false program="echo" assignments=[] normalized="echo $\\ ; rm -rf ~ #" read_only=true key="bash:echo $\\ *"
-  too_deep=false denied=None
-  policy: allow
-"TERM=x git --config-env=core.fsmonitor=TERM status"
-  top raw="TERM=x git --config-env=core.fsmonitor=TERM status" words=["TERM=x", "git", "--config-env=core.fsmonitor=TERM", "status"] op=None sub=false writes=false program="git" assignments=["TERM=x"] normalized="git --config-env=core.fsmonitor=TERM status" read_only=true key="bash:git *"
   too_deep=false denied=None
   policy: allow
 "timeout -s KILL 5 rm -rf /"
