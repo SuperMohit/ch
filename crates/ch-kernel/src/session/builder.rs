@@ -170,7 +170,7 @@ pub(super) fn restored_model(meta: &SessionMeta, provider: &str, configured: &st
     }
 }
 
-fn new_session_id() -> String {
+pub(super) fn new_session_id() -> String {
     let ts = Utc::now().format("%Y%m%d-%H%M%S");
     let short = uuid::Uuid::new_v4().simple().to_string();
     format!("{ts}-{}", &short[..6])

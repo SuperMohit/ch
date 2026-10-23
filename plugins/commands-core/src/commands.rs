@@ -55,7 +55,7 @@ impl Command for Help {
     }
 }
 
-/// `/clear`: forgets the conversation.
+/// `/clear`: starts a new conversation; the old one stays saved.
 pub struct Clear;
 
 #[async_trait]
@@ -67,8 +67,21 @@ impl Command for Clear {
         "Start a fresh conversation (token and cost totals are kept)"
     }
     async fn run(&self, _args: &str, cx: &mut CmdCx<'_>) -> anyhow::Result<Outcome> {
-        cx.session.clear();
-        Ok(Outcome::Message("Conversation cleared.".into()))
+        // Don't lose the current conversation.
+        if let Err(e) = cx.session.save() {
+            tracing::warn!("saving the current session before /clear failed: {e:#}");
+        }
+        if let Err(e) = cx.session.clear() {
+            return Ok(Outcome::Message(format!(
+                "Couldn't start a new session: {e:#}"
+            )));
+        }
+        let msg = if cx.session.store().is_some() {
+            "Started a new conversation. The previous one is saved; /resume brings it back."
+        } else {
+            "Started a new conversation."
+        };
+        Ok(Outcome::Message(msg.into()))
     }
 }
 

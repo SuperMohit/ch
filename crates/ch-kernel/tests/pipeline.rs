@@ -993,7 +993,7 @@ async fn saved_sessions_keep_event_ids_and_turn_numbers() {
         .build()
         .unwrap();
     s.run_turn("first").await;
-    s.clear();
+    s.clear().unwrap();
     s.run_turn("blocked").await;
     s.run_turn("second").await;
     let snap = store.load(s.id()).unwrap();
@@ -1003,10 +1003,10 @@ async fn saved_sessions_keep_event_ids_and_turn_numbers() {
         .restore(snap)
         .build()
         .unwrap();
-    assert_eq!(s2.turn(), 3);
+    assert_eq!(s2.turn(), 2);
     s2.run_turn("third").await;
     let last = s2.history().last().unwrap();
-    assert_eq!((last.id, last.turn), (5, 4));
+    assert_eq!((last.id, last.turn), (5, 3));
     for entry in std::fs::read_dir(dir.path()).unwrap() {
         let name = entry.unwrap().file_name();
         assert!(!name.to_string_lossy().ends_with(".tmp"), "{name:?}");
@@ -1524,6 +1524,36 @@ async fn tool_input_streaming_emits_throttled_progress() {
     assert!(!progress.is_empty() && progress.len() < 8, "{progress:?}");
     assert!(progress.windows(2).all(|w| w[0] < w[1]), "{progress:?}");
     assert!(*progress.last().unwrap() <= 8000);
+}
+
+#[tokio::test]
+async fn clear_starts_a_new_session_and_keeps_the_old_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path());
+    let h = harness(
+        vec![Ok(text_reply("one")), Ok(text_reply("two"))],
+        vec![],
+        config(),
+    );
+    let (registry, cfg) = (h.session.registry().clone(), h.session.config().clone());
+    let mut s = Session::builder(registry, cfg)
+        .store(store.clone())
+        .build()
+        .unwrap();
+    s.run_turn("first").await;
+    let old_id = s.id().to_string();
+    s.clear().unwrap();
+    assert_ne!(s.id(), old_id);
+    assert!(s.history().is_empty());
+    assert_eq!(s.turn(), 0);
+    s.run_turn("second").await;
+
+    let old = store.load(&old_id).unwrap();
+    assert_eq!(old.meta.title, "first");
+    assert_eq!(old.history.len(), 2);
+    let new = store.load(s.id()).unwrap();
+    assert_eq!((new.meta.title.as_str(), new.meta.turns), ("second", 1));
+    assert_eq!(store.latest().unwrap().unwrap().id, s.id());
 }
 
 #[cfg(unix)]
