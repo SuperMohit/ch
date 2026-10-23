@@ -1288,6 +1288,63 @@ fn duplicate_tool_names_are_rejected() {
     );
 }
 
+/// A tool whose spec is given; never called.
+struct SpecTool(ToolSpec);
+
+#[async_trait::async_trait]
+impl Tool for SpecTool {
+    fn spec(&self) -> ToolSpec {
+        self.0.clone()
+    }
+    async fn call(&self, _input: Value, _cx: &Cx) -> ToolOutput {
+        ToolOutput::error("not called")
+    }
+}
+
+#[test]
+fn tools_model_apis_would_reject_fail_registration() {
+    let spec = |name: &str, schema: Value| ToolSpec {
+        name: name.into(),
+        description: "x".into(),
+        input_schema: schema,
+        read_only: true,
+    };
+    let object = json!({"type": "object", "properties": {}});
+    for (bad, expected) in [
+        (spec("has space", object.clone()), "must be 1 to 64"),
+        (spec(&"x".repeat(65), object.clone()), "must be 1 to 64"),
+        (spec("t", json!({"type": "string"})), "\"type\": \"object\""),
+        (spec("t", json!("object")), "must be a JSON object"),
+        (
+            spec("t", json!({"type": "object", "properties": []})),
+            "\"properties\"",
+        ),
+        (
+            spec("t", json!({"type": "object", "required": "a"})),
+            "\"required\"",
+        ),
+    ] {
+        let p = vec![plugin("ext", move |cx| {
+            cx.add_tool(SpecTool(bad.clone()));
+            Ok(())
+        })];
+        let err = build(p, &Config::default()).err().unwrap().to_string();
+        assert!(
+            err.contains("plugin `ext`") && err.contains(expected),
+            "{err}"
+        );
+    }
+    // Names that aren't snake_case, such as MCP's `mcp__server__tool`, are accepted.
+    for name in ["mcp__github__get-issue", "Tool_1"] {
+        let ok = spec(name, object.clone());
+        let p = vec![plugin("ext", move |cx| {
+            cx.add_tool(SpecTool(ok.clone()));
+            Ok(())
+        })];
+        assert!(build(p, &Config::default()).is_ok(), "{name}");
+    }
+}
+
 #[test]
 fn missing_requirement_is_reported() {
     let needy: Arc<dyn Plugin> = Arc::new(TestPlugin {

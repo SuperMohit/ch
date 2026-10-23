@@ -37,6 +37,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 - `ch -c --model <id>` uses the given model. Before, a resumed session kept its saved model. A session saved with a different provider from the configured one now resumes on the configured model, instead of sending the old provider's model id.
 - `[model] context_window` and `pricing` apply only to `model.id`, not to a model picked with `/model` or kept from a resumed session.
 - A turn stops with an error after the model's tool calls are cut off by the output limit three responses in a row. Before, each cut-off call was retried until `agent.max_steps` (300 by default) was used up.
+- A plugin that registers a tool model APIs would reject (a name that isn't 1 to 64 letters, digits, `_` or `-`, or an input schema that isn't a `"type": "object"` schema) stops `ch` at startup with an error naming the plugin. Before, the bad tool was sent with every request, and every model call failed.
 - Hooks at the end of a turn run exactly once. Before, they ran twice when one of them stopped the turn, and not at all after a refusal or a blocked prompt.
 - When a hook stops the turn or the user cancels it, the remaining read-only calls from the same response are no longer run.
 - A note a hook adds after the model's final answer is no longer sent with the next prompt.
