@@ -155,13 +155,15 @@ async fn exit_and_quit() {
 }
 
 #[tokio::test]
-async fn clear_forgets_history_but_keeps_usage() {
+async fn clear_starts_a_new_session_but_keeps_usage() {
     let mut s = session(CONFIG, None);
     s.run_turn("hello").await;
     assert!(!s.history().is_empty());
+    let old_id = s.id().to_string();
     let out = message(&mut s, "/clear").await;
-    assert!(out.contains("cleared"));
+    assert!(out.contains("new conversation"), "{out}");
     assert!(s.history().is_empty());
+    assert_ne!(s.id(), old_id);
     assert_eq!(s.usage().input_tokens, 1200);
 }
 

@@ -145,9 +145,18 @@ impl Session {
         setting.filter(|_| self.model == self.kcfg.model.id)
     }
 
-    /// Forgets the conversation (`/clear`). Usage totals are kept.
-    pub fn clear(&mut self) {
+    /// Starts a new conversation under a new id (`/clear`), leaving the old one saved as
+    /// it was. Usage totals are kept.
+    pub fn clear(&mut self) -> anyhow::Result<()> {
+        let id = builder::new_session_id();
+        if let Some(store) = &self.store {
+            self._lock = Some(store.lock(&id)?);
+        }
+        self.id = id;
+        self.created_at = Utc::now();
+        self.turn = 0;
         self.history.clear();
+        Ok(())
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
