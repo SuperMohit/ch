@@ -352,3 +352,54 @@ impl<'a> Lexer<'a> {
         self.seg_start = self.byte_at(self.pos);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::bash::{Cmd, Op, parse};
+
+    fn programs(cmd: &str) -> Vec<String> {
+        parse(cmd)
+            .segments
+            .iter()
+            .map(|s| Cmd::of(s).program.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn splits_on_operators_respecting_quotes() {
+        assert_eq!(
+            programs("cd src && ls | wc -l; echo 'a && b' || true & pwd"),
+            ["cd", "ls", "wc", "echo", "true", "pwd"]
+        );
+        let p = parse("echo \"x; y\" | grep 'a|b'");
+        assert_eq!(p.segments.len(), 2);
+        assert_eq!(p.segments[0].words, ["echo", "x; y"]);
+        assert_eq!(p.segments[1].words, ["grep", "a|b"]);
+        assert_eq!(p.segments[1].op_before, Some(Op::Pipe));
+    }
+
+    #[test]
+    fn raw_text_is_kept() {
+        let p = parse("git commit -m \"fix it\" && npm test");
+        assert_eq!(p.segments[0].raw, "git commit -m \"fix it\"");
+        assert_eq!(p.segments[1].raw, "npm test");
+    }
+
+    #[test]
+    fn redirections() {
+        let p = parse("ls > out.txt");
+        assert!(p.segments[0].writes_file);
+        assert_eq!(p.segments[0].words, ["ls"]);
+        assert!(!parse("ls 2>&1 >/dev/null").segments[0].writes_file);
+        assert!(!parse("cat < in.txt").segments[0].writes_file);
+        assert!(parse("echo hi >> log").segments[0].writes_file);
+        assert!(parse("echo hi &> log").segments[0].writes_file);
+    }
+
+    #[test]
+    fn heredoc_body_is_skipped() {
+        let p = parse("cat <<EOF\nrm -rf /\nEOF\nls");
+        let progs: Vec<_> = p.segments.iter().map(|s| Cmd::of(s).program).collect();
+        assert_eq!(progs, ["cat", "ls"]);
+    }
+}

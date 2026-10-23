@@ -1,4 +1,3 @@
-use super::cmd::git_subcommand;
 use super::{Cmd, Segment};
 
 /// Programs that only read, whatever their arguments (output redirection and
@@ -76,7 +75,7 @@ fn git_is_read_only(cmd: &Cmd<'_>) -> bool {
     if cmd.args.iter().any(|a| a == "-c") {
         return false;
     }
-    let Some((sub, rest)) = git_subcommand(cmd) else {
+    let Some((sub, rest)) = cmd.git_subcommand() else {
         // Only global options, such as `git --version`.
         return true;
     };

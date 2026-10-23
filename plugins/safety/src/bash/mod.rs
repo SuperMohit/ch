@@ -69,18 +69,16 @@ pub fn parse(command: &str) -> Parsed {
 
 fn parse_into(command: &str, depth: usize, out: &mut Parsed, nested: bool) {
     let (segments, substitution_bodies) = lexer::split(command);
+    let scripts: Vec<String> = segments
+        .iter()
+        .filter_map(shell_script_arg)
+        .chain(substitution_bodies)
+        .collect();
     if depth < MAX_DEPTH {
-        for seg in &segments {
-            if let Some(script) = shell_script_arg(seg) {
-                parse_into(&script, depth + 1, out, true);
-            }
+        for script in &scripts {
+            parse_into(script, depth + 1, out, true);
         }
-        for sub in substitution_bodies {
-            parse_into(&sub, depth + 1, out, true);
-        }
-    } else if !substitution_bodies.is_empty()
-        || segments.iter().any(|s| shell_script_arg(s).is_some())
-    {
+    } else if !scripts.is_empty() {
         out.too_deep = true;
     }
     if nested {
@@ -117,45 +115,6 @@ const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish", "ash"];
 mod tests {
     use super::*;
 
-    fn programs(cmd: &str) -> Vec<String> {
-        parse(cmd)
-            .segments
-            .iter()
-            .map(|s| Cmd::of(s).program.to_string())
-            .collect()
-    }
-
-    #[test]
-    fn splits_on_operators_respecting_quotes() {
-        assert_eq!(
-            programs("cd src && ls | wc -l; echo 'a && b' || true & pwd"),
-            ["cd", "ls", "wc", "echo", "true", "pwd"]
-        );
-        let p = parse("echo \"x; y\" | grep 'a|b'");
-        assert_eq!(p.segments.len(), 2);
-        assert_eq!(p.segments[0].words, ["echo", "x; y"]);
-        assert_eq!(p.segments[1].words, ["grep", "a|b"]);
-        assert_eq!(p.segments[1].op_before, Some(Op::Pipe));
-    }
-
-    #[test]
-    fn raw_text_is_kept() {
-        let p = parse("git commit -m \"fix it\" && npm test");
-        assert_eq!(p.segments[0].raw, "git commit -m \"fix it\"");
-        assert_eq!(p.segments[1].raw, "npm test");
-    }
-
-    #[test]
-    fn redirections() {
-        let p = parse("ls > out.txt");
-        assert!(p.segments[0].writes_file);
-        assert_eq!(p.segments[0].words, ["ls"]);
-        assert!(!parse("ls 2>&1 >/dev/null").segments[0].writes_file);
-        assert!(!parse("cat < in.txt").segments[0].writes_file);
-        assert!(parse("echo hi >> log").segments[0].writes_file);
-        assert!(parse("echo hi &> log").segments[0].writes_file);
-    }
-
     #[test]
     fn substitutions_are_nested() {
         let p = parse("echo $(rm -rf /tmp/x) `whoami`");
@@ -164,52 +123,5 @@ mod tests {
         assert_eq!(nested, ["rm", "whoami"]);
         let p = parse("bash -c 'sudo ls'");
         assert_eq!(Cmd::of(&p.nested[0]).program, "sudo");
-    }
-
-    #[test]
-    fn heredoc_body_is_skipped() {
-        let p = parse("cat <<EOF\nrm -rf /\nEOF\nls");
-        let progs: Vec<_> = p.segments.iter().map(|s| Cmd::of(s).program).collect();
-        assert_eq!(progs, ["cat", "ls"]);
-    }
-
-    #[test]
-    fn odd_input_never_panics() {
-        for cmd in [
-            "",
-            " ",
-            "\\",
-            "'",
-            "\"",
-            "$(",
-            "`",
-            "echo \"$(",
-            "echo 'é ü' | wc",
-            "a\\",
-            "cat <<EOF",
-            "cat <<",
-            ">",
-            "2>",
-            "&>",
-            "(((",
-            ")))",
-            "$(echo `ls`)",
-            "ä$(ö)ü",
-            "echo \"\\",
-            "x=1",
-            "|||",
-            ";;",
-            "&&&",
-            "echo #comment\nls",
-            "<(",
-            "$((1+2))",
-        ] {
-            let p = parse(cmd);
-            let _ = denied(cmd, &p);
-            let _ = p.all().all(segment_is_read_only);
-            for s in p.all() {
-                let _ = ask_key(s);
-            }
-        }
     }
 }

@@ -1,8 +1,7 @@
-use super::cmd::git_subcommand;
 use super::{Cmd, Op, Parsed, SHELLS, Segment, is_harmless_target};
 
 /// What a deny-list entry looks at.
-pub enum Check {
+enum Check {
     /// One simple command; every top-level and nested segment is checked.
     Segment(fn(&Cmd<'_>) -> bool),
     /// The whole command line. The check must look into `parsed.nested` itself.
@@ -11,13 +10,13 @@ pub enum Check {
 
 pub struct DenyRule {
     pub name: &'static str,
-    pub check: Check,
+    check: Check,
     /// Shown to the model: why, and what to do instead.
     pub reason: &'static str,
 }
 
 /// Commands that are always denied, whatever the mode or the allow rules say.
-pub const DENY_LIST: &[DenyRule] = &[
+const DENY_LIST: &[DenyRule] = &[
     DenyRule {
         name: "rm -rf / or ~",
         check: Check::Segment(rm_recursive_root),
@@ -33,7 +32,7 @@ pub const DENY_LIST: &[DenyRule] = &[
     DenyRule {
         name: "git push",
         check: Check::Segment(|c| {
-            c.program == "git" && git_subcommand(c).is_some_and(|(s, _)| s == "push")
+            c.program == "git" && c.git_subcommand().is_some_and(|(s, _)| s == "push")
         }),
         reason: "Pushing is not allowed from the agent. Commit locally and tell the user \
                  the branch is ready to push.",
@@ -42,7 +41,7 @@ pub const DENY_LIST: &[DenyRule] = &[
         name: "git reset --hard",
         check: Check::Segment(|c| {
             c.program == "git"
-                && git_subcommand(c)
+                && c.git_subcommand()
                     .is_some_and(|(s, rest)| s == "reset" && rest.iter().any(|a| a == "--hard"))
         }),
         reason: "`git reset --hard` throws away uncommitted work. Use `git stash`, or \
@@ -52,7 +51,7 @@ pub const DENY_LIST: &[DenyRule] = &[
         name: "git clean -f",
         check: Check::Segment(|c| {
             c.program == "git"
-                && git_subcommand(c).is_some_and(|(s, rest)| {
+                && c.git_subcommand().is_some_and(|(s, rest)| {
                     s == "clean"
                         && rest.iter().any(|a| {
                             a == "--force"

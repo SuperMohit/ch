@@ -88,6 +88,28 @@ impl<'a> Cmd<'a> {
     pub(super) fn has_arg(&self, pred: impl Fn(&str) -> bool) -> bool {
         self.args.iter().any(|a| pred(a))
     }
+
+    /// `git`'s subcommand and its arguments, skipping global options.
+    pub(super) fn git_subcommand(&self) -> Option<(&'a str, &'a [String])> {
+        let args = self.args;
+        let mut i = 0;
+        while i < args.len() {
+            let a = args[i].as_str();
+            if a == "-C"
+                || a == "-c"
+                || a == "--git-dir"
+                || a == "--work-tree"
+                || a == "--namespace"
+            {
+                i += 2;
+            } else if a.starts_with('-') {
+                i += 1;
+            } else {
+                return Some((a, &args[i + 1..]));
+            }
+        }
+        None
+    }
 }
 
 fn basename(word: &str) -> &str {
@@ -103,22 +125,6 @@ fn is_assignment(word: &str) -> bool {
         }
         None => false,
     }
-}
-
-pub(super) fn git_subcommand<'a>(cmd: &Cmd<'a>) -> Option<(&'a str, &'a [String])> {
-    let args = cmd.args;
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        if a == "-C" || a == "-c" || a == "--git-dir" || a == "--work-tree" || a == "--namespace" {
-            i += 2;
-        } else if a.starts_with('-') {
-            i += 1;
-        } else {
-            return Some((a, &args[i + 1..]));
-        }
-    }
-    None
 }
 
 #[cfg(test)]
