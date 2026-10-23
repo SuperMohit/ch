@@ -254,6 +254,15 @@ impl Plugin for AnthropicPlugin {
             "Anthropic Messages API model provider (streaming, retries, prompt caching)",
         )
         .provides(&["provider:anthropic"])
+        .project_settings(&[
+            "max_retries",
+            "timeout_secs",
+            "retry_base_ms",
+            "effort",
+            "thinking_display",
+            "fallbacks",
+            "eager_input_streaming",
+        ])
     }
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {

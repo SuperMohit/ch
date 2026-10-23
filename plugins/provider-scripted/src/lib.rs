@@ -356,6 +356,7 @@ impl Plugin for ScriptedPlugin {
             "Scripted model provider that replays canned responses (tests only)",
         )
         .provides(&["provider:scripted"])
+        .project_settings(&["context_window"])
         .default_enabled(false)
     }
 

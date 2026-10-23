@@ -71,6 +71,7 @@ impl Plugin for ToolWebFetchPlugin {
         )
         .version(env!("CARGO_PKG_VERSION"))
         .provides(&["tool:web_fetch"])
+        .project_settings(&["user_agent", "timeout_secs", "max_bytes", "max_redirects"])
     }
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {

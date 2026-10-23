@@ -54,6 +54,7 @@ impl Plugin for ToolBashPlugin {
         )
         .version(env!("CARGO_PKG_VERSION"))
         .provides(&["tool:bash"])
+        .project_settings(&["default_timeout_secs", "max_timeout_secs"])
     }
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {

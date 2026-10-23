@@ -93,6 +93,7 @@ impl Plugin for ProjectInstructionsPlugin {
             "CH.md / AGENTS.md project instructions and an environment block",
         )
         .provides(&["prompt"])
+        .project_settings(&["max_chars", "environment", "git_timeout_ms"])
     }
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {

@@ -62,6 +62,7 @@ impl Plugin for ExecutorLocalPlugin {
         )
         .version(env!("CARGO_PKG_VERSION"))
         .provides(&["executor:local"])
+        .project_settings(&["max_output_bytes", "kill_grace_ms", "drain_timeout_ms"])
     }
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {

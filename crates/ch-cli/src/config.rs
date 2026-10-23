@@ -14,7 +14,9 @@ use ch_kernel::Config;
 use toml::{Table, Value};
 
 use crate::args::Cli;
-use crate::trust::{ADDITIVE_LISTS, ProjectLayer, TrustStore, append_list, take_list};
+use crate::trust::{
+    ADDITIVE_LISTS, ProjectLayer, ProjectSettings, TrustStore, append_list, take_list,
+};
 
 /// `$CH_HOME`, or `~/.ch`.
 pub fn ch_home() -> anyhow::Result<PathBuf> {
@@ -96,8 +98,13 @@ pub enum ProjectTrust {
     Untrusted { settings: Table, hash: String },
 }
 
-/// Builds the merged config for `paths` with the command-line `overrides`.
-pub fn build_config(paths: &Paths, overrides: &Overrides) -> anyhow::Result<LoadedConfig> {
+/// Builds the merged config for `paths` with the command-line `overrides`. `settings`
+/// says which project settings apply without trust.
+pub fn build_config(
+    paths: &Paths,
+    overrides: &Overrides,
+    settings: &ProjectSettings,
+) -> anyhow::Result<LoadedConfig> {
     let mut config = Config::default();
     let mut files = Vec::new();
     if config.merge_file(&paths.user_config())? {
@@ -109,7 +116,7 @@ pub fn build_config(paths: &Paths, overrides: &Overrides) -> anyhow::Result<Load
         let ProjectLayer {
             mut open,
             restricted,
-        } = ProjectLayer::split(table);
+        } = ProjectLayer::split(table, settings);
         let additions: Vec<(&str, Vec<Value>)> = ADDITIVE_LISTS
             .iter()
             .filter_map(|path| take_list(&mut open, path).map(|v| (*path, v)))
@@ -147,11 +154,16 @@ pub fn build_config(paths: &Paths, overrides: &Overrides) -> anyhow::Result<Load
 /// project's restricted settings are now exactly `trusted` plus that rule, records trust
 /// for them so the next run doesn't ask about a change the user made. Returns whether it
 /// did.
-pub fn trust_saved_rule(paths: &Paths, trusted: &Table, rule: &str) -> anyhow::Result<bool> {
+pub fn trust_saved_rule(
+    paths: &Paths,
+    settings: &ProjectSettings,
+    trusted: &Table,
+    rule: &str,
+) -> anyhow::Result<bool> {
     let Some(table) = read_table(&paths.project_config())? else {
         return Ok(false);
     };
-    let now = ProjectLayer::split(table).restricted;
+    let now = ProjectLayer::split(table, settings).restricted;
     let mut expected = Config::from_table(trusted.clone());
     append_list(
         &mut expected,

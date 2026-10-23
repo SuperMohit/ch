@@ -6,7 +6,7 @@ use std::path::Path;
 use ch_cli::config::{
     Overrides, Paths, ProjectTrust, apply_overrides, build_config, trust_saved_rule,
 };
-use ch_cli::trust::TrustStore;
+use ch_cli::trust::{ProjectSettings, TrustStore};
 use ch_kernel::Config;
 
 struct Fixture {
@@ -32,6 +32,10 @@ fn fixture(user: Option<&str>, project: Option<&str>) -> Fixture {
     }
 }
 
+fn settings() -> ProjectSettings {
+    ProjectSettings::of(&ch_cli::plugins::builtin_plugins())
+}
+
 fn get<T: serde::de::DeserializeOwned>(c: &Config, path: &str) -> Option<T> {
     c.get::<T>(path).unwrap()
 }
@@ -39,7 +43,7 @@ fn get<T: serde::de::DeserializeOwned>(c: &Config, path: &str) -> Option<T> {
 #[test]
 fn defaults_without_files() {
     let f = fixture(None, None);
-    let loaded = build_config(&f.paths, &Overrides::default()).unwrap();
+    let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
     assert!(loaded.files.is_empty());
     let k = loaded.config.kernel().unwrap();
     assert_eq!(k.model.id, None);
@@ -56,21 +60,21 @@ fn project_overrides_user_and_tables_merge() {
             id = "user-model"
             [agent]
             max_steps = 50
-            [plugins.context]
-            strategy = "staged"
-            soft = 0.5
+            [plugins.tool-bash]
+            default_timeout_secs = 60
+            max_timeout_secs = 600
             "#,
         ),
         Some(
             r#"
             [model]
             id = "project-model"
-            [plugins.context]
-            strategy = "none"
+            [plugins.tool-bash]
+            default_timeout_secs = 30
             "#,
         ),
     );
-    let loaded = build_config(&f.paths, &Overrides::default()).unwrap();
+    let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
     assert_eq!(loaded.files.len(), 2);
     assert_eq!(loaded.files[0], f.paths.user_config());
     let c = &loaded.config;
@@ -79,10 +83,13 @@ fn project_overrides_user_and_tables_merge() {
     assert_eq!(k.model.id.as_deref(), Some("project-model"));
     assert_eq!(k.agent.max_steps, 50);
     assert_eq!(
-        get::<String>(c, "plugins.context.strategy").as_deref(),
-        Some("none")
+        get::<u64>(c, "plugins.tool-bash.default_timeout_secs"),
+        Some(30)
     );
-    assert_eq!(get::<f64>(c, "plugins.context.soft"), Some(0.5));
+    assert_eq!(
+        get::<u64>(c, "plugins.tool-bash.max_timeout_secs"),
+        Some(600)
+    );
 }
 
 #[test]
@@ -105,7 +112,11 @@ fn profile_then_model_then_set() {
         profile: Some("fast".into()),
         ..Default::default()
     };
-    let k = build_config(&f.paths, &o).unwrap().config.kernel().unwrap();
+    let k = build_config(&f.paths, &o, &settings())
+        .unwrap()
+        .config
+        .kernel()
+        .unwrap();
     assert_eq!(k.model.id.as_deref(), Some("profile-model"));
     assert_eq!(k.agent.max_steps, 7);
 
@@ -115,7 +126,11 @@ fn profile_then_model_then_set() {
         model: Some("flag-model".into()),
         ..Default::default()
     };
-    let k = build_config(&f.paths, &o).unwrap().config.kernel().unwrap();
+    let k = build_config(&f.paths, &o, &settings())
+        .unwrap()
+        .config
+        .kernel()
+        .unwrap();
     assert_eq!(k.model.id.as_deref(), Some("flag-model"));
     let o = Overrides {
         profile: Some("fast".into()),
@@ -123,7 +138,11 @@ fn profile_then_model_then_set() {
         set: vec!["model.id=set-model".into(), "agent.max_steps=3".into()],
         ..Default::default()
     };
-    let k = build_config(&f.paths, &o).unwrap().config.kernel().unwrap();
+    let k = build_config(&f.paths, &o, &settings())
+        .unwrap()
+        .config
+        .kernel()
+        .unwrap();
     assert_eq!(k.model.id.as_deref(), Some("set-model"));
     assert_eq!(k.agent.max_steps, 3);
 }
@@ -135,7 +154,7 @@ fn unknown_profile_is_an_error() {
         profile: Some("nope".into()),
         ..Default::default()
     };
-    let e = build_config(&f.paths, &o).unwrap_err();
+    let e = build_config(&f.paths, &o, &settings()).unwrap_err();
     assert!(e.to_string().contains("unknown profile `nope`"), "{e:#}");
 }
 
@@ -185,7 +204,7 @@ fn allow_appends_to_the_configured_list_without_duplicates() {
         trust_project: true,
         ..Default::default()
     };
-    let c = build_config(&f.paths, &o).unwrap().config;
+    let c = build_config(&f.paths, &o, &settings()).unwrap().config;
     // Arrays are replaced by later (trusted) layers, so the user's list is gone; flags
     // append.
     assert_eq!(
@@ -242,7 +261,7 @@ fn permission_mode_wins_over_set() {
 #[test]
 fn invalid_config_file_names_the_file() {
     let f = fixture(Some("not = [valid"), None);
-    let e = build_config(&f.paths, &Overrides::default()).unwrap_err();
+    let e = build_config(&f.paths, &Overrides::default(), &settings()).unwrap_err();
     let msg = format!("{e:#}");
     assert!(msg.contains("config.toml"), "{msg}");
 }
@@ -276,7 +295,7 @@ fn untrusted_project_settings_are_not_applied() {
         Some("[plugins.safety]\ndeny = [\"web_fetch\"]\nallow = [\"read_file\"]\n"),
         Some(RISKY_PROJECT),
     );
-    let loaded = build_config(&f.paths, &Overrides::default()).unwrap();
+    let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
     let c = &loaded.config;
     // Open settings apply; restricted ones don't.
     assert_eq!(get::<u32>(c, "agent.max_steps"), Some(7));
@@ -301,18 +320,35 @@ fn untrusted_project_settings_are_not_applied() {
 }
 
 #[test]
+fn a_list_in_place_of_a_table_is_not_applied() {
+    let f = fixture(
+        Some("[plugins.safety]\ndeny = [\"bash:touch *\"]\n"),
+        Some("[plugins]\nsafety = [\"bypass\", [\"bash\"]]\n"),
+    );
+    let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
+    let c = &loaded.config;
+    assert_eq!(get::<String>(c, "plugins.safety.mode"), None);
+    assert_eq!(
+        get::<Vec<String>>(c, "plugins.safety.deny").unwrap(),
+        vec!["bash:touch *"]
+    );
+    assert!(matches!(loaded.project, ProjectTrust::Untrusted { .. }));
+}
+
+#[test]
 fn trusted_project_settings_apply_until_they_change() {
     let f = fixture(None, Some(RISKY_PROJECT));
-    let ProjectTrust::Untrusted { hash, .. } = build_config(&f.paths, &Overrides::default())
-        .unwrap()
-        .project
+    let ProjectTrust::Untrusted { hash, .. } =
+        build_config(&f.paths, &Overrides::default(), &settings())
+            .unwrap()
+            .project
     else {
         panic!("expected untrusted settings");
     };
     TrustStore::new(&f.paths.home)
         .trust(&f.paths.workspace, &hash)
         .unwrap();
-    let loaded = build_config(&f.paths, &Overrides::default()).unwrap();
+    let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
     assert!(matches!(
         loaded.project,
         ProjectTrust::Trusted { saved: true, .. }
@@ -327,7 +363,7 @@ fn trusted_project_settings_apply_until_they_change() {
         RISKY_PROJECT.replace("evil.example", "other.example"),
     )
     .unwrap();
-    let loaded = build_config(&f.paths, &Overrides::default()).unwrap();
+    let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
     assert!(matches!(loaded.project, ProjectTrust::Untrusted { .. }));
     assert_eq!(get::<String>(&loaded.config, "plugins.safety.mode"), None);
 }
@@ -339,7 +375,7 @@ fn trust_project_flag_applies_for_one_run() {
         trust_project: true,
         ..Default::default()
     };
-    let loaded = build_config(&f.paths, &o).unwrap();
+    let loaded = build_config(&f.paths, &o, &settings()).unwrap();
     assert!(matches!(
         loaded.project,
         ProjectTrust::Trusted { saved: false, .. }
@@ -349,7 +385,7 @@ fn trust_project_flag_applies_for_one_run() {
         Some("https://evil.example")
     );
     // Nothing was recorded.
-    let again = build_config(&f.paths, &Overrides::default()).unwrap();
+    let again = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
     assert!(matches!(again.project, ProjectTrust::Untrusted { .. }));
 }
 
@@ -359,7 +395,7 @@ fn project_without_restricted_settings_needs_no_trust() {
         None,
         Some("[agent]\nmax_steps = 3\n[plugins.safety]\nask = [\"bash:git *\"]\n"),
     );
-    let loaded = build_config(&f.paths, &Overrides::default()).unwrap();
+    let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
     assert_eq!(loaded.project, ProjectTrust::NothingToTrust);
     assert_eq!(
         get::<Vec<String>>(&loaded.config, "plugins.safety.ask").unwrap(),
@@ -377,8 +413,8 @@ fn a_rule_saved_from_the_repl_keeps_trust() {
         "[agent]\nmax_steps = 3\n[plugins.safety]\nallow = [\"bash:cargo test *\"]\n",
     )
     .unwrap();
-    assert!(trust_saved_rule(&f.paths, &start, "bash:cargo test *").unwrap());
-    let loaded = build_config(&f.paths, &Overrides::default()).unwrap();
+    assert!(trust_saved_rule(&f.paths, &settings(), &start, "bash:cargo test *").unwrap());
+    let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
     assert!(matches!(
         loaded.project,
         ProjectTrust::Trusted { saved: true, .. }
@@ -391,7 +427,7 @@ fn a_rule_saved_from_the_repl_keeps_trust() {
         "[plugins.safety]\nmode = \"bypass\"\nallow = [\"bash:cargo test *\"]\n",
     )
     .unwrap();
-    assert!(!trust_saved_rule(&f.paths, &start, "bash:cargo test *").unwrap());
-    let loaded = build_config(&f.paths, &Overrides::default()).unwrap();
+    assert!(!trust_saved_rule(&f.paths, &settings(), &start, "bash:cargo test *").unwrap());
+    let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
     assert!(matches!(loaded.project, ProjectTrust::Untrusted { .. }));
 }

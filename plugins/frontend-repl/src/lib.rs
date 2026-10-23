@@ -154,6 +154,7 @@ impl Plugin for FrontendReplPlugin {
         )
         .version(env!("CARGO_PKG_VERSION"))
         .provides(&["frontend:repl", "approver:repl"])
+        .project_settings(&["history_size"])
     }
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
