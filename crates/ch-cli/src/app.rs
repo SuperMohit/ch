@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
 use ch_kernel::{
-    KernelConfig, Plugin, RegistryBuilder, Services, Session, SessionMeta, SessionStore,
+    ChHome, KernelConfig, Plugin, RegistryBuilder, Services, Session, SessionMeta, SessionStore,
 };
 
 use crate::args::Cli;
@@ -228,6 +228,7 @@ pub async fn run_with(
 
     // Options for the frontends travel as services in the registry.
     let mut services = Services::default();
+    services.provide(Arc::new(ChHome(paths.home.clone())));
     let selection = select(&cli, &kcfg);
     if cli.is_print() {
         let prompt = match stdin {

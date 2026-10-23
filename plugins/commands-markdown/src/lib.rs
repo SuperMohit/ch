@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ch_kernel::{CmdCx, Command, Outcome, Plugin, PluginManifest, RegisterCx};
+use ch_kernel::{ChHome, CmdCx, Command, Outcome, Plugin, PluginManifest, RegisterCx};
 use serde::Deserialize;
 
 /// Plugin id, also the config section name.
@@ -46,19 +46,19 @@ pub const RESERVED: &[&str] = &[
 #[serde(default)]
 pub struct MarkdownConfig {
     /// Directory of user-level commands. `~/` is the home directory; an empty string
-    /// turns user commands off. Defaults to `~/.ch/commands`.
+    /// turns user commands off. Defaults to `commands` in the ch home (`~/.ch`).
     pub user_dir: Option<String>,
 }
 
 impl MarkdownConfig {
-    fn user_dir(&self) -> Option<PathBuf> {
+    fn user_dir(&self, home: Option<&Path>) -> Option<PathBuf> {
         match self.user_dir.as_deref() {
             Some("") => None,
             Some(p) => match p.strip_prefix("~/") {
                 Some(rest) => dirs::home_dir().map(|h| h.join(rest)),
                 None => Some(PathBuf::from(p)),
             },
-            None => dirs::home_dir().map(|h| h.join(".ch").join("commands")),
+            None => home.map(|h| h.join("commands")),
         }
     }
 }
@@ -82,8 +82,10 @@ impl Plugin for CommandsMarkdownPlugin {
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
         let config: MarkdownConfig = cx.config()?;
+        let home = cx.service::<ChHome>();
+        let user_dir = config.user_dir(home.as_ref().map(|h| h.0.as_path()));
         let project_dir = cx.workspace().join(".ch").join("commands");
-        for cmd in discover(config.user_dir().as_deref(), &project_dir) {
+        for cmd in discover(user_dir.as_deref(), &project_dir) {
             cx.add_command(cmd);
         }
         Ok(())
@@ -262,10 +264,16 @@ mod tests {
         let off = MarkdownConfig {
             user_dir: Some(String::new()),
         };
-        assert_eq!(off.user_dir(), None);
+        assert_eq!(off.user_dir(Some(Path::new("/home/.ch"))), None);
         let custom = MarkdownConfig {
             user_dir: Some("/x/y".into()),
         };
-        assert_eq!(custom.user_dir(), Some(PathBuf::from("/x/y")));
+        assert_eq!(custom.user_dir(None), Some(PathBuf::from("/x/y")));
+        let default = MarkdownConfig::default();
+        assert_eq!(
+            default.user_dir(Some(Path::new("/home/.ch"))),
+            Some(PathBuf::from("/home/.ch/commands"))
+        );
+        assert_eq!(default.user_dir(None), None);
     }
 }

@@ -44,7 +44,7 @@ pub use model::{
 pub use plugin::{API_VERSION, Plugin, PluginManifest, RegisterCx};
 pub use prompt::PromptContributor;
 pub use registry::{PluginStatus, Registry, RegistryBuilder};
-pub use services::Services;
+pub use services::{ChHome, Services};
 pub use session::{CancelHandle, Session, SessionBuilder, TurnResult};
 pub use store::{SessionLock, SessionMeta, SessionSnapshot, SessionStore};
 pub use tokens::{TokenCalibrator, estimate_tokens};

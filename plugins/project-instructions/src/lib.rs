@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ch_kernel::{Cx, Plugin, PluginManifest, PromptContributor, RegisterCx};
+use ch_kernel::{ChHome, Cx, Plugin, PluginManifest, PromptContributor, RegisterCx};
 use serde::Deserialize;
 
 /// Plugin id, also the config section name.
@@ -42,7 +42,7 @@ pub struct InstructionsConfig {
     /// File names looked for in each directory, in this order.
     pub files: Vec<String>,
     /// User-level instructions file. `~/` is the home directory; an empty string turns
-    /// it off. Defaults to `~/.ch/CH.md`.
+    /// it off. Defaults to `CH.md` in the ch home (`~/.ch`).
     pub user_file: Option<String>,
     /// Maximum characters for all instruction files together.
     pub max_chars: usize,
@@ -65,15 +65,15 @@ impl Default for InstructionsConfig {
 }
 
 impl InstructionsConfig {
-    /// The user-level file to load, if any.
-    fn user_path(&self) -> Option<PathBuf> {
+    /// The user-level file to load, if any; `home` is the ch home.
+    pub fn user_path(&self, home: Option<&Path>) -> Option<PathBuf> {
         match self.user_file.as_deref() {
             Some("") => None,
             Some(p) => match p.strip_prefix("~/") {
                 Some(rest) => dirs::home_dir().map(|h| h.join(rest)),
                 None => Some(PathBuf::from(p)),
             },
-            None => dirs::home_dir().map(|h| h.join(".ch").join("CH.md")),
+            None => home.map(|h| h.join("CH.md")),
         }
     }
 }
@@ -98,7 +98,9 @@ impl Plugin for ProjectInstructionsPlugin {
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
         let config: InstructionsConfig = cx.config()?;
-        cx.add_prompt(ProjectInstructions::new(config));
+        let home = cx.service::<ChHome>();
+        let user = config.user_path(home.as_ref().map(|h| h.0.as_path()));
+        cx.add_prompt(ProjectInstructions::new(config, user));
         Ok(())
     }
 }
@@ -106,20 +108,27 @@ impl Plugin for ProjectInstructionsPlugin {
 /// The prompt contributor. Caches its blocks per session.
 pub struct ProjectInstructions {
     config: InstructionsConfig,
+    /// The user-level instructions file.
+    user: Option<PathBuf>,
     /// `(session id, workspace, blocks)` from the first call.
     cache: Mutex<Option<(String, PathBuf, Vec<String>)>>,
 }
 
 impl ProjectInstructions {
-    pub fn new(config: InstructionsConfig) -> Self {
+    pub fn new(config: InstructionsConfig, user: Option<PathBuf>) -> Self {
         Self {
             config,
+            user,
             cache: Mutex::new(None),
         }
     }
 
     /// Computes the blocks for `workspace` (blocking: reads files and runs git).
-    pub fn compute(config: &InstructionsConfig, workspace: &Path) -> Vec<String> {
+    pub fn compute(
+        config: &InstructionsConfig,
+        user: Option<&Path>,
+        workspace: &Path,
+    ) -> Vec<String> {
         let workspace = workspace
             .canonicalize()
             .unwrap_or_else(|_| workspace.to_path_buf());
@@ -130,8 +139,7 @@ impl ProjectInstructions {
             let git = root.as_ref().map(|_| env::git_info(&workspace, timeout));
             blocks.push(env::render(&workspace, root.as_deref(), git.as_ref()));
         }
-        let user = config.user_path();
-        let found = files::load(&workspace, user.as_deref(), &config.files);
+        let found = files::load(&workspace, user, &config.files);
         if let Some(block) = files::render(&found, config.max_chars) {
             blocks.push(block);
         }
@@ -160,13 +168,15 @@ impl PromptContributor for ProjectInstructions {
         }
 
         let config = self.config.clone();
+        let user = self.user.clone();
         let ws = workspace.clone();
-        let blocks = tokio::task::spawn_blocking(move || Self::compute(&config, &ws))
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("project instructions failed: {e}");
-                Vec::new()
-            });
+        let blocks =
+            tokio::task::spawn_blocking(move || Self::compute(&config, user.as_deref(), &ws))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("project instructions failed: {e}");
+                    Vec::new()
+                });
         if let Ok(mut guard) = self.cache.lock() {
             *guard = Some((cx.session_id.to_string(), workspace, blocks.clone()));
         }
@@ -183,6 +193,21 @@ mod tests {
     fn write(path: &Path, text: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
+    }
+
+    fn instructions(config: InstructionsConfig) -> ProjectInstructions {
+        let user = config.user_path(None);
+        ProjectInstructions::new(config, user)
+    }
+
+    #[test]
+    fn user_file_defaults_to_the_ch_home() {
+        let c = InstructionsConfig::default();
+        assert_eq!(
+            c.user_path(Some(Path::new("/h/.ch"))),
+            Some(PathBuf::from("/h/.ch/CH.md"))
+        );
+        assert_eq!(c.user_path(None), None);
     }
 
     fn config(user_file: Option<&Path>) -> InstructionsConfig {
@@ -247,7 +272,7 @@ mod tests {
         let user = top.join("home/.ch/CH.md");
         write(&user, "USER-LEVEL");
 
-        let p = ProjectInstructions::new(config(Some(&user)));
+        let p = instructions(config(Some(&user)));
         let blocks = p.system_blocks(&cx(&ws, "s1")).await;
         assert_eq!(blocks.len(), 2, "{blocks:#?}");
         assert!(blocks[0].starts_with("# Environment"));
@@ -280,7 +305,7 @@ mod tests {
         let ws = top.join("ws");
         write(&ws.join("AGENTS.md"), "WS-AGENTS");
 
-        let p = ProjectInstructions::new(config(None));
+        let p = instructions(config(None));
         let blocks = p.system_blocks(&cx(&ws, "s1")).await;
         let all = blocks.join("\n");
         assert!(all.contains("- Git repository: no"), "{all}");
@@ -296,7 +321,7 @@ mod tests {
     #[tokio::test]
     async fn no_files_means_no_instructions_block() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = ProjectInstructions::new(InstructionsConfig {
+        let p = instructions(InstructionsConfig {
             environment: false,
             ..config(None)
         });
@@ -318,7 +343,7 @@ mod tests {
         }
         write(&ws.join("CH.md"), "Use tabs.");
 
-        let p = ProjectInstructions::new(config(None));
+        let p = instructions(config(None));
         let blocks = p.system_blocks(&cx(&ws, "s1")).await;
         let env = &blocks[0];
         assert!(env.contains("- Git repository: yes\n"), "{env}");
@@ -334,7 +359,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path().canonicalize().unwrap();
         write(&ws.join("CH.md"), "VERSION-1");
-        let p = ProjectInstructions::new(config(None));
+        let p = instructions(config(None));
         let first = p.system_blocks(&cx(&ws, "s1")).await;
         write(&ws.join("CH.md"), "VERSION-2");
         let again = p.system_blocks(&cx(&ws, "s1")).await;
@@ -352,7 +377,7 @@ mod tests {
         write(&top.join("CH.md"), &"o".repeat(500));
         let ws = top.join("inner");
         write(&ws.join("CH.md"), &"i".repeat(300));
-        let p = ProjectInstructions::new(InstructionsConfig {
+        let p = instructions(InstructionsConfig {
             max_chars: 400,
             environment: false,
             ..config(None)
@@ -364,7 +389,7 @@ mod tests {
         assert!(!b.contains(&"o".repeat(101)));
         assert!(b.contains("[truncated: showing the first 100 of 500 characters."));
 
-        let p = ProjectInstructions::new(InstructionsConfig {
+        let p = instructions(InstructionsConfig {
             max_chars: 200,
             environment: false,
             ..config(None)
@@ -381,7 +406,7 @@ mod tests {
         let ws = tmp.path().canonicalize().unwrap();
         write(&ws.join("AGENTS.md"), "SHARED");
         std::os::unix::fs::symlink(ws.join("AGENTS.md"), ws.join("CH.md")).unwrap();
-        let p = ProjectInstructions::new(InstructionsConfig {
+        let p = instructions(InstructionsConfig {
             environment: false,
             ..config(None)
         });
