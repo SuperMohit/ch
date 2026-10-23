@@ -148,6 +148,25 @@ expression: out
   top raw="ls" words=["ls"] op=Some(Seq) sub=false writes=false program="ls" assignments=[] normalized="ls" read_only=true key="bash:ls *"
   too_deep=false denied=None
   policy: allow
+"cat <<EOF\n$(rm -rf ~)\nEOF"
+  top raw="cat <<EOF" words=["cat"] op=None sub=true writes=false program="cat" assignments=[] normalized="cat" read_only=false key="bash:cat *"
+  nested raw="rm -rf ~" words=["rm", "-rf", "~"] op=None sub=false writes=false program="rm" assignments=[] normalized="rm -rf ~" read_only=false key="bash:rm *"
+  too_deep=false denied=Some("rm -rf / or ~")
+  policy: deny: `cat <<EOF
+$(rm -rf ~)
+EOF` is on the built-in deny list (rm -rf / or ~). Recursively deleting the filesystem root or the home directory is never allowed. Delete specific paths inside the workspace instead.
+"cat <<EOF | wc -l\n`sudo id`\nEOF"
+  top raw="cat <<EOF" words=["cat"] op=None sub=true writes=false program="cat" assignments=[] normalized="cat" read_only=false key="bash:cat *"
+  top raw="wc -l" words=["wc", "-l"] op=Some(Pipe) sub=false writes=false program="wc" assignments=[] normalized="wc -l" read_only=true key="bash:wc *"
+  nested raw="sudo id" words=["sudo", "id"] op=None sub=false writes=false program="sudo" assignments=[] normalized="sudo id" read_only=false key="bash:sudo id *"
+  too_deep=false denied=Some("sudo")
+  policy: deny: `cat <<EOF | wc -l
+`sudo id`
+EOF` is on the built-in deny list (sudo). Running commands as another user (sudo/doas/su) is never allowed. Run it without elevated privileges, or ask the user to run it themselves.
+"cat <<EOF\n\\$(rm x) $HOME\nEOF"
+  top raw="cat <<EOF" words=["cat"] op=None sub=false writes=false program="cat" assignments=[] normalized="cat" read_only=true key="bash:cat *"
+  too_deep=false denied=None
+  policy: allow
 "cat <<\"EOF\"\nx\nEOF"
   top raw="cat <<\"EOF\"" words=["cat"] op=None sub=false writes=false program="cat" assignments=[] normalized="cat" read_only=true key="bash:cat *"
   too_deep=false denied=None
@@ -801,10 +820,6 @@ expression: out
   top raw="make" words=["make"] op=Some(And) sub=false writes=false program="make" assignments=[] normalized="make" read_only=false key="bash:make *"
   too_deep=false denied=None
   policy: ask None: `npm test` (part of a compound command) is not on the read-only allowlist
-"cat <<EOF\n$(rm -rf ~)\nEOF"
-  top raw="cat <<EOF" words=["cat"] op=None sub=false writes=false program="cat" assignments=[] normalized="cat" read_only=true key="bash:cat *"
-  too_deep=false denied=None
-  policy: allow
 "echo $'\\' '; rm -rf ~ #'"
   top raw="echo $'\\' '; rm -rf ~ #'" words=["echo", "$\\", "; rm -rf ~ #"] op=None sub=false writes=false program="echo" assignments=[] normalized="echo $\\ ; rm -rf ~ #" read_only=true key="bash:echo $\\ *"
   too_deep=false denied=None

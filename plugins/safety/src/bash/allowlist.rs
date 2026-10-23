@@ -151,6 +151,7 @@ mod tests {
             "LANG=C ls",
             "LC_ALL=C sort a",
             "NO_COLOR=1 git log",
+            "cat <<'EOF'\n$(id)\nEOF",
         ] {
             assert!(ro(cmd), "should be read-only: {cmd}");
         }
@@ -168,6 +169,7 @@ mod tests {
             "rg --pre ./x foo",
             "env FOO=1 make",
             "echo $(rm a)",
+            "cat <<EOF\n$(id)\nEOF",
             "cargo build",
             "npm test",
             "sort -o out in",
