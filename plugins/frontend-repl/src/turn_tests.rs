@@ -139,6 +139,25 @@ impl Command for UntilCancelled {
     }
 }
 
+/// `/warn`: emits a warning, as a context strategy or a plugin might outside a turn.
+struct Warn;
+
+#[async_trait::async_trait]
+impl Command for Warn {
+    fn name(&self) -> &str {
+        "warn"
+    }
+    fn description(&self) -> &str {
+        "emits a warning"
+    }
+    async fn run(&self, _args: &str, cx: &mut CmdCx<'_>) -> anyhow::Result<Outcome> {
+        cx.session.events().emit(AgentEvent::Warning {
+            message: "from a command".into(),
+        });
+        Ok(Outcome::Done)
+    }
+}
+
 /// Asks for approval of every `echo` call.
 struct AskEcho;
 
@@ -177,6 +196,7 @@ impl Plugin for TestPlugin {
         cx.add_tool(Wait);
         cx.add_hook(AskEcho);
         cx.add_command(UntilCancelled);
+        cx.add_command(Warn);
         cx.add_approver(ReplApprover {
             bridge: self.bridge.clone(),
         });
@@ -288,9 +308,11 @@ async fn transcript(script: Vec<ModelResponse>, steps: Vec<Step>) -> String {
         })
     };
 
+    let mut events = session.events().subscribe();
     run_turn(
         &mut session,
         "go".into(),
+        &mut events,
         &mut approvals,
         &mut term,
         Some(KeyPoller::from_keys(rx)),
@@ -407,16 +429,39 @@ async fn esc_cancels_a_slash_command_but_not_the_next_turn() {
     let dir = tempfile::tempdir().unwrap();
     let (mut session, bridge) =
         new_session(vec![text("still here")], dir.path(), Default::default());
+    let mut events = session.events().subscribe();
+    let screen = Screen::default();
+    let mut term = Term::capture(screen.clone(), || Some((80, 24)));
     let (tx, rx) = mpsc::unbounded_channel();
     tx.send(key(KeyCode::Esc)).unwrap();
-    let result = run_command(&mut session, "/slow", Some(KeyPoller::from_keys(rx))).await;
+    let keys = Some(KeyPoller::from_keys(rx));
+    let result = run_command(&mut session, "/slow", &mut events, &mut term, keys).await;
     assert_eq!(result.unwrap().unwrap(), Outcome::Message("stopped".into()));
 
     let mut approvals = bridge.take_receiver().unwrap();
-    let screen = Screen::default();
-    let mut term = Term::capture(screen.clone(), || Some((80, 24)));
-    run_turn(&mut session, "go".into(), &mut approvals, &mut term, None).await;
+    let turn = run_turn(
+        &mut session,
+        "go".into(),
+        &mut events,
+        &mut approvals,
+        &mut term,
+        None,
+    );
+    turn.await;
     let text = screen.text();
     assert!(text.contains("still here"), "{text}");
     assert!(!text.contains("interrupted"), "{text}");
+}
+
+#[tokio::test]
+async fn events_from_a_command_are_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _bridge) = new_session(vec![], dir.path(), Default::default());
+    let mut events = session.events().subscribe();
+    let screen = Screen::default();
+    let mut term = Term::capture(screen.clone(), || Some((80, 24)));
+    let result = run_command(&mut session, "/warn", &mut events, &mut term, None).await;
+    assert_eq!(result.unwrap().unwrap(), Outcome::Done);
+    let text = screen.text();
+    assert!(text.contains("⚠ from a command"), "{text}");
 }
