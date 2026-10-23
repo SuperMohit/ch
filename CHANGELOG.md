@@ -28,6 +28,11 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 ### Fixed
 
+- `ch -p "task"` no longer hangs when stdin is an open pipe that nothing is written to, as under `ssh` or a parent process. Input piped alongside a prompt is waited for at most 3 seconds; after that the task runs without it, with a note on stderr.
+- `ch -p fix tests` is an error that shows the quoted form, `ch -p "fix tests"`. Before, the second word was silently dropped.
+- After you save a second "always allow" rule in the same REPL session, the project stays trusted. Before, only the first saved rule kept trust, so the next run asked again and headless runs dropped the project's settings.
+- `CH_HOME` also moves the user-level `CH.md` and `commands/` directory. Before, those were always read from `~/.ch`.
+- Recording trust in `trusted-projects.toml` replaces the file atomically, so a crash can't leave a damaged file that blocks trusting any project.
 - `ch` starts without the Anthropic provider. With `model.provider` unset, it uses the first enabled provider (Anthropic when it is there), and with `model.id` unset, that provider's default model. Before, the kernel's built-in `anthropic` / `claude-opus-5-5` defaults made a build with only OpenAI, or a config with `provider-anthropic` disabled, fail with "no model provider `anthropic`". OpenAI has no default model, so it asks for `model.id`.
 - The "several context strategies are registered" error names the setting `select.context`. Before, it suggested `select.context_strategy`, which did nothing.
 - In the REPL, Esc or Ctrl-C cancels a running slash command such as `/compact`. Before, Ctrl-C during a command killed `ch` without saving the session.
@@ -50,6 +55,8 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 ### Security
 
+- The trust prompt shows a project's setting names and values with control and bidi characters escaped. Before, a quoted key holding escape codes could move the cursor and redraw the prompt over the settings you were being asked to trust.
+- `ch` refuses a `.ch/config.toml` that is a symlink to a file outside the project, and a parse error in the project config gives the line number without quoting the line. Before, a project could make `ch` print a line of any readable file, such as a credentials file, to the terminal and the logs.
 - A project's `.ch/config.toml` can no longer get around the trust check. Settings now need trust unless they are in `[model]` or `[agent]`, are `plugins.safety.deny` or `ask`, or are declared safe by their plugin. Before, the check went by key name and looked only inside tables, so a project could write `[plugins] safety = ["bypass", ["bash"]]` to turn on bypass mode and erase your deny rules, disable the `safety` plugin, re-enable plugins you turned off, or send your API key to another server, all without being asked.
 - `edit_file` and `write_file` refuse to change a file that has more than one hard link (on Unix). A hard link is the same file under another name, possibly outside the workspace, such as a dotfile or a package manager's shared store, so editing it changed that file too. Reading a hard-linked file still works.
 - When several hooks ask about the same tool call, "always allow" covers only the hook it was given for. Before, only the first hook's question was kept, so an "always allow" for the permission check also approved a later hook's question without asking. Several open questions are shown in one prompt that can only be allowed once.
