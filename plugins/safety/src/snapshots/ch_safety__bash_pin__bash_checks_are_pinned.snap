@@ -46,6 +46,33 @@ expression: out
   top raw="echo a\\ b \\\nc" words=["echo", "a b", "c"] op=None sub=false writes=false program="echo" assignments=[] normalized="echo a b c" read_only=true key="bash:echo a b *"
   too_deep=false denied=None
   policy: allow
+"echo $'\\' '; rm -rf ~ #'"
+  top raw="echo $'\\' '" words=["echo", "' "] op=None sub=false writes=false program="echo" assignments=[] normalized="echo ' " read_only=true key="bash:echo '  *"
+  top raw="rm -rf ~ #'" words=["rm", "-rf", "~"] op=Some(Seq) sub=false writes=false program="rm" assignments=[] normalized="rm -rf ~" read_only=false key="bash:rm *"
+  too_deep=false denied=Some("rm -rf / or ~")
+  policy: deny: `echo $'\' '; rm -rf ~ #'` is on the built-in deny list (rm -rf / or ~). Recursively deleting the filesystem root or the home directory is never allowed. Delete specific paths inside the workspace instead.
+"$'su\\x64o' ls"
+  top raw="$'su\\x64o' ls" words=["sudo", "ls"] op=None sub=false writes=false program="sudo" assignments=[] normalized="sudo ls" read_only=false key="bash:sudo ls *"
+  too_deep=false denied=Some("sudo")
+  policy: deny: `$'su\x64o' ls` is on the built-in deny list (sudo). Running commands as another user (sudo/doas/su) is never allowed. Run it without elevated privileges, or ask the user to run it themselves.
+"$'sudo\\0junk' ls"
+  top raw="$'sudo\\0junk' ls" words=["sudo", "ls"] op=None sub=false writes=false program="sudo" assignments=[] normalized="sudo ls" read_only=false key="bash:sudo ls *"
+  too_deep=false denied=Some("sudo")
+  policy: deny: `$'sudo\0junk' ls` is on the built-in deny list (sudo). Running commands as another user (sudo/doas/su) is never allowed. Run it without elevated privileges, or ask the user to run it themselves.
+"$\"sudo\" ls"
+  top raw="$\"sudo\" ls" words=["sudo", "ls"] op=None sub=false writes=false program="sudo" assignments=[] normalized="sudo ls" read_only=false key="bash:sudo ls *"
+  too_deep=false denied=Some("sudo")
+  policy: deny: `$"sudo" ls` is on the built-in deny list (sudo). Running commands as another user (sudo/doas/su) is never allowed. Run it without elevated privileges, or ask the user to run it themselves.
+"echo \"$'x'\""
+  top raw="echo \"$'x'\"" words=["echo", "$'x'"] op=None sub=false writes=false program="echo" assignments=[] normalized="echo $'x'" read_only=true key="bash:echo $'x' *"
+  too_deep=false denied=None
+  policy: allow
+"echo $(echo $'\\')' ; sudo id)"
+  top raw="echo $(echo $'\\')' ; sudo id)" words=["echo", "$(echo $'\\')' ; sudo id)"] op=None sub=true writes=false program="echo" assignments=[] normalized="echo $(echo $'\\')' ; sudo id)" read_only=false key="bash:echo $(echo $'\\')' ; sudo id) *"
+  nested raw="echo $'\\')'" words=["echo", "')"] op=None sub=false writes=false program="echo" assignments=[] normalized="echo ')" read_only=true key="bash:echo ') *"
+  nested raw="sudo id" words=["sudo", "id"] op=Some(Seq) sub=false writes=false program="sudo" assignments=[] normalized="sudo id" read_only=false key="bash:sudo id *"
+  too_deep=false denied=Some("sudo")
+  policy: deny: `echo $(echo $'\')' ; sudo id)` is on the built-in deny list (sudo). Running commands as another user (sudo/doas/su) is never allowed. Run it without elevated privileges, or ask the user to run it themselves.
 "echo #not-a-comment # a comment\nls"
   top raw="echo #not-a-comment # a comment" words=["echo"] op=None sub=false writes=false program="echo" assignments=[] normalized="echo" read_only=true key="bash:echo *"
   top raw="ls" words=["ls"] op=Some(Seq) sub=false writes=false program="ls" assignments=[] normalized="ls" read_only=true key="bash:ls *"
@@ -820,10 +847,6 @@ EOF` is on the built-in deny list (sudo). Running commands as another user (sudo
   top raw="make" words=["make"] op=Some(And) sub=false writes=false program="make" assignments=[] normalized="make" read_only=false key="bash:make *"
   too_deep=false denied=None
   policy: ask None: `npm test` (part of a compound command) is not on the read-only allowlist
-"echo $'\\' '; rm -rf ~ #'"
-  top raw="echo $'\\' '; rm -rf ~ #'" words=["echo", "$\\", "; rm -rf ~ #"] op=None sub=false writes=false program="echo" assignments=[] normalized="echo $\\ ; rm -rf ~ #" read_only=true key="bash:echo $\\ *"
-  too_deep=false denied=None
-  policy: allow
 "timeout -s KILL 5 rm -rf /"
   top raw="timeout -s KILL 5 rm -rf /" words=["timeout", "-s", "KILL", "5", "rm", "-rf", "/"] op=None sub=false writes=false program="KILL" assignments=[] normalized="KILL 5 rm -rf /" read_only=false key="bash:KILL 5 *"
   too_deep=false denied=None
