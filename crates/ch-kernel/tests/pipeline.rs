@@ -779,6 +779,39 @@ async fn tool_calls_cut_off_by_the_output_limit_are_not_run() {
 }
 
 #[tokio::test]
+async fn repeated_cut_off_tool_calls_end_the_turn() {
+    let cut = || {
+        let mut r = tool_reply(&[("t1", "echo", json!({"text":"partial"}))]);
+        r.stop_reason = StopReason::MaxTokens;
+        Ok(r)
+    };
+    // A complete response in between resets the count.
+    let mut h = harness(
+        vec![
+            cut(),
+            cut(),
+            Ok(tool_reply(&[("t2", "echo", json!({"text":"ok"}))])),
+            cut(),
+            cut(),
+            cut(),
+            Ok(text_reply("never")),
+        ],
+        vec![],
+        config(),
+    );
+    let r = h.session.run_turn("go").await;
+    match &r.reason {
+        TerminationReason::Error { message } => {
+            assert!(message.contains("3 times in a row"), "{message}")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(r.steps, 6);
+    let last = h.session.history().last().unwrap();
+    assert!(tool_results(&last.message)[0].1.contains("output limit"));
+}
+
+#[tokio::test]
 async fn turn_end_note_continues_the_turn_and_stop_ends_it() {
     let calls = Arc::new(Mutex::new(0));
     let c = calls.clone();
