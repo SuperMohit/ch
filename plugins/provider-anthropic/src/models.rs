@@ -37,6 +37,9 @@ enum Family {
     Mythos,
 }
 
+/// The model used when `model.id` is unset.
+pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
+
 /// Parses ids like `claude-opus-5-5`, `claude-haiku-4-5-20251001`,
 /// `us.anthropic.claude-sonnet-4-6` or `claude-3-5-sonnet-20241022` into a family and a
 /// `(major, minor)` version. Claude 3 era ids (version before the family) return `(3, x)`.

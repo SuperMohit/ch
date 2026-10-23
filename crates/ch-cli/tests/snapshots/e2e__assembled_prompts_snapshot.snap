@@ -2,7 +2,7 @@
 source: crates/ch-cli/tests/e2e.rs
 expression: text
 ---
-model: claude-opus-5-5
+model: scripted
 tools: read_file (ro), edit_file, write_file, list_files (ro), glob_files (ro), grep_text (ro), bash, web_fetch (ro)
 
 ===== system block 0 =====

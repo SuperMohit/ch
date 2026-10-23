@@ -28,6 +28,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 ### Fixed
 
+- `ch` starts without the Anthropic provider. With `model.provider` unset, it uses the first enabled provider (Anthropic when it is there), and with `model.id` unset, that provider's default model. Before, the kernel's built-in `anthropic` / `claude-opus-5-5` defaults made a build with only OpenAI, or a config with `provider-anthropic` disabled, fail with "no model provider `anthropic`". OpenAI has no default model, so it asks for `model.id`.
 - The "several context strategies are registered" error names the setting `select.context`. Before, it suggested `select.context_strategy`, which did nothing.
 - In the REPL, Esc or Ctrl-C cancels a running slash command such as `/compact`. Before, Ctrl-C during a command killed `ch` without saving the session.
 - A tool call whose approval prompt was interrupted is answered "Not run: the user cancelled the turn." Before, the model was told the user had denied it and not to retry it.

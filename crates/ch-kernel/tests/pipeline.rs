@@ -1403,6 +1403,65 @@ fn single_slot_selection() {
     assert!(r.context(Some("c")).is_err());
 }
 
+/// A provider that is only picked, never called.
+#[derive(Clone)]
+struct Named(&'static str, Option<&'static str>);
+
+#[async_trait::async_trait]
+impl ModelProvider for Named {
+    fn id(&self) -> &str {
+        self.0
+    }
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        _cancel: CancellationToken,
+    ) -> Result<ModelStream, ModelError> {
+        Err(ModelError::Other(anyhow::anyhow!("not called")))
+    }
+    fn default_model(&self) -> Option<&str> {
+        self.1
+    }
+}
+
+#[test]
+fn provider_and_model_come_from_the_registered_providers() {
+    let open = |providers: &[Named], toml: &str| {
+        let providers = providers.to_vec();
+        let p = vec![plugin("providers", move |cx| {
+            for n in &providers {
+                cx.add_provider(n.clone());
+            }
+            Ok(())
+        })];
+        let cfg = Config::parse(toml).unwrap();
+        let registry = Arc::new(build(p, &cfg).unwrap());
+        Session::builder(registry, Arc::new(cfg)).build()
+    };
+    let with_default = Named("first", Some("first-model"));
+    let without = Named("second", None);
+
+    // Nothing configured: the first registered provider and its default model.
+    let s = open(&[with_default.clone(), without.clone()], "").unwrap();
+    assert_eq!((s.provider_id(), s.model()), ("first", "first-model"));
+    // A build with one provider that has no default model needs model.id.
+    let err = open(std::slice::from_ref(&without), "").err().unwrap();
+    assert!(
+        format!("{err:#}").contains("`second` has no default model"),
+        "{err:#}"
+    );
+    let s = open(std::slice::from_ref(&without), "[model]\nid = \"m\"").unwrap();
+    assert_eq!((s.provider_id(), s.model()), ("second", "m"));
+    let s = open(
+        &[with_default, without],
+        "[model]\nprovider = \"second\"\nid = \"m\"",
+    )
+    .unwrap();
+    assert_eq!(s.provider_id(), "second");
+    let err = open(&[], "").err().unwrap();
+    assert!(format!("{err:#}").contains("no model provider plugin is enabled"));
+}
+
 #[tokio::test]
 async fn cancel_before_turn_applies_to_next_turn() {
     let mut h = harness(vec![Ok(text_reply("never"))], vec![], config());

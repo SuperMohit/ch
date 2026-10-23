@@ -307,7 +307,7 @@ fn registers_without_an_api_key() {
         std::path::Path::new("/tmp"),
     )
     .unwrap();
-    let p = registry.provider("anthropic").unwrap();
+    let p = registry.provider(Some("anthropic")).unwrap();
     assert_eq!(p.context_window("claude-opus-5-5"), Some(1_000_000));
     assert_eq!(p.context_window("unknown"), None);
 }

@@ -373,7 +373,15 @@ impl Registry {
             .map(|(_, c)| c.clone())
     }
 
-    pub fn provider(&self, id: &str) -> anyhow::Result<Arc<dyn ModelProvider>> {
+    /// The provider named `id`, or the first registered one when `id` is `None`.
+    pub fn provider(&self, id: Option<&str>) -> anyhow::Result<Arc<dyn ModelProvider>> {
+        let Some(id) = id else {
+            return self
+                .providers
+                .first()
+                .map(|(_, p)| p.clone())
+                .context("no model provider plugin is enabled");
+        };
         self.providers
             .iter()
             .find(|(_, p)| p.id() == id)

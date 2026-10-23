@@ -165,7 +165,7 @@ async fn plugin_loads_script_relative_to_workspace() {
     .unwrap();
     let plugins: Vec<Arc<dyn Plugin>> = vec![ch_provider_scripted::plugin()];
     let registry = RegistryBuilder::build(plugins, &cfg, dir.path()).unwrap();
-    let p = registry.provider("scripted").unwrap();
+    let p = registry.provider(Some("scripted")).unwrap();
     assert_eq!(p.context_window("any"), Some(1000));
     let resp = complete(p.as_ref(), request("go"), CancellationToken::new())
         .await
@@ -179,7 +179,7 @@ async fn plugin_loads_script_relative_to_workspace() {
         dir.path(),
     )
     .unwrap();
-    assert!(registry.provider("scripted").is_err());
+    assert!(registry.provider(Some("scripted")).is_err());
 
     // A missing script file is a registration error that names the setting.
     let cfg = Config::parse(
@@ -205,7 +205,7 @@ async fn in_memory_plugin_exposes_requests() {
     let cfg = Config::parse("[plugins]\nenable = [\"provider-scripted\"]").unwrap();
     let registry =
         RegistryBuilder::build(vec![Arc::new(plugin)], &cfg, std::path::Path::new("/tmp")).unwrap();
-    let p = registry.provider("scripted").unwrap();
+    let p = registry.provider(Some("scripted")).unwrap();
     let resp = complete(p.as_ref(), request("list"), CancellationToken::new())
         .await
         .unwrap();

@@ -100,6 +100,11 @@ pub trait ModelProvider: Send + Sync {
     fn context_window(&self, _model: &str) -> Option<u64> {
         None
     }
+
+    /// The model used when `model.id` is unset. `None` makes `model.id` required.
+    fn default_model(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Runs a request to completion, ignoring deltas. Useful for tool-free helper calls

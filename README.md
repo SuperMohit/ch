@@ -127,8 +127,8 @@ Tables merge key by key. Lists are replaced, not appended, except that a project
 
 ```toml
 [model]
-provider = "anthropic"            # or "openai"
-id = "claude-opus-5-5"
+provider = "anthropic"            # or "openai"; unset: the first enabled provider
+id = "claude-opus-5-5"            # unset: the provider's default (openai has none)
 max_output_tokens = 16384
 # context_window = 200000         # overrides what the provider reports
 # [model.pricing]                 # USD per million tokens, used by /cost
