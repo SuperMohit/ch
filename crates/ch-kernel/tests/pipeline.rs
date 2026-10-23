@@ -1294,7 +1294,8 @@ fn single_slot_selection() {
         Ok(())
     })];
     let r = build(p, &Config::default()).unwrap();
-    assert!(r.context(None).is_err());
+    let err = r.context(None).err().unwrap().to_string();
+    assert!(err.contains("`select.context`"), "{err}");
     assert_eq!(r.context(Some("b")).unwrap().id(), "b");
     assert!(r.context(Some("c")).is_err());
 }
