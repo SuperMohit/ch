@@ -42,6 +42,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 - Commands run by `bash` no longer see the provider API keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and any variable named by an `api_key_env` setting are removed from their environment. Before, `echo $ANTHROPIC_API_KEY` showed the key to the model without asking.
 - Hooks get the event read-only, so a `Rewrite` decision is the only way to change a tool call. Before, a hook could edit the input in place after the permission check had approved it.
+- A `bash` call with no command in it (empty, or only `;` or `&&`) and a `web_fetch` URL that can't be parsed or has no host now ask before running in `ask` and `accept-edits` modes. Before, the permission check allowed them and relied on the tool to reject them.
 
 - A path-scoped allow rule such as `edit_file:src/**` no longer covers paths that leave its directory through `..`. Before, `src/../.git/hooks/pre-commit` was written without asking, even though it is a sensitive path. Allow rules now match only the resolved path, and for `web_fetch` the normalized URL.
 - Environment variables in front of a read-only command now make it ask, except locale and display settings (`LANG`, `LC_*`, `TZ`, `NO_COLOR`, `TERM`, `COLUMNS`, `LINES`). Before, `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=<cmd> git status` ran `<cmd>` without asking. Assignments after `env` (`env LD_PRELOAD=x cat`) are now checked too.
