@@ -266,7 +266,8 @@ impl TrustStore {
         let text = format!(
             "# Projects whose .ch/config.toml settings you trusted. Managed by ch.\n\n{body}"
         );
-        std::fs::write(&self.path, text).with_context(|| format!("writing {}", self.path.display()))
+        ch_kernel::util::write_atomic(&self.path, text.as_bytes())
+            .with_context(|| format!("writing {}", self.path.display()))
     }
 }
 
