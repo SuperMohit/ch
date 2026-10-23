@@ -56,6 +56,8 @@ pub struct Session {
     events: EventBus,
     provider: Arc<dyn ModelProvider>,
     model: String,
+    /// `model.id`, or the provider's default model when it is unset.
+    configured_model: String,
     summarizer: Arc<dyn ModelProvider>,
     summarizer_model: String,
     context: Arc<dyn ContextStrategy>,
@@ -142,7 +144,7 @@ impl Session {
     }
 
     fn for_configured_model<T>(&self, setting: Option<T>) -> Option<T> {
-        setting.filter(|_| self.model == self.kcfg.model.id)
+        setting.filter(|_| self.model == self.configured_model)
     }
 
     /// Starts a new conversation under a new id (`/clear`), leaving the old one saved as
@@ -188,7 +190,7 @@ impl Session {
         if let Some(store) = &self.store {
             self._lock = Some(store.lock(&snap.meta.id)?);
         }
-        self.model = restored_model(&snap.meta, self.provider.id(), &self.kcfg.model.id);
+        self.model = restored_model(&snap.meta, self.provider.id(), &self.configured_model);
         self.id = snap.meta.id;
         self.created_at = snap.meta.created_at;
         self.turn = snap.meta.turns;

@@ -307,6 +307,10 @@ impl ModelProvider for ScriptedProvider {
     fn context_window(&self, _model: &str) -> Option<u64> {
         self.context_window
     }
+
+    fn default_model(&self) -> Option<&str> {
+        Some("scripted")
+    }
 }
 
 /// `[plugins.provider-scripted]`.

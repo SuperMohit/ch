@@ -42,7 +42,7 @@ fn defaults_without_files() {
     let loaded = build_config(&f.paths, &Overrides::default()).unwrap();
     assert!(loaded.files.is_empty());
     let k = loaded.config.kernel().unwrap();
-    assert_eq!(k.model.id, "claude-opus-5-5");
+    assert_eq!(k.model.id, None);
     assert_eq!(k.agent.max_steps, 300);
 }
 
@@ -75,8 +75,8 @@ fn project_overrides_user_and_tables_merge() {
     assert_eq!(loaded.files[0], f.paths.user_config());
     let c = &loaded.config;
     let k = c.kernel().unwrap();
-    assert_eq!(k.model.provider, "openai");
-    assert_eq!(k.model.id, "project-model");
+    assert_eq!(k.model.provider.as_deref(), Some("openai"));
+    assert_eq!(k.model.id.as_deref(), Some("project-model"));
     assert_eq!(k.agent.max_steps, 50);
     assert_eq!(
         get::<String>(c, "plugins.context.strategy").as_deref(),
@@ -106,7 +106,7 @@ fn profile_then_model_then_set() {
         ..Default::default()
     };
     let k = build_config(&f.paths, &o).unwrap().config.kernel().unwrap();
-    assert_eq!(k.model.id, "profile-model");
+    assert_eq!(k.model.id.as_deref(), Some("profile-model"));
     assert_eq!(k.agent.max_steps, 7);
 
     // --model beats the profile, --set beats --model.
@@ -116,7 +116,7 @@ fn profile_then_model_then_set() {
         ..Default::default()
     };
     let k = build_config(&f.paths, &o).unwrap().config.kernel().unwrap();
-    assert_eq!(k.model.id, "flag-model");
+    assert_eq!(k.model.id.as_deref(), Some("flag-model"));
     let o = Overrides {
         profile: Some("fast".into()),
         model: Some("flag-model".into()),
@@ -124,7 +124,7 @@ fn profile_then_model_then_set() {
         ..Default::default()
     };
     let k = build_config(&f.paths, &o).unwrap().config.kernel().unwrap();
-    assert_eq!(k.model.id, "set-model");
+    assert_eq!(k.model.id.as_deref(), Some("set-model"));
     assert_eq!(k.agent.max_steps, 3);
 }
 

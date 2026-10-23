@@ -238,6 +238,10 @@ impl ModelProvider for AnthropicProvider {
     fn context_window(&self, model: &str) -> Option<u64> {
         models::context_window(model)
     }
+
+    fn default_model(&self) -> Option<&str> {
+        Some(models::DEFAULT_MODEL)
+    }
 }
 
 /// Registers the `anthropic` provider.

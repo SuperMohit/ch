@@ -85,13 +85,21 @@ impl SessionBuilder {
     pub fn build(self) -> anyhow::Result<Session> {
         let kcfg = self.config.kernel()?;
         let registry = self.registry;
-        let provider = registry.provider(&kcfg.model.provider)?;
+        let provider = registry.provider(kcfg.model.provider.as_deref())?;
+        let configured_model = match (&kcfg.model.id, provider.default_model()) {
+            (Some(id), _) => id.clone(),
+            (None, Some(id)) => id.to_string(),
+            (None, None) => anyhow::bail!(
+                "model provider `{}` has no default model; set model.id (or pass --model)",
+                provider.id()
+            ),
+        };
         let summ = kcfg.model.summarizer.clone().unwrap_or_default();
         let summarizer = match &summ.provider {
-            Some(id) => registry.provider(id)?,
+            Some(id) => registry.provider(Some(id))?,
             None => provider.clone(),
         };
-        let summarizer_model = summ.id.unwrap_or_else(|| kcfg.model.id.clone());
+        let summarizer_model = summ.id.unwrap_or_else(|| configured_model.clone());
         let context = registry.context(kcfg.select.context.as_deref())?;
         let executor = registry.executor(kcfg.select.executor.as_deref())?;
         let approver_id = self.approver.or(kcfg.select.approver.clone());
@@ -113,7 +121,7 @@ impl SessionBuilder {
                 snap.usage,
                 snap.cost,
                 snap.meta.created_at,
-                restored_model(&snap.meta, provider.id(), &kcfg.model.id),
+                restored_model(&snap.meta, provider.id(), &configured_model),
                 snap.meta.turns,
             ),
             None => (
@@ -122,7 +130,7 @@ impl SessionBuilder {
                 Usage::default(),
                 0.0,
                 now,
-                kcfg.model.id.clone(),
+                configured_model.clone(),
                 0,
             ),
         };
@@ -139,6 +147,7 @@ impl SessionBuilder {
             events: self.events.unwrap_or_default(),
             provider,
             model,
+            configured_model,
             summarizer,
             summarizer_model,
             context,

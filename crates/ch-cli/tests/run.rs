@@ -139,6 +139,8 @@ async fn print_runs_save_and_continue_sessions() {
         ws_arg,
         "--set",
         "model.provider=fake",
+        "--model",
+        "fake-model",
         "--output-format",
         "json",
     ];
@@ -192,6 +194,19 @@ async fn unknown_frontend_or_provider_is_reported() {
     .unwrap_err();
     assert!(
         format!("{e:#}").contains("no model provider `nope`"),
+        "{e:#}"
+    );
+
+    let e = ch_cli::run_with(
+        cli(&["-p", "x", "--cwd", &ws, "--set", "model.provider=fake"]),
+        plugins(),
+        home.clone(),
+        ch_cli::Stdin::None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{e:#}").contains("`fake` has no default model; set model.id"),
         "{e:#}"
     );
 

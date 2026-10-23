@@ -206,6 +206,6 @@ fn registers_without_an_api_key() {
         std::path::Path::new("/tmp"),
     )
     .unwrap();
-    let p = registry.provider("openai").unwrap();
+    let p = registry.provider(Some("openai")).unwrap();
     assert_eq!(p.context_window("gpt-x"), Some(128_000));
 }

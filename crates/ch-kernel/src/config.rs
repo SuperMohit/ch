@@ -164,10 +164,10 @@ pub struct KernelConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
-    /// Id of the `ModelProvider` plugin.
-    pub provider: String,
-    /// Model id passed to the provider.
-    pub id: String,
+    /// Id of the `ModelProvider` plugin; the first registered provider when unset.
+    pub provider: Option<String>,
+    /// Model id passed to the provider; the provider's default model when unset.
+    pub id: Option<String>,
     pub max_output_tokens: u32,
     pub temperature: Option<f32>,
     pub thinking_budget: Option<u32>,
@@ -180,8 +180,8 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            provider: "anthropic".into(),
-            id: "claude-opus-5-5".into(),
+            provider: None,
+            id: None,
             max_output_tokens: 16_384,
             temperature: None,
             thinking_budget: None,
@@ -292,8 +292,8 @@ mod tests {
             .unwrap(),
         );
         let k = c.kernel().unwrap();
-        assert_eq!(k.model.provider, "anthropic");
-        assert_eq!(k.model.id, "b");
+        assert_eq!(k.model.provider.as_deref(), Some("anthropic"));
+        assert_eq!(k.model.id.as_deref(), Some("b"));
         assert_eq!(
             c.get::<String>("plugins.context.strategy")
                 .unwrap()
