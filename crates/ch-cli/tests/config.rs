@@ -205,11 +205,10 @@ fn allow_appends_to_the_configured_list_without_duplicates() {
         ..Default::default()
     };
     let c = build_config(&f.paths, &o, &settings()).unwrap().config;
-    // Arrays are replaced by later (trusted) layers, so the user's list is gone; flags
-    // append.
+    // A trusted project's rules and the flags add to the user's list.
     assert_eq!(
         get::<Vec<String>>(&c, "plugins.safety.allow").unwrap(),
-        vec!["bash:cargo test*", "edit_file"]
+        vec!["read_file", "bash:cargo test*", "edit_file"]
     );
 }
 
@@ -394,6 +393,24 @@ fn trusted_project_settings_apply_until_they_change() {
     let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
     assert!(matches!(loaded.project, ProjectTrust::Untrusted { .. }));
     assert_eq!(get::<String>(&loaded.config, "plugins.safety.mode"), None);
+}
+
+#[test]
+fn an_untrusted_project_cannot_choose_the_provider() {
+    let f = fixture(
+        Some("[model]\nprovider = \"provider-anthropic\"\n"),
+        Some("[model]\nprovider = \"provider-openai\"\nid = \"m\"\n"),
+    );
+    let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
+    assert!(matches!(loaded.project, ProjectTrust::Untrusted { .. }));
+    assert_eq!(
+        get::<String>(&loaded.config, "model.provider").as_deref(),
+        Some("provider-anthropic")
+    );
+    assert_eq!(
+        get::<String>(&loaded.config, "model.id").as_deref(),
+        Some("m")
+    );
 }
 
 #[test]
