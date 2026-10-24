@@ -117,7 +117,7 @@ pub fn build_config(
         let ProjectLayer { open, restricted } = ProjectLayer::split(table, settings);
         merge_adding(&mut config, open, ADDITIVE_LISTS)?;
         if !restricted.is_empty() {
-            let hash = crate::trust::settings_hash(&restricted);
+            let hash = crate::trust::settings_hash(&restricted)?;
             let saved = TrustStore::new(&paths.home).is_trusted(&paths.workspace, &hash);
             project = if saved || overrides.trust_project {
                 merge_adding(&mut config, restricted.clone(), TRUSTED_ADDITIVE_LISTS)?;
@@ -178,7 +178,7 @@ pub fn trust_saved_rule(
     if &now != expected.as_table() {
         return Ok(false);
     }
-    TrustStore::new(&paths.home).trust(&paths.workspace, &crate::trust::settings_hash(&now))?;
+    TrustStore::new(&paths.home).trust(&paths.workspace, &crate::trust::settings_hash(&now)?)?;
     *trusted = now;
     Ok(true)
 }
@@ -280,12 +280,15 @@ pub fn describe_paths(paths: &Paths) -> String {
     let status = |p: &Path| if p.exists() { "" } else { "  (not found)" };
     let user = paths.user_config();
     let project = paths.project_config();
+    let trust = TrustStore::new(&paths.home);
     format!(
-        "user config:    {}{}\nproject config: {}{}\nsessions:       {}\nlogs:           {}\n",
+        "user config:    {}{}\nproject config: {}{}\ntrusted:        {}{}\nsessions:       {}\nlogs:           {}\n",
         user.display(),
         status(&user),
         project.display(),
         status(&project),
+        trust.path().display(),
+        status(trust.path()),
         paths.sessions().display(),
         paths.logs().display(),
     )

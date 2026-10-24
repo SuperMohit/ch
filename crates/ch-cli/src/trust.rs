@@ -67,11 +67,6 @@ impl ProjectLayer {
         let (open, restricted) = split_table(table, &[], settings);
         Self { open, restricted }
     }
-
-    /// Identifies the restricted settings, for the trust record.
-    pub fn restricted_hash(&self) -> String {
-        settings_hash(&self.restricted)
-    }
 }
 
 /// What a project setting needs.
@@ -141,12 +136,12 @@ fn split_table(table: Table, prefix: &[String], settings: &ProjectSettings) -> (
 }
 
 /// SHA-256 of the settings, as hex.
-pub fn settings_hash(settings: &Table) -> String {
-    let text = toml::to_string(settings).unwrap_or_default();
-    Sha256::digest(text.as_bytes())
+pub fn settings_hash(settings: &Table) -> anyhow::Result<String> {
+    let text = toml::to_string(settings).context("serializing the project settings to trust")?;
+    Ok(Sha256::digest(text.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
-        .collect()
+        .collect())
 }
 
 /// One `(key.path, value)` per setting, for showing the user what they would trust.
@@ -470,10 +465,11 @@ mod tests {
     fn hash_changes_with_values() {
         let a = split("[plugins.safety]\nallow = [\"bash:npm test *\"]");
         let b = split("[plugins.safety]\nallow = [\"bash\"]");
-        assert_ne!(a.restricted_hash(), b.restricted_hash());
+        let hash = |l: &ProjectLayer| settings_hash(&l.restricted).unwrap();
+        assert_ne!(hash(&a), hash(&b));
         // Open settings don't affect it.
         let c = split("[plugins.safety]\nallow = [\"bash:npm test *\"]\n[agent]\nmax_steps = 9");
-        assert_eq!(a.restricted_hash(), c.restricted_hash());
+        assert_eq!(hash(&a), hash(&c));
     }
 
     #[test]

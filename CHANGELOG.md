@@ -26,8 +26,10 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 ### Improved
 
+- `ch --config-path` also shows where trusted projects are recorded (`trusted-projects.toml`).
 ### Fixed
 
+- `ch -r <id>` refuses an id with characters other than letters, digits, `-` and `_`. Before, the id was joined into a path, so `-r ../other/s` opened a session file and created a lock file outside the project's sessions directory.
 - A trusted project's `plugins.safety.allow` rules are added to yours. Before, they replaced your list, so saving one "always allow" rule to `.ch/config.toml` hid every allow rule in `~/.ch/config.toml`.
 - `ch -p "task"` no longer hangs when stdin is an open pipe that nothing is written to, as under `ssh` or a parent process. Input piped alongside a prompt is waited for at most 3 seconds; after that the task runs without it, with a note on stderr.
 - `ch -p fix tests` is an error that shows the quoted form, `ch -p "fix tests"`. Before, the second word was silently dropped.
