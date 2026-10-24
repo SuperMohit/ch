@@ -28,6 +28,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 ### Fixed
 
+- A trusted project's `plugins.safety.allow` rules are added to yours. Before, they replaced your list, so saving one "always allow" rule to `.ch/config.toml` hid every allow rule in `~/.ch/config.toml`.
 - `ch -p "task"` no longer hangs when stdin is an open pipe that nothing is written to, as under `ssh` or a parent process. Input piped alongside a prompt is waited for at most 3 seconds; after that the task runs without it, with a note on stderr.
 - `ch -p fix tests` is an error that shows the quoted form, `ch -p "fix tests"`. Before, the second word was silently dropped.
 - After you save a second "always allow" rule in the same REPL session, the project stays trusted. Before, only the first saved rule kept trust, so the next run asked again and headless runs dropped the project's settings.
@@ -55,6 +56,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 ### Security
 
+- A project's `model.provider` and `model.summarizer.provider` apply only once you trust the project. Before, any repository could pick which of your configured providers its code was sent to. The rest of `[model]` still needs no trust.
 - The deny list sees the program behind wrapper options that take a value, so `timeout -s KILL 5 rm -rf /`, `env -u X sudo ls`, `nice -n 5 …` and `xargs -I {} …` are checked as the command they run, and `env -S '<command line>'` is checked like `sh -c`. Before, the option's value was taken for the program, so in `bypass` mode those commands got past the deny list.
 - A git alias defined on the command line (`git -c alias.p=push p`) is denied, because it hides which subcommand runs. Before, it got past the `git push`, `git reset --hard` and `git clean -f` rules.
 - `git --config-env` makes a git command ask before running, as `git -c` does. Before, `TERM='<cmd>' git --config-env=core.fsmonitor=TERM status` ran `<cmd>` without asking, and with the two-word form, `git --config-env a.b=C push`, the deny list missed the push.
