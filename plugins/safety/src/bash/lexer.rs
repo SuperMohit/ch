@@ -76,6 +76,10 @@ impl<'a> Lexer<'a> {
         self.word.get_or_insert_with(String::new).push(c);
     }
 
+    fn push_str(&mut self, s: &str) {
+        self.word.get_or_insert_with(String::new).push_str(s);
+    }
+
     fn end_word(&mut self) {
         let quoted = std::mem::take(&mut self.quoted);
         let Some(w) = self.word.take() else {
@@ -188,6 +192,9 @@ impl<'a> Lexer<'a> {
                     self.pos += 2;
                 }
                 '$' if self.peek(1) == Some('(') => self.substitution(),
+                '$' if self.peek(1) == Some('\'') => self.ansi_c_quote(),
+                // `$"..."` is a double-quoted string the shell may translate.
+                '$' if self.peek(1) == Some('"') => self.pos += 1,
                 '<' | '>' if self.peek(1) == Some('(') => self.substitution(),
                 '`' => self.backtick(),
                 '#' if self.word.is_none() => {
@@ -301,10 +308,17 @@ impl<'a> Lexer<'a> {
         let mut quote: Option<char> = None;
         while let Some(ch) = self.peek(0) {
             match (quote, ch) {
+                (Some('$'), '\'') => quote = None,
+                (Some('$'), '\\') => self.pos += 1,
+                (Some('$'), _) => {}
                 (Some(q), c) if c == q => quote = None,
                 (Some('"'), '\\') => self.pos += 1,
                 (Some(_), _) => {}
                 (None, '\'' | '"') => quote = Some(ch),
+                (None, '$') if self.peek(1) == Some('\'') => {
+                    quote = Some('$');
+                    self.pos += 1;
+                }
                 (None, '\\') => self.pos += 1,
                 (None, '(') => depth += 1,
                 (None, ')') => {
@@ -318,6 +332,80 @@ impl<'a> Lexer<'a> {
             self.pos += 1;
         }
         self.end_substitution(start, body_start);
+    }
+
+    /// `$'...'` starting at `self.pos`. Its escapes are decoded as the shell does, so
+    /// `$'su\x64o'` is the word `sudo`, and a NUL ends the string.
+    fn ansi_c_quote(&mut self) {
+        self.word.get_or_insert_with(String::new);
+        self.pos += 2;
+        let mut ended = false;
+        while let Some(ch) = self.peek(0) {
+            self.pos += 1;
+            let text = match ch {
+                '\'' => break,
+                '\\' => self.ansi_c_escape(),
+                _ => ch.to_string(),
+            };
+            if let Some(i) = text.find('\0') {
+                ended = true;
+                self.push_str(&text[..i]);
+            } else if !ended {
+                self.push_str(&text);
+            }
+        }
+    }
+
+    /// The text of the escape after a `\` in `$'...'`, with `self.pos` past it.
+    fn ansi_c_escape(&mut self) -> String {
+        let Some(c) = self.peek(0) else {
+            return "\\".into();
+        };
+        self.pos += 1;
+        let simple = match c {
+            'a' => '\x07',
+            'b' => '\x08',
+            'e' | 'E' => '\x1b',
+            'f' => '\x0c',
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'v' => '\x0b',
+            '\\' | '\'' | '"' | '?' => c,
+            'c' => match self.peek(0) {
+                Some(x) => {
+                    self.pos += 1;
+                    char::from(x as u8 & 0x1f)
+                }
+                None => return "\\c".into(),
+            },
+            _ => {
+                let (radix, max) = match c {
+                    '0'..='7' => {
+                        self.pos -= 1;
+                        (8, 3)
+                    }
+                    'x' => (16, 2),
+                    'u' => (16, 4),
+                    'U' => (16, 8),
+                    _ => return format!("\\{c}"),
+                };
+                let mut n = 0u32;
+                let mut digits = 0;
+                while digits < max
+                    && let Some(d) = self.peek(0).and_then(|d| d.to_digit(radix))
+                {
+                    n = n.saturating_mul(radix) + d;
+                    self.pos += 1;
+                    digits += 1;
+                }
+                if digits == 0 {
+                    return format!("\\{c}");
+                }
+                char::from_u32(n).unwrap_or(char::REPLACEMENT_CHARACTER)
+            }
+        };
+        simple.to_string()
     }
 
     fn backtick(&mut self) {
@@ -462,6 +550,25 @@ mod tests {
                 .nested
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn dollar_quotes_are_strings() {
+        let words = |cmd: &str| parse(cmd).segments[0].words.clone();
+        let p = parse("echo $'\\' '; rm -rf ~ #'");
+        assert_eq!(p.segments[0].words, ["echo", "' "]);
+        assert_eq!(p.segments[1].words, ["rm", "-rf", "~"]);
+        assert_eq!(words("$'su\\x64o' ls"), ["sudo", "ls"]);
+        assert_eq!(words("$'sudo\\0junk' ls"), ["sudo", "ls"]);
+        assert_eq!(
+            words("echo $'\\101\\u00e9\\t\\z\\x'"),
+            ["echo", "A\u{e9}\t\\z\\x"]
+        );
+        assert_eq!(words("$\"sudo\" ls"), ["sudo", "ls"]);
+        assert_eq!(words("echo \"$'x'\""), ["echo", "$'x'"]);
+        let p = parse("echo $(echo $'\\')' ; sudo id)");
+        let nested: Vec<_> = p.nested.iter().map(|s| Cmd::of(s).program).collect();
+        assert_eq!(nested, ["echo", "sudo"]);
     }
 
     #[test]

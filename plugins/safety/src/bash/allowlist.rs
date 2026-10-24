@@ -170,6 +170,7 @@ mod tests {
             "env FOO=1 make",
             "echo $(rm a)",
             "cat <<EOF\n$(id)\nEOF",
+            "echo $'\\' '; rm -rf ~ #'",
             "cargo build",
             "npm test",
             "sort -o out in",
