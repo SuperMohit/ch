@@ -93,6 +93,9 @@ fn shell_script_arg(seg: &Segment) -> Option<String> {
     if cmd.program == "eval" {
         return Some(cmd.args.join(" "));
     }
+    if cmd.program == "env" {
+        return cmd.env_split_string();
+    }
     if !SHELLS.contains(&cmd.program) {
         return None;
     }

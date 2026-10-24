@@ -55,6 +55,8 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 ### Security
 
+- The deny list sees the program behind wrapper options that take a value, so `timeout -s KILL 5 rm -rf /`, `env -u X sudo ls`, `nice -n 5 …` and `xargs -I {} …` are checked as the command they run, and `env -S '<command line>'` is checked like `sh -c`. Before, the option's value was taken for the program, so in `bypass` mode those commands got past the deny list.
+- A git alias defined on the command line (`git -c alias.p=push p`) is denied, because it hides which subcommand runs. Before, it got past the `git push`, `git reset --hard` and `git clean -f` rules.
 - `git --config-env` makes a git command ask before running, as `git -c` does. Before, `TERM='<cmd>' git --config-env=core.fsmonitor=TERM status` ran `<cmd>` without asking, and with the two-word form, `git --config-env a.b=C push`, the deny list missed the push.
 - The `bash` permission check looks inside heredocs, whose `$(...)` and backticks the shell runs when the delimiter is unquoted (`<<EOF`, not `<<'EOF'`). Before, `cat <<EOF` with `$(rm -rf ~)` in the body ran without asking, as a read-only `cat`, and the deny list never saw the `rm`.
 - The `bash` permission check reads `$'...'` and `$"..."` strings as the shell does. Before, it took `$` as plain text, so in `echo $'\' '; rm -rf ~ #'` it missed that `\'` is an escaped quote and saw one `echo`, which ran without asking. `$'su\x64o'` and `$"sudo"` also got past the deny list as programs other than `sudo`.
