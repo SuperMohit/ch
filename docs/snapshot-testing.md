@@ -47,7 +47,7 @@ They also act as documentation: the `.snap` files show exactly what the model re
 | `plugins/prompt-base/src/snapshots/ch_prompt_base__tests__tools_full.snap` | `prompt-base` unit tests | Tool-rules block with all file tools and `bash` |
 | `…__tools_full_no_bash.snap` | same | File tools without `bash` |
 | `…__tools_bash_only.snap` | same | Bash-only mode ("Working with only a shell") |
-| `…__tools_bash_only_extras.snap` | same | Bash-only plus `web_fetch` / `update_plan` notes |
+| `…__tools_bash_only_extras.snap` | same | Bash-only plus the `web_fetch` note (`update_plan` brings its own block from `planning`) |
 | `…__tools_mixed.snap` | same | An unusual mix of tools |
 | `…__tools_none.snap` | same | No tools at all |
 | `…__assembled_full.snap` | same | All `prompt-base` system blocks together |

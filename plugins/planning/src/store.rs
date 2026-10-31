@@ -1,7 +1,6 @@
-//! `PlanStore`: the current plan of each session, kept outside the history.
+//! `PlanStore`: the current plan of the session, kept outside the history.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use ch_kernel::Cx;
 
@@ -10,31 +9,41 @@ use crate::plan::Plan;
 /// The plan file in the session's directory, so a resumed session keeps its plan.
 const FILE: &str = "plan.json";
 
-/// Plans by session id. `/clear` starts a new session id, so it starts without a plan.
+/// The plan of the current session. Only `update_plan` changes it.
+///
+/// It holds one session at a time: a different session id (after `/clear` or
+/// `/resume`) reads that session's plan from its directory again, so the plan always
+/// matches the session that was loaded.
 #[derive(Default)]
 pub struct PlanStore {
-    /// `None` once looked up and no plan was found.
-    plans: Mutex<HashMap<String, Option<Plan>>>,
+    /// The session id and its plan, `None` if it has none.
+    slot: Mutex<Option<(String, Option<Plan>)>>,
 }
 
 impl PlanStore {
     /// The plan of `cx`'s session, if `update_plan` was ever called in it.
     pub fn get(&self, cx: &Cx) -> Option<Plan> {
-        self.lock()
-            .entry(cx.session_id.to_string())
-            .or_insert_with(|| load(cx))
-            .clone()
+        self.current(cx).as_ref().and_then(|(_, plan)| plan.clone())
     }
 
     /// Replaces the plan of `cx`'s session and saves it next to the session.
-    pub fn set(&self, cx: &Cx, plan: Plan) {
+    pub(crate) fn set(&self, cx: &Cx, plan: Plan) {
+        let mut slot = self.lock();
         save(cx, &plan);
-        self.lock().insert(cx.session_id.to_string(), Some(plan));
+        *slot = Some((cx.session_id.to_string(), Some(plan)));
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Option<Plan>>> {
-        // Every update is a single insert, so a poisoned lock is still consistent.
-        self.plans
+    fn current(&self, cx: &Cx) -> MutexGuard<'_, Option<(String, Option<Plan>)>> {
+        let mut slot = self.lock();
+        if slot.as_ref().is_none_or(|(id, _)| **id != *cx.session_id) {
+            *slot = Some((cx.session_id.to_string(), load(cx)));
+        }
+        slot
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<(String, Option<Plan>)>> {
+        // Every update is a single assignment, so a poisoned lock is still consistent.
+        self.slot
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -77,31 +86,34 @@ mod tests {
         cx
     }
 
-    fn plan() -> Plan {
+    fn plan(content: &str) -> Plan {
         vec![PlanItem {
-            content: "Fix it".into(),
+            content: content.into(),
             status: Status::InProgress,
-            active_form: "Fixing it".into(),
+            active_form: format!("{content}ing"),
         }]
     }
 
     #[test]
-    fn plans_are_per_session() {
+    fn another_session_has_its_own_plan() {
         let store = PlanStore::default();
-        store.set(&cx("a", None), plan());
-        assert_eq!(store.get(&cx("a", None)), Some(plan()));
+        store.set(&cx("a", None), plan("Fix"));
+        assert_eq!(store.get(&cx("a", None)), Some(plan("Fix")));
         assert_eq!(store.get(&cx("b", None)), None);
     }
 
     #[test]
-    fn a_new_store_reads_the_saved_plan() {
+    fn switching_sessions_reads_the_saved_plan_again() {
         let tmp = tempfile::tempdir().unwrap();
-        PlanStore::default().set(&cx("a", Some(tmp.path())), plan());
+        let (a, b) = (cx("a", Some(tmp.path())), cx("b", Some(tmp.path())));
+        let store = PlanStore::default();
+        store.set(&a, plan("Fix"));
         assert!(tmp.path().join("a").join(FILE).is_file());
 
-        let resumed = PlanStore::default();
-        assert_eq!(resumed.get(&cx("a", Some(tmp.path()))), Some(plan()));
-        assert_eq!(resumed.get(&cx("b", Some(tmp.path()))), None);
+        assert_eq!(store.get(&b), None);
+        // Another process changed session a's plan meanwhile.
+        PlanStore::default().set(&a, plan("Test"));
+        assert_eq!(store.get(&a), Some(plan("Test")));
     }
 
     #[test]
