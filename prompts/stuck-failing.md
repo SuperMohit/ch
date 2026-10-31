@@ -1,1 +1,1 @@
-<!-- TODO: Phase 6 (task 6.2, stuck plugin) fills this file. -->
+You have called `{tool}` with exactly the same input {count} times in a row, and it has not succeeded once. Read the error, then change the input or the approach: fix the cause first, try another tool, or check your assumptions. If you cannot get past it, stop and explain the problem to the user. The turn ends if this call keeps failing.

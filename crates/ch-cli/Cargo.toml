@@ -32,7 +32,7 @@ default = [
     "tool-bash",
     "tool-web-fetch",
     "safety",
-    # "stuck",
+    "stuck",
     # "diagnostics",
     "planning",
     # "context",
@@ -57,7 +57,7 @@ tools-fs = ["dep:ch-tools-fs"]
 tool-bash = ["dep:ch-tool-bash"]
 tool-web-fetch = ["dep:ch-tool-web-fetch"]
 safety = ["dep:ch-safety"]
-# stuck = ["dep:ch-stuck"]
+stuck = ["dep:ch-stuck"]
 # diagnostics = ["dep:ch-diagnostics"]
 planning = ["dep:ch-planning"]
 # context = ["dep:ch-context"]
@@ -96,7 +96,7 @@ ch-tools-fs = { workspace = true, optional = true }
 ch-tool-bash = { workspace = true, optional = true }
 ch-tool-web-fetch = { workspace = true, optional = true }
 ch-safety = { workspace = true, optional = true }
-# ch-stuck = { workspace = true, optional = true }
+ch-stuck = { workspace = true, optional = true }
 # ch-diagnostics = { workspace = true, optional = true }
 ch-planning = { workspace = true, optional = true }
 # ch-context = { workspace = true, optional = true }

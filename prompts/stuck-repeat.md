@@ -1,1 +1,1 @@
-<!-- TODO: Phase 6 (task 6.2, stuck plugin) fills this file. -->
+You have now called `{tool}` with exactly the same input {count} times in a row. Repeating it will not give you anything new. Look at what the earlier results already told you, then either take a different step or, if you are blocked, stop and tell the user what you need.

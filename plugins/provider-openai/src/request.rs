@@ -149,6 +149,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_stored_malformed_call_is_sent_back_unchanged() {
+        let raw = json!({"_invalid_json": "{\"pa"});
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "read_file".into(),
+                input: raw.clone(),
+            }],
+        };
+        let args = assistant(&msg)["tool_calls"][0]["function"]["arguments"].clone();
+        let parsed: Value = serde_json::from_str(args.as_str().unwrap()).unwrap();
+        assert_eq!(parsed, raw);
+    }
+
+    #[test]
     fn maps_kernel_messages() {
         let req = ModelRequest {
             model: "gpt-test".into(),
