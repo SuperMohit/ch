@@ -23,6 +23,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 - **Project instructions.** `CH.md` and `AGENTS.md` from the git root down to the workspace, plus `~/.ch/CH.md`, are added to the system prompt with the working directory, OS, date and git status.
 - **Plugins.** Providers, tools, safety, prompts, commands and frontends are all plugins and can be turned off with `plugins.disable`. `ch --list-plugins` shows what is loaded and why, and `ch --config-path` shows where config, sessions and logs live.
 - **Cost.** `/cost` shows token usage and, with `[model.pricing]` set, the cost of the session.
+- **Post-edit diagnostics.** After each successful `edit_file` or `write_file`, a checker for the file's extension runs (`ruff check` for `.py` and `rustfmt --check` for `.rs` by default) and anything it reports is added to the tool result. Checkers that aren't installed are skipped. Commands are set per extension under `[plugins.diagnostics.commands]`, and a project's config can set them only once you trust the project.
 - **Planning.** An `update_plan` tool keeps a task plan for multi-step work. The REPL shows it as a checklist after each update, the model sees the current plan on every step (one copy, never stored in the conversation), and a resumed session keeps its plan. Turn it off with `plugins.disable = ["planning"]`.
 
 ### Improved

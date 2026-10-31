@@ -94,7 +94,7 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [ ] **6.2** `stuck`: `post_tool` hook. Streaks are counted over identical tool + canonical arguments, and permission denials don't count. A one-time reminder at 5 calls (`prompts/stuck-*.md`), and `Stop(Stuck)` at 8 identical failures.
   - Also a `pre_tool` check: the third identical call that already failed twice is refused before it runs, with the earlier error repeated so the model changes approach. Measure against the 5/8 thresholds in `ch-eval` before settling the numbers.
   - Three steps in a row whose tool calls all have malformed input (unparseable JSON, schema mismatch) end the turn. Check that a malformed call stored in history is still accepted by the provider on the next request.
-- [ ] **6.3** `diagnostics`: `post_tool` hook on successful edits and writes. A per-extension command from config (`.py` → ruff, `.ts` → configurable, `.rs` → `rustfmt --check` by default) with a short timeout; findings are appended as a note.
+- [x] **6.3** `diagnostics`: `post_tool` hook on successful edits and writes. A per-extension command from config (`.py` → ruff, `.ts` → configurable, `.rs` → `rustfmt --check` by default) with a short timeout; findings are appended as a note.
 - [ ] **6.4** `context`: `ContextStrategy` with region split (preamble | middle | recent ≥ 0.30 × window, at least 2 turns), per [architecture §8](docs/architecture.md#8-design-defaults).
   - Elision stubs above `soft`.
   - Summaries above `hard`, using the summarizer model and `prompts/summary.md`, inserted as `<context-summary>` and updated incrementally.

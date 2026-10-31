@@ -40,8 +40,8 @@ pub fn builtin_plugins() -> Vec<Arc<dyn Plugin>> {
     // Harness components.
     // #[cfg(feature = "stuck")]
     // plugins.push(ch_stuck::plugin());
-    // #[cfg(feature = "diagnostics")]
-    // plugins.push(ch_diagnostics::plugin());
+    #[cfg(feature = "diagnostics")]
+    plugins.push(ch_diagnostics::plugin());
     #[cfg(feature = "planning")]
     plugins.push(ch_planning::plugin());
     // #[cfg(feature = "context")]

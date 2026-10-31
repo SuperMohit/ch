@@ -57,6 +57,9 @@ fn common_args(ws: &Path) -> Vec<String> {
         "plugins.project-instructions.environment=false",
         "--set",
         "plugins.project-instructions.user_file=\"\"",
+        // Its checkers depend on what is installed on the machine.
+        "--set",
+        "plugins.disable=[\"diagnostics\"]",
     ]
     .iter()
     .map(|s| s.to_string())
