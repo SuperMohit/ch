@@ -176,6 +176,14 @@ async fn print_runs_save_and_continue_sessions() {
         .await
         .unwrap_err();
     assert!(e.to_string().contains("no session `nope`"), "{e:#}");
+
+    // An id that isn't one can't name a file outside the sessions directory.
+    let mut args = vec!["-p", "x", "-r", "../../elsewhere/s"];
+    args.extend(common);
+    let e = ch_cli::run_with(cli(&args), plugins(), home.clone(), ch_cli::Stdin::None)
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("is not a session id"), "{e:#}");
 }
 
 #[tokio::test]

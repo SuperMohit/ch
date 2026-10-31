@@ -15,7 +15,8 @@ use toml::{Table, Value};
 
 use crate::args::Cli;
 use crate::trust::{
-    ADDITIVE_LISTS, ProjectLayer, ProjectSettings, TrustStore, append_list, take_list,
+    ADDITIVE_LISTS, ProjectLayer, ProjectSettings, TRUSTED_ADDITIVE_LISTS, TrustStore, append_list,
+    take_list,
 };
 
 /// `$CH_HOME`, or `~/.ch`.
@@ -113,23 +114,13 @@ pub fn build_config(
     let mut project = ProjectTrust::NothingToTrust;
     if let Some(table) = read_project_config(paths)? {
         files.push(paths.project_config());
-        let ProjectLayer {
-            mut open,
-            restricted,
-        } = ProjectLayer::split(table, settings);
-        let additions: Vec<(&str, Vec<Value>)> = ADDITIVE_LISTS
-            .iter()
-            .filter_map(|path| take_list(&mut open, path).map(|v| (*path, v)))
-            .collect();
-        config.merge(open);
-        for (path, values) in additions {
-            append_list(&mut config, path, values);
-        }
+        let ProjectLayer { open, restricted } = ProjectLayer::split(table, settings);
+        merge_adding(&mut config, open, ADDITIVE_LISTS)?;
         if !restricted.is_empty() {
-            let hash = crate::trust::settings_hash(&restricted);
+            let hash = crate::trust::settings_hash(&restricted)?;
             let saved = TrustStore::new(&paths.home).is_trusted(&paths.workspace, &hash);
             project = if saved || overrides.trust_project {
-                config.merge(restricted.clone());
+                merge_adding(&mut config, restricted.clone(), TRUSTED_ADDITIVE_LISTS)?;
                 ProjectTrust::Trusted {
                     settings: restricted,
                     saved,
@@ -148,6 +139,20 @@ pub fn build_config(
         files,
         project,
     })
+}
+
+/// Merges `table` into `config`, adding the lists at `lists` to the ones already there
+/// instead of replacing them.
+fn merge_adding(config: &mut Config, mut table: Table, lists: &[&str]) -> anyhow::Result<()> {
+    let additions: Vec<(&str, Vec<Value>)> = lists
+        .iter()
+        .filter_map(|path| take_list(&mut table, path).map(|v| (*path, v)))
+        .collect();
+    config.merge(table);
+    for (path, values) in additions {
+        append_list(config, path, values)?;
+    }
+    Ok(())
 }
 
 /// Called after the user saves `rule` to the project's allow list from the REPL. If the
@@ -169,11 +174,11 @@ pub fn trust_saved_rule(
         &mut expected,
         "plugins.safety.allow",
         vec![Value::String(rule.to_string())],
-    );
+    )?;
     if &now != expected.as_table() {
         return Ok(false);
     }
-    TrustStore::new(&paths.home).trust(&paths.workspace, &crate::trust::settings_hash(&now))?;
+    TrustStore::new(&paths.home).trust(&paths.workspace, &crate::trust::settings_hash(&now)?)?;
     *trusted = now;
     Ok(true)
 }
@@ -275,12 +280,15 @@ pub fn describe_paths(paths: &Paths) -> String {
     let status = |p: &Path| if p.exists() { "" } else { "  (not found)" };
     let user = paths.user_config();
     let project = paths.project_config();
+    let trust = TrustStore::new(&paths.home);
     format!(
-        "user config:    {}{}\nproject config: {}{}\nsessions:       {}\nlogs:           {}\n",
+        "user config:    {}{}\nproject config: {}{}\ntrusted:        {}{}\nsessions:       {}\nlogs:           {}\n",
         user.display(),
         status(&user),
         project.display(),
         status(&project),
+        trust.path().display(),
+        status(trust.path()),
         paths.sessions().display(),
         paths.logs().display(),
     )

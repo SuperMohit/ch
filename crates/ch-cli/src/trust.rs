@@ -8,7 +8,8 @@
 //! again. See `docs/adr/0001-sandbox-and-agent-security-responsibilities.md`.
 //!
 //! `deny` and `ask` rules from a project are always applied, and are added to the
-//! user's lists rather than replacing them, so a project can only tighten them.
+//! user's lists rather than replacing them, so a project can only tighten them. A
+//! trusted project's `allow` rules are added to the user's too.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,6 +23,9 @@ use toml::{Table, Value};
 
 /// Safety lists a project may always add to.
 pub const ADDITIVE_LISTS: &[&str] = &["plugins.safety.deny", "plugins.safety.ask"];
+
+/// Lists a trusted project adds to rather than replaces.
+pub const TRUSTED_ADDITIVE_LISTS: &[&str] = &["plugins.safety.allow"];
 
 /// A project config split by what it needs.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -63,11 +67,6 @@ impl ProjectLayer {
         let (open, restricted) = split_table(table, &[], settings);
         Self { open, restricted }
     }
-
-    /// Identifies the restricted settings, for the trust record.
-    pub fn restricted_hash(&self) -> String {
-        settings_hash(&self.restricted)
-    }
 }
 
 /// What a project setting needs.
@@ -80,7 +79,8 @@ enum Gate {
 
 /// Fails closed: a project may set the kernel's `model` and `agent` tables (whose
 /// fields the kernel checks) and the plugin keys their manifests declare. Everything
-/// else, including unknown plugins and top-level keys, needs trust.
+/// else, including unknown plugins and top-level keys, needs trust, and so does the
+/// choice of provider, which decides where the code is sent.
 fn gate(path: &[String], settings: &ProjectSettings) -> Gate {
     let (path, in_profile) = match path {
         [p] | [p, _] if p == "profiles" => return Gate::Inside,
@@ -89,6 +89,8 @@ fn gate(path: &[String], settings: &ProjectSettings) -> Gate {
     };
     let parts: Vec<&str> = path.iter().map(String::as_str).collect();
     match parts.as_slice() {
+        ["model", "provider", ..] | ["model", "summarizer", "provider", ..] => Gate::Trust,
+        ["model"] | ["model", "summarizer"] => Gate::Inside,
         ["model" | "agent", ..] => Gate::Open,
         ["plugins", "enable" | "disable", ..] => Gate::Trust,
         ["plugins"] | ["plugins", _] => Gate::Inside,
@@ -134,12 +136,12 @@ fn split_table(table: Table, prefix: &[String], settings: &ProjectSettings) -> (
 }
 
 /// SHA-256 of the settings, as hex.
-pub fn settings_hash(settings: &Table) -> String {
-    let text = toml::to_string(settings).unwrap_or_default();
-    Sha256::digest(text.as_bytes())
+pub fn settings_hash(settings: &Table) -> anyhow::Result<String> {
+    let text = toml::to_string(settings).context("serializing the project settings to trust")?;
+    Ok(Sha256::digest(text.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
-        .collect()
+        .collect())
 }
 
 /// One `(key.path, value)` per setting, for showing the user what they would trust.
@@ -189,7 +191,11 @@ fn printable(text: &str) -> String {
 }
 
 /// Appends `values` to the list at `path` in `config`, skipping duplicates.
-pub fn append_list(config: &mut ch_kernel::Config, path: &str, values: Vec<Value>) {
+pub fn append_list(
+    config: &mut ch_kernel::Config,
+    path: &str,
+    values: Vec<Value>,
+) -> anyhow::Result<()> {
     let mut list = match config.get_value(path) {
         Some(Value::Array(existing)) => existing.clone(),
         _ => Vec::new(),
@@ -199,8 +205,7 @@ pub fn append_list(config: &mut ch_kernel::Config, path: &str, values: Vec<Value
             list.push(v);
         }
     }
-    // The parent tables were created by the merge or by `set_value` itself.
-    let _ = config.set_value(path, Value::Array(list));
+    config.set_value(path, Value::Array(list))
 }
 
 /// Removes and returns the list at `path` (dotted) from `table`, if it is a list.
@@ -376,6 +381,39 @@ mod tests {
     }
 
     #[test]
+    fn choosing_the_provider_needs_trust() {
+        let layer = split(
+            r#"
+            [model]
+            provider = "provider-openai"
+            id = "m"
+            [model.summarizer]
+            provider = "provider-openai"
+            id = "s"
+            [profiles.fast.model]
+            provider = "provider-openai"
+            "#,
+        );
+        assert_eq!(keys(&layer.open), ["model.id", "model.summarizer.id"]);
+        assert_eq!(
+            keys(&layer.restricted),
+            [
+                "model.provider",
+                "model.summarizer.provider",
+                "profiles.fast.model.provider",
+            ]
+        );
+        // A list where the table belongs would set the provider by position.
+        for text in [
+            "model = [\"provider-openai\"]",
+            "[model]\nsummarizer = [\"x\"]",
+        ] {
+            let layer = split(text);
+            assert!(layer.open.is_empty(), "{text}: open {:?}", layer.open);
+        }
+    }
+
+    #[test]
     fn profiles_are_checked_too() {
         let layer = split(
             r#"
@@ -427,10 +465,11 @@ mod tests {
     fn hash_changes_with_values() {
         let a = split("[plugins.safety]\nallow = [\"bash:npm test *\"]");
         let b = split("[plugins.safety]\nallow = [\"bash\"]");
-        assert_ne!(a.restricted_hash(), b.restricted_hash());
+        let hash = |l: &ProjectLayer| settings_hash(&l.restricted).unwrap();
+        assert_ne!(hash(&a), hash(&b));
         // Open settings don't affect it.
         let c = split("[plugins.safety]\nallow = [\"bash:npm test *\"]\n[agent]\nmax_steps = 9");
-        assert_eq!(a.restricted_hash(), c.restricted_hash());
+        assert_eq!(hash(&a), hash(&c));
     }
 
     #[test]

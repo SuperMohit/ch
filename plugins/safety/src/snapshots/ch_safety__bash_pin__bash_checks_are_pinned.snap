@@ -354,6 +354,44 @@ EOF` is on the built-in deny list (sudo). Running commands as another user (sudo
   top raw="xargs -0 rm" words=["xargs", "-0", "rm"] op=None sub=false writes=false program="rm" assignments=[] normalized="rm" read_only=false key="bash:rm *"
   too_deep=false denied=None
   policy: ask Some("bash:rm *"): `xargs -0 rm` is not on the read-only allowlist
+"timeout -s KILL 5 rm -rf /"
+  top raw="timeout -s KILL 5 rm -rf /" words=["timeout", "-s", "KILL", "5", "rm", "-rf", "/"] op=None sub=false writes=false program="rm" assignments=[] normalized="rm -rf /" read_only=false key="bash:rm *"
+  too_deep=false denied=Some("rm -rf / or ~")
+  policy: deny: `timeout -s KILL 5 rm -rf /` is on the built-in deny list (rm -rf / or ~). Recursively deleting the filesystem root or the home directory is never allowed. Delete specific paths inside the workspace instead.
+"timeout --signal=KILL 5 git push"
+  top raw="timeout --signal=KILL 5 git push" words=["timeout", "--signal=KILL", "5", "git", "push"] op=None sub=false writes=false program="git" assignments=[] normalized="git push" read_only=false key="bash:git push *"
+  too_deep=false denied=Some("git push")
+  policy: deny: `timeout --signal=KILL 5 git push` is on the built-in deny list (git push). Pushing is not allowed from the agent. Commit locally and tell the user the branch is ready to push.
+"env -u X sudo ls"
+  top raw="env -u X sudo ls" words=["env", "-u", "X", "sudo", "ls"] op=None sub=false writes=false program="sudo" assignments=[] normalized="sudo ls" read_only=false key="bash:sudo ls *"
+  too_deep=false denied=Some("sudo")
+  policy: deny: `env -u X sudo ls` is on the built-in deny list (sudo). Running commands as another user (sudo/doas/su) is never allowed. Run it without elevated privileges, or ask the user to run it themselves.
+"env -S 'sudo ls'"
+  top raw="env -S 'sudo ls'" words=["env", "-S", "sudo ls"] op=None sub=false writes=false program="env" assignments=[] normalized="env -S sudo ls" read_only=false key="bash:env *"
+  nested raw="sudo ls" words=["sudo", "ls"] op=None sub=false writes=false program="sudo" assignments=[] normalized="sudo ls" read_only=false key="bash:sudo ls *"
+  too_deep=false denied=Some("sudo")
+  policy: deny: `env -S 'sudo ls'` is on the built-in deny list (sudo). Running commands as another user (sudo/doas/su) is never allowed. Run it without elevated privileges, or ask the user to run it themselves.
+"env -iS'git push' --force"
+  top raw="env -iS'git push' --force" words=["env", "-iSgit push", "--force"] op=None sub=false writes=false program="env" assignments=[] normalized="env -iSgit push --force" read_only=false key="bash:env *"
+  nested raw="git push --force" words=["git", "push", "--force"] op=None sub=false writes=false program="git" assignments=[] normalized="git push --force" read_only=false key="bash:git push *"
+  too_deep=false denied=Some("git push")
+  policy: deny: `env -iS'git push' --force` is on the built-in deny list (git push). Pushing is not allowed from the agent. Commit locally and tell the user the branch is ready to push.
+"nice -n5 rm -rf ~"
+  top raw="nice -n5 rm -rf ~" words=["nice", "-n5", "rm", "-rf", "~"] op=None sub=false writes=false program="rm" assignments=[] normalized="rm -rf ~" read_only=false key="bash:rm *"
+  too_deep=false denied=Some("rm -rf / or ~")
+  policy: deny: `nice -n5 rm -rf ~` is on the built-in deny list (rm -rf / or ~). Recursively deleting the filesystem root or the home directory is never allowed. Delete specific paths inside the workspace instead.
+"xargs -I {} rm {}"
+  top raw="xargs -I {} rm {}" words=["xargs", "-I", "{}", "rm", "{}"] op=None sub=false writes=false program="rm" assignments=[] normalized="rm {}" read_only=false key="bash:rm [{][}] *"
+  too_deep=false denied=None
+  policy: ask Some("bash:rm [{][}] *"): `xargs -I {} rm {}` is not on the read-only allowlist
+"git -c alias.p=push p"
+  top raw="git -c alias.p=push p" words=["git", "-c", "alias.p=push", "p"] op=None sub=false writes=false program="git" assignments=[] normalized="git -c alias.p=push p" read_only=false key="bash:git *"
+  too_deep=false denied=Some("git -c alias")
+  policy: deny: `git -c alias.p=push p` is on the built-in deny list (git -c alias). Defining a git alias on the command line is not allowed, because the alias hides what runs. Run the git command directly.
+"git commit -c alias.p=push"
+  top raw="git commit -c alias.p=push" words=["git", "commit", "-c", "alias.p=push"] op=None sub=false writes=false program="git" assignments=[] normalized="git commit -c alias.p=push" read_only=false key="bash:git commit *"
+  too_deep=false denied=None
+  policy: ask Some("bash:git commit *"): `git commit -c alias.p=push` is not on the read-only allowlist
 "command -v git"
   top raw="command -v git" words=["command", "-v", "git"] op=None sub=false writes=false program="git" assignments=[] normalized="git" read_only=true key="bash:git *"
   too_deep=false denied=None
@@ -847,22 +885,6 @@ EOF` is on the built-in deny list (sudo). Running commands as another user (sudo
   top raw="make" words=["make"] op=Some(And) sub=false writes=false program="make" assignments=[] normalized="make" read_only=false key="bash:make *"
   too_deep=false denied=None
   policy: ask None: `npm test` (part of a compound command) is not on the read-only allowlist
-"timeout -s KILL 5 rm -rf /"
-  top raw="timeout -s KILL 5 rm -rf /" words=["timeout", "-s", "KILL", "5", "rm", "-rf", "/"] op=None sub=false writes=false program="KILL" assignments=[] normalized="KILL 5 rm -rf /" read_only=false key="bash:KILL 5 *"
-  too_deep=false denied=None
-  policy: ask Some("bash:KILL 5 *"): `timeout -s KILL 5 rm -rf /` is not on the read-only allowlist
-"env -u X sudo ls"
-  top raw="env -u X sudo ls" words=["env", "-u", "X", "sudo", "ls"] op=None sub=false writes=false program="X" assignments=[] normalized="X sudo ls" read_only=false key="bash:X sudo *"
-  too_deep=false denied=None
-  policy: ask Some("bash:X sudo *"): `env -u X sudo ls` is not on the read-only allowlist
-"env -S 'sudo ls'"
-  top raw="env -S 'sudo ls'" words=["env", "-S", "sudo ls"] op=None sub=false writes=false program="sudo ls" assignments=[] normalized="sudo ls" read_only=false key="bash:sudo ls *"
-  too_deep=false denied=None
-  policy: ask Some("bash:sudo ls *"): `env -S 'sudo ls'` is not on the read-only allowlist
-"git -c alias.p=push p"
-  top raw="git -c alias.p=push p" words=["git", "-c", "alias.p=push", "p"] op=None sub=false writes=false program="git" assignments=[] normalized="git -c alias.p=push p" read_only=false key="bash:git *"
-  too_deep=false denied=None
-  policy: ask Some("bash:git *"): `git -c alias.p=push p` is not on the read-only allowlist
 ""
   too_deep=false denied=None
   policy: ask None: no command was found in `` to check

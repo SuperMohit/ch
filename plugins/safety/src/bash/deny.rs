@@ -38,6 +38,17 @@ const DENY_LIST: &[DenyRule] = &[
                  the branch is ready to push.",
     },
     DenyRule {
+        name: "git -c alias",
+        check: Check::Segment(|c| {
+            c.program == "git"
+                && c.git_config()
+                    .iter()
+                    .any(|s| s.to_ascii_lowercase().starts_with("alias."))
+        }),
+        reason: "Defining a git alias on the command line is not allowed, because the alias \
+                 hides what runs. Run the git command directly.",
+    },
+    DenyRule {
         name: "git reset --hard",
         check: Check::Segment(|c| {
             c.program == "git"
@@ -229,6 +240,12 @@ mod tests {
             "echo $(echo $'\\')' ; sudo id)",
             "sh -c 'git push'",
             "timeout 5 rm -rf /",
+            "timeout -s KILL 5 rm -rf /",
+            "env -u X sudo ls",
+            "env -S 'sudo ls'",
+            "xargs -I {} sudo rm {}",
+            "git -c alias.p=push p",
+            "git --config-env Alias.p=X p",
             "echo $(echo $(echo $(echo $(echo $(git push)))))",
             "echo $(echo $(echo $(echo $(echo $(ls)))))",
             "eval eval eval eval eval git push",
@@ -248,6 +265,8 @@ mod tests {
             "curl https://example.com -o out.html",
             "echo 'git push'",
             "grep -r sudo .",
+            "git commit -c alias.p=push",
+            "env -i ls",
             "echo $(echo $(echo $(echo $(ls))))",
         ] {
             assert_eq!(deny(cmd), None, "should not deny: {cmd}");
