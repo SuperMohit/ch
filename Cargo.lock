@@ -196,6 +196,7 @@ dependencies = [
  "ch-frontend-print",
  "ch-frontend-repl",
  "ch-kernel",
+ "ch-planning",
  "ch-project-instructions",
  "ch-prompt-base",
  "ch-provider-anthropic",
@@ -374,7 +375,15 @@ dependencies = [
 name = "ch-planning"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "ch-kernel",
+ "ch-provider-scripted",
+ "ch-testkit",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

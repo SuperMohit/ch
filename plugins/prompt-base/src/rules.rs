@@ -8,7 +8,8 @@
 //!   `prompts/tools-bash-only.md`;
 //! - **mixed**: anything else → a short generic block built here.
 //!
-//! Short notes for `web_fetch` and `update_plan` are added when they exist.
+//! A short note for `web_fetch` is added when it exists. `update_plan` brings its own
+//! system block from the `planning` plugin.
 
 use ch_kernel::ToolSpec;
 
@@ -43,11 +44,6 @@ const WEB_FETCH_NOTE: &str = "- `web_fetch` retrieves a web page as markdown. Us
 for documentation, changelogs or issues you need to check, and for URLs the user gives \
 you. Don't guess URLs, and if a fetch fails, say so rather than describing the page \
 from memory.";
-
-const UPDATE_PLAN_NOTE: &str = "- `update_plan` keeps a visible task plan. Use it for \
-multi-step work: send the complete list on every update, keep exactly one item \
-`in_progress`, and mark items `completed` as soon as they are done. Skip it for quick, \
-single-step tasks.";
 
 /// Which shape of tool block applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,9 +86,6 @@ pub fn tool_rules(tools: &[ToolSpec]) -> Option<String> {
     let mut notes = Vec::new();
     if has("web_fetch") {
         notes.push(WEB_FETCH_NOTE);
-    }
-    if has("update_plan") {
-        notes.push(UPDATE_PLAN_NOTE);
     }
 
     let mut out = main;

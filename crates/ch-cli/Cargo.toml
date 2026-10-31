@@ -34,7 +34,7 @@ default = [
     "safety",
     # "stuck",
     # "diagnostics",
-    # "planning",
+    "planning",
     # "context",
     "prompt-base",
     "project-instructions",
@@ -59,7 +59,7 @@ tool-web-fetch = ["dep:ch-tool-web-fetch"]
 safety = ["dep:ch-safety"]
 # stuck = ["dep:ch-stuck"]
 # diagnostics = ["dep:ch-diagnostics"]
-# planning = ["dep:ch-planning"]
+planning = ["dep:ch-planning"]
 # context = ["dep:ch-context"]
 prompt-base = ["dep:ch-prompt-base"]
 project-instructions = ["dep:ch-project-instructions"]
@@ -98,7 +98,7 @@ ch-tool-web-fetch = { workspace = true, optional = true }
 ch-safety = { workspace = true, optional = true }
 # ch-stuck = { workspace = true, optional = true }
 # ch-diagnostics = { workspace = true, optional = true }
-# ch-planning = { workspace = true, optional = true }
+ch-planning = { workspace = true, optional = true }
 # ch-context = { workspace = true, optional = true }
 ch-prompt-base = { workspace = true, optional = true }
 ch-project-instructions = { workspace = true, optional = true }

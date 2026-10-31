@@ -113,7 +113,29 @@ pub fn tool_end_lines(
             s
         }));
     }
+    if !is_error
+        && name == "update_plan"
+        && let Some(plan) = metadata.get("plan").and_then(Value::as_array)
+    {
+        lines.extend(plan.iter().map(plan_line));
+    }
     lines
+}
+
+/// One plan item: `✓ done`, `▸ in progress` (its `activeForm`) or `○ pending`.
+fn plan_line(item: &Value) -> String {
+    let text = |key: &str| {
+        let s = item.get(key).and_then(Value::as_str).unwrap_or("");
+        first_line(s)
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect::<String>()
+    };
+    match item.get("status").and_then(Value::as_str) {
+        Some("completed") => format!("    {} {}", green("✓"), dim(&text("content"))),
+        Some("in_progress") => format!("    {} {}", cyan("▸"), bold(&text("activeForm"))),
+        _ => format!("    {} {}", dim("○"), text("content")),
+    }
 }
 
 /// A one-line description of a tool result: `120 lines`, `exit 1 · 3 lines`, `+3 -1`,
@@ -132,6 +154,9 @@ pub fn result_summary(name: &str, content: &str, is_error: bool, metadata: &Valu
     if let Some(diff) = metadata.get("diff").and_then(Value::as_str) {
         let (added, removed) = diff_counts(diff);
         return format!("+{added} -{removed}");
+    }
+    if name == "update_plan" {
+        return first_line(content).to_string();
     }
     let n = content.lines().count();
     let lines = if n == 0 {
@@ -426,6 +451,32 @@ mod tests {
         assert_eq!(
             tool_end_lines("edit_file", "no match", true, &json!({"diff": diff}), None).len(),
             1
+        );
+    }
+
+    #[test]
+    fn plan_updates_show_a_checklist() {
+        let plan = json!({"plan": [
+            {"content": "Read", "activeForm": "Reading", "status": "completed"},
+            {"content": "Fix", "activeForm": "Fixing\u{1b}]0;x\u{7}", "status": "in_progress"},
+            {"content": "Test", "activeForm": "Testing", "status": "pending"},
+        ]});
+        let lines = tool_end_lines(
+            "update_plan",
+            "Plan updated: 1 of 3 completed.",
+            false,
+            &plan,
+            None,
+        );
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert_eq!(
+            plain,
+            [
+                "  ⎿ Plan updated: 1 of 3 completed.",
+                "    ✓ Read",
+                "    ▸ Fixing]0;x",
+                "    ○ Test"
+            ]
         );
     }
 
