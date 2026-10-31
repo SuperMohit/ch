@@ -1,1 +1,1 @@
-<!-- TODO: Phase 6 (task 6.2, stuck plugin) fills this file. -->
+`{tool}` has failed {count} times in a row with exactly the same input. The same call will fail the same way. Read the error, change the input or the approach (fix the cause first, try another tool, or check your assumptions), and if you cannot get past it, stop and explain the problem to the user. The turn ends if this call keeps failing.

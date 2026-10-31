@@ -307,6 +307,17 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_malformed_call_is_sent_back_as_an_object() {
+        let raw = json!({"_invalid_json": "{\"pa"});
+        let call = ContentBlock::ToolUse {
+            id: "toolu_1".into(),
+            name: "read_file".into(),
+            input: raw.clone(),
+        };
+        assert_eq!(block(&call).unwrap()["input"], raw);
+    }
+
+    #[test]
     fn cache_breakpoint_skips_per_call_reminders() {
         let mut r = req("claude-opus-5-5");
         r.messages = vec![

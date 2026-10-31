@@ -38,8 +38,8 @@ pub fn builtin_plugins() -> Vec<Arc<dyn Plugin>> {
     plugins.push(ch_tool_web_fetch::plugin());
 
     // Harness components.
-    // #[cfg(feature = "stuck")]
-    // plugins.push(ch_stuck::plugin());
+    #[cfg(feature = "stuck")]
+    plugins.push(ch_stuck::plugin());
     // #[cfg(feature = "diagnostics")]
     // plugins.push(ch_diagnostics::plugin());
     #[cfg(feature = "planning")]
