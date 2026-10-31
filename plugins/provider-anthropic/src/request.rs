@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_malformed_call_is_sent_back_as_an_object() {
+    fn a_stored_malformed_call_is_sent_back_unchanged() {
         let raw = json!({"_invalid_json": "{\"pa"});
         let call = ContentBlock::ToolUse {
             id: "toolu_1".into(),

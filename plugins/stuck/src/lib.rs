@@ -1,16 +1,18 @@
 //! Stuck detection (plugin `stuck`): notices a model repeating itself and steers it out,
 //! or ends the turn.
 //!
-//! Calls are compared by tool and canonical input, and only consecutive identical calls
-//! form a streak. Calls a permission check or the user refused don't count.
+//! Calls are compared by tool and input, and only consecutive identical calls form a
+//! streak. Calls a permission check or the user refused don't count.
 //!
 //! - After `remind_after` identical calls in a row, the result gets a one-time note
-//!   (`prompts/stuck-repeat.md`, or `prompts/stuck-failing.md` if they all failed).
-//! - A call that failed `refuse_after` times in a row is refused before it runs, with
-//!   the last error repeated, so the model changes approach.
-//! - `stop_after` identical failures in a row (refusals included) end the turn.
+//!   (`prompts/stuck-repeat.md`, or `prompts/stuck-failing.md` if none succeeded).
+//! - A call that failed `refuse_after` times in a row with the same error is refused
+//!   before it runs (`prompts/stuck-refused.md`, with that error), so the model changes
+//!   approach. A check whose output changes, such as polling a build, is not refused.
+//! - `stop_after` identical calls in a row that failed or were refused end the turn.
 //! - `malformed_steps` model responses in a row whose tool calls all have malformed
-//!   input (unparseable JSON, or input that breaks the tool's schema) end the turn.
+//!   input (unparseable JSON, or a required key missing, null or of the wrong type) end
+//!   the turn.
 //!
 //! Every count starts again with each user prompt.
 //!
@@ -27,6 +29,8 @@ mod tracker;
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use anyhow::bail;
+
 use ch_kernel::reexports::async_trait;
 use ch_kernel::{
     ContentBlock, Cx, Hook, HookDecision, HookEvent, HookPoint, Plugin, PluginManifest, RegisterCx,
@@ -34,8 +38,8 @@ use ch_kernel::{
 };
 use serde::Deserialize;
 
-use input::{call_key, is_malformed};
-use tracker::{After, Outcome, Tracker};
+use input::is_malformed;
+use tracker::{Outcome, Tracker};
 
 /// Plugin id, also the hook id.
 pub const ID: &str = "stuck";
@@ -65,6 +69,28 @@ impl Default for StuckConfig {
     }
 }
 
+impl StuckConfig {
+    /// Rejects settings under which a limit could never take effect or would fire on
+    /// every call.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.remind_after == 1 {
+            bail!(
+                "plugins.stuck.remind_after = 1 would add the reminder to every call; use 2 \
+                 or more, or 0 to turn it off"
+            );
+        }
+        if self.refuse_after > 0 && self.stop_after > 0 && self.refuse_after >= self.stop_after {
+            bail!(
+                "plugins.stuck.refuse_after ({}) must be below stop_after ({}), or the turn \
+                 ends before a call is ever refused",
+                self.refuse_after,
+                self.stop_after
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Registers the hook.
 pub struct StuckPlugin;
 
@@ -91,6 +117,7 @@ impl Plugin for StuckPlugin {
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
         let config: StuckConfig = cx.config()?;
+        config.validate()?;
         cx.add_hook(StuckHook::new(config));
         Ok(())
     }
@@ -99,27 +126,20 @@ impl Plugin for StuckPlugin {
 /// The `user_prompt`, `after_model`, `pre_tool` and `post_tool` hook.
 pub struct StuckHook {
     config: StuckConfig,
-    /// The session the counts belong to, and the counts.
-    state: Mutex<(String, Tracker)>,
+    tracker: Mutex<Tracker>,
 }
 
 impl StuckHook {
     pub fn new(config: StuckConfig) -> Self {
         Self {
             config,
-            state: Mutex::default(),
+            tracker: Mutex::default(),
         }
     }
 
-    /// The counts for `cx`'s session; another session (after `/clear` or `/resume`)
-    /// starts from zero.
-    fn tracker(&self, cx: &Cx) -> MutexGuard<'_, (String, Tracker)> {
+    fn tracker(&self) -> MutexGuard<'_, Tracker> {
         // Every update leaves the counts consistent, so a poisoned lock is still usable.
-        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if state.0 != *cx.session_id {
-            *state = (cx.session_id.to_string(), Tracker::default());
-        }
-        state
+        self.tracker.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 
@@ -141,68 +161,116 @@ impl Hook for StuckHook {
     async fn on(&self, event: &HookEvent, cx: &Cx) -> HookDecision {
         let cfg = &self.config;
         match event {
+            // Every turn starts here, also after `/clear` or `/resume`.
             HookEvent::UserPrompt { .. } => {
-                self.tracker(cx).1 = Tracker::default();
+                *self.tracker() = Tracker::default();
                 HookDecision::Continue
             }
-            HookEvent::AfterModel { response } => {
-                // A response cut off by the output limit is the kernel's to handle.
-                let all_malformed = (response.stop_reason != StopReason::MaxTokens)
-                    .then(|| all_malformed(&response.message.content, cx));
-                match self.tracker(cx).1.response(all_malformed, cfg) {
+            // A response cut off by the output limit is the kernel's to handle.
+            HookEvent::AfterModel { response }
+                if response.stop_reason != StopReason::MaxTokens
+                    && !response.message.tool_calls().is_empty() =>
+            {
+                let all_malformed = all_malformed(&response.message.content, cx);
+                match self.tracker().response(all_malformed, cfg) {
                     Some(reason) => HookDecision::stop(reason),
                     None => HookDecision::Continue,
                 }
             }
             HookEvent::PreTool { call, .. } => {
-                let key = call_key(&call.name, &call.input);
-                match self.tracker(cx).1.refusal(&call.name, &key, cfg) {
-                    Some(reason) => HookDecision::deny(reason),
-                    None => HookDecision::Continue,
-                }
+                self.tracker().check(&call.id, &call.name, &call.input, cfg)
             }
             HookEvent::PostTool {
                 call,
                 output,
                 not_run,
             } => {
-                let key = call_key(&call.name, &call.input);
-                let mut state = self.tracker(cx);
-                let tracker = &mut state.1;
+                let mut tracker = self.tracker();
                 let outcome = match (*not_run, output.is_error) {
-                    (true, _) if tracker.refusal(&call.name, &key, cfg).is_some() => {
-                        Outcome::Refused
-                    }
-                    (true, _) => Outcome::Skipped,
+                    (true, _) if tracker.take_refused(&call.id) => Outcome::Refused,
+                    (true, _) => return HookDecision::Continue,
                     (false, true) => Outcome::Failed(&output.content),
                     (false, false) => Outcome::Ok,
                 };
-                match tracker.record(&call.name, key, outcome, cfg) {
-                    After::Nothing => HookDecision::Continue,
-                    After::Note(text) => HookDecision::note(text),
-                    After::Stop(reason) => HookDecision::stop(reason),
-                }
+                tracker.record(&call.name, &call.input, outcome, cfg)
             }
             _ => HookDecision::Continue,
         }
     }
 }
 
-/// Whether `content` calls tools and every call has malformed input. A call to an
-/// unknown tool isn't malformed: the kernel answers it with the list of tools.
+/// Whether every tool call in `content` has malformed input. A call to an unknown tool
+/// isn't malformed: the kernel answers it with the list of tools.
 fn all_malformed(content: &[ContentBlock], cx: &Cx) -> bool {
-    let mut calls = content
+    content
         .iter()
         .filter_map(|b| match b {
             ContentBlock::ToolUse { name, input, .. } => Some((name, input)),
             _ => None,
         })
-        .peekable();
-    calls.peek().is_some()
-        && calls.all(|(name, input)| {
+        .all(|(name, input)| {
             cx.tools
                 .iter()
                 .find(|t| t.name == *name)
                 .is_some_and(|t| is_malformed(input, &t.input_schema))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use ch_kernel::{Message, ModelResponse, ToolSpec, Usage};
+    use serde_json::json;
+
+    use super::*;
+
+    fn response(stop_reason: StopReason) -> HookEvent {
+        HookEvent::AfterModel {
+            response: ModelResponse {
+                message: Message {
+                    role: ch_kernel::Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "t".into(),
+                        name: "check".into(),
+                        input: json!({"_invalid_json": "{"}),
+                    }],
+                },
+                stop_reason,
+                usage: Usage::default(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn cut_off_responses_leave_the_malformed_count_alone() {
+        let hook = StuckHook::new(StuckConfig::default());
+        let mut cx = Cx::detached("/ws");
+        cx.tools = Arc::new(vec![ToolSpec {
+            name: "check".into(),
+            description: String::new(),
+            input_schema: json!({"type": "object"}),
+            read_only: true,
+        }]);
+        for _ in 0..5 {
+            let d = hook.on(&response(StopReason::MaxTokens), &cx).await;
+            assert_eq!(d, HookDecision::Continue);
+        }
+        hook.on(&response(StopReason::ToolUse), &cx).await;
+        hook.on(&response(StopReason::ToolUse), &cx).await;
+        let d = hook.on(&response(StopReason::ToolUse), &cx).await;
+        assert!(matches!(d, HookDecision::Stop { .. }), "{d:?}");
+    }
+
+    #[test]
+    fn settings_that_cannot_work_are_rejected() {
+        let with = |f: fn(&mut StuckConfig)| {
+            let mut c = StuckConfig::default();
+            f(&mut c);
+            c.validate()
+        };
+        assert!(with(|_| {}).is_ok());
+        assert!(with(|c| c.remind_after = 1).is_err());
+        assert!(with(|c| c.refuse_after = 8).is_err());
+        assert!(with(|c| c.stop_after = 0).is_ok());
+        assert!(with(|c| c.refuse_after = 0).is_ok());
+    }
 }

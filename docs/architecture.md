@@ -99,7 +99,7 @@ sequenceDiagram
 | **ModelProvider** | 1 per role (agent, summarizer) | `stream(req, cancel) -> Stream<ModelEvent>` | `provider-anthropic`, `provider-openai` |
 | **Tool** | many | `spec() -> ToolSpec`, `call(input, &ToolCx) -> ToolOutput` | `tools-fs`, `tool-bash`, `tool-web-fetch`, `planning` (`update_plan`) |
 | **Hook** | many, ordered by priority | `on(&HookEvent, &Cx) -> HookDecision` | `safety` (permissions), `stuck`, `diagnostics`, `hooks-shell` |
-| **PromptContributor** | many, ordered | `system_blocks(cx)`, `turn_reminders(cx)` | `prompt-base`, `project-instructions`, `planning`, `stuck` |
+| **PromptContributor** | many, ordered | `system_blocks(cx)`, `turn_reminders(cx)` | `prompt-base`, `project-instructions`, `planning` |
 | **ContextStrategy** | 1 | `view(&History, Budget, cx) -> View` | `context` (`none` / `elide` / `summarize` / `staged`) |
 | **Command** (slash) | many | `name()`, `run(args, &CmdCx) -> Outcome` | `commands-core`, `commands-markdown` |
 | **EventSink** | many | `handle(&AgentEvent)`, `flush()` | `telemetry-langfuse`, `telemetry-jsonl` |
@@ -137,7 +137,7 @@ Not doing: Rust dynamic libraries (`dlopen`), because Rust has no stable ABI and
 | Context management | `context` with `strategy = "staged"` and so on | `[plugins.context] strategy = ...` |
 | Safety gates | `safety` (path guard, read-before-write, permission policy) | always on |
 | Post-edit diagnostics | `diagnostics` (post_tool hook) | enable or disable |
-| Stuck detection | `stuck` (post_tool hook + reminder + stop) | enable or disable |
+| Stuck detection | `stuck` (hook: reminder, refusal, stop) | enable or disable |
 
 ## 5. Config and file locations
 
@@ -249,7 +249,7 @@ These are starting values. Every one is a config setting, and the eval runner ([
 | Context: soft threshold (elide) | 0.60 × usable window |
 | Context: hard threshold (summarize) | 0.85 × usable window |
 | Context: verbatim recent window | 0.30 × window, at least 2 turns |
-| Stuck: reminder / stop | 5 identical calls / 8 identical failing calls |
+| Stuck: reminder / refuse / stop / malformed | 5 identical calls / after 2 identical failures with the same error / 8 identical calls failed or refused / 3 responses with only malformed calls |
 | Bash timeout | 120s default, 600s max |
 
 **Context strategies** (`plugins.context.strategy`):
@@ -288,7 +288,7 @@ These are starting values. Every one is a config setting, and the eval runner ([
 
 **Safety (always on):** see [ADR 0001](adr/0001-sandbox-and-agent-security-responsibilities.md) for what the agent protects and what a sandbox must. A path guard (resolve symlinks, reject anything outside the workspace root); a file-state tracker `{path: (hash, full_read)}` that rejects edits to files never fully read or changed since the last read; an allow / ask / deny permission layer (read-only commands such as `git status/diff/log`, `ls`, `rg`, `cat` are allowed, destructive ones denied); tool errors returned as observations so the loop never crashes.
 
-**Telemetry per run:** success, cost (tokens × price), turns, tool calls, **termination reason** (done / step limit / overflow / stuck / cancelled / error), peak context ÷ window, elision and summary counts, whether any file was edited, and how many times an already-edited file was re-patched.
+**Telemetry per run:** success, cost (tokens × price), turns, tool calls, **termination reason** (done / step limit / overflow / stopped by a hook, such as `stuck` / cancelled / error), peak context ÷ window, elision and summary counts, whether any file was edited, and how many times an already-edited file was re-patched.
 
 ## 9. Testing strategy
 

@@ -149,7 +149,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_stored_malformed_call_is_sent_back_as_json_arguments() {
+    fn a_stored_malformed_call_is_sent_back_unchanged() {
         let raw = json!({"_invalid_json": "{\"pa"});
         let msg = Message {
             role: Role::Assistant,

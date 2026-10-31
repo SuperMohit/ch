@@ -4,7 +4,7 @@
 
 Almost everything in `ch` is a **plugin**: model providers, tools, safety checks, prompts, slash commands, frontends and context strategies. The core is a small kernel made of the agent loop, an event bus and a plugin registry. You can turn any component on or off in config and compare the agent's behaviour with and without it.
 
-> **Status:** early development. Milestone M1 (a usable CLI agent) is done apart from the REPL's expandable tool output and a live smoke test. Planning, context management, stuck detection, external plugins, MCP and telemetry are next. See [ROADMAP.md](ROADMAP.md) for what is next and [docs/architecture.md](docs/architecture.md) for the design.
+> **Status:** early development. Milestone M1 (a usable CLI agent) is done apart from the REPL's expandable tool output and a live smoke test. Planning and stuck detection are in; context management, external plugins, MCP and telemetry are next. See [ROADMAP.md](ROADMAP.md) for what is next and [docs/architecture.md](docs/architecture.md) for the design.
 
 ## Quick start
 
@@ -233,7 +233,7 @@ The kernel has no concrete providers, tools, prompts or UI. [docs/architecture.m
 | `plugins/commands-core`, `commands-markdown` | Built-in and markdown slash commands |
 | `plugins/frontend-repl`, `frontend-print` | The interactive REPL and the headless `-p` frontend |
 
-The other crates under `plugins/` are placeholders for upcoming phases: planning, context management, stuck detection, diagnostics, MCP, external plugins, shell hooks, telemetry and a Docker executor.
+The other crates under `plugins/` are placeholders for upcoming phases: context management, MCP, external plugins, shell hooks, telemetry and a Docker executor.
 
 ### Writing a plugin
 

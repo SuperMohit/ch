@@ -1,34 +1,14 @@
-//! Tool inputs: a canonical form to compare calls, and a check for malformed input.
+//! Whether a tool call's input is malformed.
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 
-/// `tool` plus its input with object keys sorted at every level, so two calls that
-/// differ only in key order compare equal.
-pub fn call_key(tool: &str, input: &Value) -> String {
-    format!("{tool} {}", canonical(input))
-}
-
-fn canonical(v: &Value) -> Value {
-    match v {
-        Value::Object(map) => {
-            let mut entries: Vec<_> = map.iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(b.0));
-            Value::Object(
-                entries
-                    .into_iter()
-                    .map(|(k, v)| (k.clone(), canonical(v)))
-                    .collect::<Map<_, _>>(),
-            )
-        }
-        Value::Array(items) => Value::Array(items.iter().map(canonical).collect()),
-        other => other.clone(),
-    }
-}
-
-/// Whether `input` can't be what the model meant: JSON the provider couldn't parse
-/// (kept as `{"_invalid_json": raw}`), or input that breaks the top level of the tool's
-/// schema (a missing required key, a key of the wrong type, or an unknown key when the
-/// schema forbids extra keys).
+/// Whether `input` is something no tool accepts: JSON the provider couldn't parse (kept
+/// as `{"_invalid_json": raw}`), not an object, or a required key that is missing, null
+/// or of the wrong type.
+///
+/// Optional keys and extra keys aren't checked: the tools accept `null` for an optional
+/// key, numbers like `30.0` for integers, and ignore keys they don't know, so flagging
+/// those would end turns whose calls all worked.
 pub fn is_malformed(input: &Value, schema: &Value) -> bool {
     let Some(obj) = input.as_object() else {
         return true;
@@ -36,21 +16,20 @@ pub fn is_malformed(input: &Value, schema: &Value) -> bool {
     if obj.contains_key("_invalid_json") {
         return true;
     }
-    let props = schema.get("properties").and_then(Value::as_object);
-    let required = schema.get("required").and_then(Value::as_array);
-    if required
+    let props = schema.get("properties");
+    schema
+        .get("required")
+        .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .any(|k| !obj.contains_key(k))
-    {
-        return true;
-    }
-    let closed = schema.get("additionalProperties") == Some(&Value::Bool(false));
-    obj.iter().any(|(k, v)| match props.and_then(|p| p.get(k)) {
-        Some(prop) => !type_matches(v, prop.get("type")),
-        None => closed,
-    })
+        .any(|key| match obj.get(key) {
+            None | Some(Value::Null) => true,
+            Some(v) => {
+                let ty = props.and_then(|p| p.get(key)).and_then(|p| p.get("type"));
+                !type_matches(v, ty)
+            }
+        })
 }
 
 /// `type` may be a name or a list of names; anything else isn't checked.
@@ -65,12 +44,10 @@ fn type_matches(v: &Value, ty: Option<&Value>) -> bool {
 fn is_type(v: &Value, ty: &str) -> bool {
     match ty {
         "string" => v.is_string(),
-        "integer" => v.is_i64() || v.is_u64(),
-        "number" => v.is_number(),
+        "integer" | "number" => v.is_number(),
         "boolean" => v.is_boolean(),
         "array" => v.is_array(),
         "object" => v.is_object(),
-        "null" => v.is_null(),
         _ => true,
     }
 }
@@ -82,52 +59,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn key_order_does_not_matter() {
-        let a = json!({"path": "a", "opts": {"x": 1, "y": [{"b": 1, "a": 2}]}});
-        let b: Value =
-            serde_json::from_str(r#"{"opts":{"y":[{"a":2,"b":1}],"x":1},"path":"a"}"#).unwrap();
-        assert_eq!(call_key("read_file", &a), call_key("read_file", &b));
-        assert_ne!(call_key("read_file", &a), call_key("list_files", &a));
-        assert_ne!(
-            call_key("read_file", &json!({"path": "a"})),
-            call_key("read_file", &json!({"path": "b"}))
-        );
-    }
-
-    #[test]
-    fn malformed_inputs() {
+    fn only_what_no_tool_accepts_is_malformed() {
         let schema = json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string"},
-                "limit": {"type": "integer"},
-                "any": {}
+                "command": {"type": "string"},
+                "timeout_seconds": {"type": "integer"},
+                "cwd": {"type": "string"},
+                "limit": {"type": "integer"}
             },
-            "required": ["path"],
+            "required": ["command"],
             "additionalProperties": false
         });
-        let ok = [
-            json!({"path": "a"}),
-            json!({"path": "a", "limit": 3, "any": [1]}),
+        let accepted = [
+            json!({"command": "ls"}),
+            json!({"command": "ls", "cwd": null, "timeout_seconds": null}),
+            json!({"command": "ls", "timeout_seconds": 30.0}),
+            json!({"command": "ls", "description": "list files"}),
+            json!({"command": "ls", "limit": "3"}),
         ];
-        for input in ok {
+        for input in accepted {
             assert!(!is_malformed(&input, &schema), "{input}");
         }
-        let bad = [
-            json!({"_invalid_json": "{\"path\": "}),
+        let malformed = [
+            json!({"_invalid_json": "{\"command\": "}),
             json!({}),
-            json!({"path": 1}),
-            json!({"path": "a", "limit": "3"}),
-            json!({"path": "a", "extra": true}),
-            json!("a"),
+            json!({"command": null}),
+            json!({"command": 1}),
+            json!("ls"),
         ];
-        for input in bad {
+        for input in malformed {
             assert!(is_malformed(&input, &schema), "{input}");
         }
-        let open = json!({"type": "object", "properties": {}});
-        assert!(!is_malformed(&json!({"extra": true}), &open));
-        let either = json!({"properties": {"n": {"type": ["integer", "null"]}}});
-        assert!(!is_malformed(&json!({"n": null}), &either));
-        assert!(is_malformed(&json!({"n": "1"}), &either));
+        let either = json!({
+            "properties": {"n": {"type": ["integer", "string"]}},
+            "required": ["n"]
+        });
+        assert!(!is_malformed(&json!({"n": "1"}), &either));
+        assert!(is_malformed(&json!({"n": true}), &either));
     }
 }
