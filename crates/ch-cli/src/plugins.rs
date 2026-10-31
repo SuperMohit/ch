@@ -42,8 +42,8 @@ pub fn builtin_plugins() -> Vec<Arc<dyn Plugin>> {
     // plugins.push(ch_stuck::plugin());
     // #[cfg(feature = "diagnostics")]
     // plugins.push(ch_diagnostics::plugin());
-    // #[cfg(feature = "planning")]
-    // plugins.push(ch_planning::plugin());
+    #[cfg(feature = "planning")]
+    plugins.push(ch_planning::plugin());
     // #[cfg(feature = "context")]
     // plugins.push(ch_context::plugin());
 
