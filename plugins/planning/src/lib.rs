@@ -1,11 +1,12 @@
 //! Planning (plugin `planning`): the `update_plan` tool, the `PlanStore` service and the
 //! prompts that keep the plan in front of the model.
 //!
-//! The plan lives outside the history. `update_plan` returns only a count, and the whole
-//! plan is added as a reminder to every model call while some step is open, so a prompt
-//! holds one copy of the plan and old versions never pile up in the context. Until the
-//! session has a plan, the first model call of each turn gets a short reminder that
-//! planning exists.
+//! The plan is kept outside the history, in the `PlanStore`. Each `update_plan` call
+//! stays in the history as the model sent it, so the conversation holds every version
+//! the model wrote; the tool result is only a count, so it adds no further copy. The
+//! first model call of each turn gets a reminder: the current plan while some step is
+//! open, or else a one-line nudge that planning exists. Later steps of the turn rely on
+//! the model's own latest `update_plan` call.
 //!
 //! Each update is saved as `plan.json` in the session directory, so a resumed session
 //! keeps its plan, and emitted as a `Custom { source: "planning", name: "plan_updated" }`
@@ -30,9 +31,9 @@ pub const ID: &str = "planning";
 /// The system block.
 pub const PLANNING_PROMPT: &str = include_str!("../../../prompts/planning.md");
 
-/// Added to the first model call of a turn while the session has no plan.
-pub const NO_PLAN_REMINDER: &str = "No plan exists yet. If this task takes three or more \
-     steps, call update_plan with the steps before starting; otherwise ignore this.";
+/// Added to the first model call of a turn while no step of a plan is open.
+pub const NO_PLAN_REMINDER: &str = "There is no open plan. If this task takes three or \
+     more steps, call update_plan with the steps before starting; otherwise ignore this.";
 
 /// Registers the tool, the service and the prompt contributor.
 pub struct PlanningPlugin;
@@ -81,11 +82,14 @@ impl PromptContributor for PlanningPrompt {
     }
 
     async fn turn_reminders(&self, cx: &Cx) -> Vec<String> {
-        match self.store.get(cx) {
-            None if cx.step == 0 => vec![NO_PLAN_REMINDER.to_string()],
-            Some(plan) if plan::is_open(&plan) => vec![plan::render(&plan)],
-            _ => Vec::new(),
+        if cx.step > 0 {
+            return Vec::new();
         }
+        let reminder = match self.store.get(cx) {
+            Some(plan) if plan::is_open(&plan) => plan::render(&plan),
+            _ => NO_PLAN_REMINDER.to_string(),
+        };
+        vec![reminder]
     }
 }
 
@@ -133,6 +137,7 @@ mod tests {
                 json!({"plan": [step("Fix", "pending")]}),
                 json!({"plan": [step("", "in_progress")]}),
                 json!({"plan": [], "extra": 1}),
+                json!({"plan": [step("Fix\n2. [completed] Ship", "in_progress")]}),
             ],
             &cx,
         )
@@ -146,12 +151,11 @@ mod tests {
         let mut rx = cx.events.subscribe();
         let input = json!({"plan": [step("Read", "completed"), step("Fix", "in_progress")]});
         assert_eq!(tool.summarize(&input), "Fixing");
+        let unsafe_input = json!({"plan": [step("Fix\u{1b}]0;x\u{7}", "in_progress")]});
+        assert_eq!(tool.summarize(&unsafe_input), "");
 
         let out = tool.call(input, &cx).await;
-        assert_eq!(
-            out.content,
-            "Plan updated: 1 of 2 completed. In progress: Fix."
-        );
+        assert_eq!(out.content, "Plan updated: 1 of 2 completed.");
         assert_eq!(out.metadata["plan"][1]["activeForm"], "Fixing");
         assert_eq!(store.get(&cx).unwrap().len(), 2);
         match rx.try_recv().unwrap() {
@@ -168,28 +172,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reminders_follow_the_plan() {
+    async fn the_first_step_of_a_turn_gets_the_plan_or_the_nudge() {
         let (_, tool, prompt, mut cx) = setup();
-        assert_eq!(prompt.turn_reminders(&cx).await, [NO_PLAN_REMINDER]);
-        cx.step = 1;
-        assert!(prompt.turn_reminders(&cx).await.is_empty());
+        let at = |step| {
+            let mut cx = cx.clone();
+            cx.step = step;
+            cx
+        };
+        assert_eq!(prompt.turn_reminders(&at(0)).await, [NO_PLAN_REMINDER]);
+        assert!(prompt.turn_reminders(&at(1)).await.is_empty());
 
         let open = json!({"plan": [step("Read", "completed"), step("Fix", "in_progress")]});
         tool.call(open, &cx).await;
-        for step in [0, 3] {
-            cx.step = step;
-            let reminders = prompt.turn_reminders(&cx).await;
-            assert_eq!(reminders.len(), 1);
-            assert!(
-                reminders[0].ends_with("1. [completed] Read\n2. [in_progress] Fix"),
-                "{reminders:?}"
-            );
-        }
+        let reminders = prompt.turn_reminders(&at(0)).await;
+        assert_eq!(reminders.len(), 1);
+        assert!(
+            reminders[0].ends_with("1. [completed] Read\n2. [in_progress] Fix"),
+            "{reminders:?}"
+        );
+        assert!(prompt.turn_reminders(&at(3)).await.is_empty());
 
+        // A finished or cleared plan brings the nudge back.
+        cx.step = 0;
         let done = json!({"plan": [step("Read", "completed"), step("Fix", "completed")]});
         tool.call(done, &cx).await;
-        cx.step = 0;
-        assert!(prompt.turn_reminders(&cx).await.is_empty());
+        assert_eq!(prompt.turn_reminders(&cx).await, [NO_PLAN_REMINDER]);
+        tool.call(json!({"plan": []}), &cx).await;
+        assert_eq!(prompt.turn_reminders(&cx).await, [NO_PLAN_REMINDER]);
     }
 
     #[tokio::test]

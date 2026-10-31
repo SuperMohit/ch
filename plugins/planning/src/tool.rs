@@ -34,21 +34,16 @@ impl Tool for UpdatePlan {
         ToolSpec {
             name: "update_plan".into(),
             description: "Replace the task plan the user sees with a new list of steps.\n\
-                 When: work that takes three or more steps, or when the user gives you \
-                 several tasks at once. Create the plan before starting, and update it \
-                 each time a step starts or finishes. Skip it for a quick single-step \
-                 task or a question.\n\
+                 When: work with three or more steps, or several tasks at once. Skip it \
+                 for a question or a quick single-step change.\n\
                  Protocol: send the complete list every time; it replaces the previous \
                  one. Each item has `content` (the step, imperative: \"Run the tests\"), \
-                 `activeForm` (the same step in progress: \"Running the tests\") and \
-                 `status`: `pending`, `in_progress` or `completed`. Exactly one item is \
-                 `in_progress` until all are `completed`. Mark a step `completed` as \
-                 soon as it is done, and only when it fully is: not while tests fail or \
-                 the change is partial. Add, remove or reword steps when you learn more. \
-                 An empty list clears the plan. The current plan is shown to you in a \
-                 reminder, so you don't need to repeat it in replies.\n\
-                 Error modes: malformed items, an empty `content` or `activeForm`, or \
-                 the wrong number of `in_progress` items are rejected and the previous \
+                 `activeForm` (the step in progress: \"Running the tests\") and `status` \
+                 (`pending`, `in_progress` or `completed`). Exactly one item is \
+                 `in_progress` until all are `completed`. Each text is one plain line of \
+                 at most 200 characters, and a plan has at most 30 items. An empty list \
+                 clears the plan.\n\
+                 Error modes: an invalid list is rejected with the reason and the previous \
                  plan stays. Fix the list and send it again.\n\
                  Side effects: none on the workspace; the plan is shown to the user."
                 .into(),
@@ -58,11 +53,12 @@ impl Tool for UpdatePlan {
                     "plan": {
                         "type": "array",
                         "description": "The whole plan, in order.",
+                        "maxItems": plan::MAX_ITEMS,
                         "items": {
                             "type": "object",
                             "properties": {
-                                "content": {"type": "string", "description": "The step, in the imperative."},
-                                "activeForm": {"type": "string", "description": "The step while it runs, e.g. \"Running the tests\"."},
+                                "content": {"type": "string", "minLength": 1, "maxLength": plan::MAX_TEXT_CHARS, "description": "The step, in the imperative."},
+                                "activeForm": {"type": "string", "minLength": 1, "maxLength": plan::MAX_TEXT_CHARS, "description": "The step while it runs, e.g. \"Running the tests\"."},
                                 "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
                             },
                             "required": ["content", "activeForm", "status"],
@@ -99,7 +95,8 @@ impl Tool for UpdatePlan {
         ToolOutput::ok(summary).with_metadata(data)
     }
 
-    /// The step in progress, or how many are done.
+    /// The step in progress, or how many are done. Empty for an invalid plan, so the
+    /// terminal never prints text that `call` would refuse.
     fn summarize(&self, input: &Value) -> String {
         let Some(Ok(plan)) = input
             .get("plan")
@@ -107,8 +104,11 @@ impl Tool for UpdatePlan {
         else {
             return String::new();
         };
+        if plan::validate(&plan).is_err() {
+            return String::new();
+        }
         match plan.iter().find(|i| i.status == Status::InProgress) {
-            Some(item) => ch_kernel::util::truncate_middle(item.active_form.trim(), 120),
+            Some(item) => item.active_form.trim().to_string(),
             None => {
                 let done = plan
                     .iter()

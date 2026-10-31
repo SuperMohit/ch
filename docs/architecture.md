@@ -266,7 +266,7 @@ These are starting values. Every one is a config setting, and the eval runner ([
 - Above `hard`, the oldest middle events are summarized by a separate tool-free call and inserted as `<context-summary>` right after the preamble. The summary is **updated incrementally**, not regenerated. Headings: `Goal / Files touched / Done / Pending / Errors & fixes / Current state / Next step`, keeping exact paths, function names and error strings.
 - No recall tool: the stub tells the model to re-read or re-run instead. Elided originals are still written to the session directory for debugging and telemetry.
 
-**Planning:** an `update_plan(plan)` tool. Each item has `content`, `status` (`pending | in_progress | completed`) and `activeForm`. The complete list is re-sent on every update and exactly one item is `in_progress`. The plan lives **outside the history** and is injected fresh as a `<system-reminder>` each turn, so old plans never pile up in context. Until a plan exists, a first-turn reminder asks for one (skip for trivial or informational tasks).
+**Planning:** an `update_plan(plan)` tool. Each item has `content`, `status` (`pending | in_progress | completed`) and `activeForm`. The complete list is re-sent on every update and exactly one item is `in_progress`. The current plan is kept outside the history (the `PlanStore` service, saved as `plan.json` next to the session) and injected as a `<system-reminder>` on the first model call of each turn; while no step is open, that reminder is a one-line nudge to plan multi-step work instead. The tool result is only a count, but each `update_plan` call stays in the history with its full list, so superseded calls are something context management (6.4) should elide first.
 
 **Tools:**
 
