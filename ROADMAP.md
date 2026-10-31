@@ -16,7 +16,7 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 | Milestone | You get | Phases | Status |
 |---|---|---|---|
 | **M1 — Usable CLI agent** | `ch` REPL with streaming, the file/bash tools, approvals, slash commands, Ctrl-C to interrupt, sessions with resume, and `ch -p` headless mode. All of it built as plugins on the kernel | 0–5 | Done except 5.2 expandable output and 5.9–5.11 |
-| **M2 — Long-session harness** | Planning, staged context management, stuck detection and post-edit diagnostics as plugins. Long sessions never overflow the context window | 6 | In progress: 6.1 done |
+| **M2 — Long-session harness** | Planning, staged context management, stuck detection and post-edit diagnostics as plugins. Long sessions never overflow the context window | 6 | In progress: 6.1–6.2 done |
 | **M3 — Open to outside plugins** | External JSON-RPC plugins, MCP tools, shell hooks, markdown commands, and a `ch plugins` command to manage them | 7 | Not started |
 | **M4 — Observable & measurable** | Langfuse telemetry, an eval runner and ablation matrices | 8–9 | Not started |
 | **M5 — Polish** | Docker executor, TUI frontend, per-model tuned profiles | 10 | Not started |
@@ -91,8 +91,8 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
 ### Phase 6 — Harness plugins → **Milestone M2**
 - [x] **6.1** `planning`: `update_plan` tool (full-list replace, exactly one `in_progress`), `PlanStore` service, system block (`prompts/planning.md`), first-turn reminder until a plan exists, fresh plan reminder every turn, never stored in history. The REPL shows a todo panel by subscribing to plan events.
-- [ ] **6.2** `stuck`: `post_tool` hook. Streaks are counted over identical tool + canonical arguments, and permission denials don't count. A one-time reminder at 5 calls (`prompts/stuck-*.md`), and `Stop(Stuck)` at 8 identical failures.
-  - Also a `pre_tool` check: the third identical call that already failed twice is refused before it runs, with the earlier error repeated so the model changes approach. Measure against the 5/8 thresholds in `ch-eval` before settling the numbers.
+- [x] **6.2** `stuck`: `post_tool` hook. Streaks are counted over identical tool + canonical arguments, and permission denials don't count. A one-time reminder at 5 calls (`prompts/stuck-*.md`), and `Stop(Stuck)` at 8 identical failures.
+  - Also a `pre_tool` check: the third identical call that already failed twice is refused before it runs, with the earlier error repeated so the model changes approach. Measure against the 5/8 thresholds in `ch-eval` before settling the numbers *(still to do, once 9.3 exists; the limits are in `[plugins.stuck]`)*.
   - Three steps in a row whose tool calls all have malformed input (unparseable JSON, schema mismatch) end the turn. Check that a malformed call stored in history is still accepted by the provider on the next request.
 - [ ] **6.3** `diagnostics`: `post_tool` hook on successful edits and writes. A per-extension command from config (`.py` → ruff, `.ts` → configurable, `.rs` → `rustfmt --check` by default) with a short timeout; findings are appended as a note.
 - [ ] **6.4** `context`: `ContextStrategy` with region split (preamble | middle | recent ≥ 0.30 × window, at least 2 turns), per [architecture §8](docs/architecture.md#8-design-defaults).

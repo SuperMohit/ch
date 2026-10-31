@@ -24,6 +24,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 - **Plugins.** Providers, tools, safety, prompts, commands and frontends are all plugins and can be turned off with `plugins.disable`. `ch --list-plugins` shows what is loaded and why, and `ch --config-path` shows where config, sessions and logs live.
 - **Cost.** `/cost` shows token usage and, with `[model.pricing]` set, the cost of the session.
 - **Planning.** An `update_plan` tool keeps a task plan for multi-step work. The REPL shows it as a checklist after each update, the model sees the current plan on every step (one copy, never stored in the conversation), and a resumed session keeps its plan. Turn it off with `plugins.disable = ["planning"]`.
+- **Stuck detection.** When the model makes the same tool call five times in a row, it is told to change course. A call that failed twice in a row with the same input is refused with the earlier error instead of being run again, and eight identical failures, or three responses in a row with only malformed tool calls, end the turn. The limits are under `[plugins.stuck]` (`0` turns one off).
 
 ### Improved
 

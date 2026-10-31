@@ -203,6 +203,7 @@ dependencies = [
  "ch-provider-openai",
  "ch-provider-scripted",
  "ch-safety",
+ "ch-stuck",
  "ch-tool-bash",
  "ch-tool-web-fetch",
  "ch-tools-fs",
@@ -497,7 +498,13 @@ dependencies = [
 name = "ch-stuck"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "ch-kernel",
+ "ch-provider-scripted",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
