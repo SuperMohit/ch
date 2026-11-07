@@ -3,7 +3,6 @@
 use std::path::{Component, Path};
 use std::sync::Arc;
 
-use ch_kernel::ReadOnlyRoots;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -20,6 +19,9 @@ pub const FILE_TOOLS: &[&str] = &[
     "glob_files",
     "grep_text",
 ];
+
+/// File tools that may also read inside the session's directory (spilled output).
+pub const SESSION_READERS: &[&str] = &["read_file", "grep_text"];
 
 /// Tools that change files in the workspace.
 pub const WRITE_TOOLS: &[&str] = &["edit_file", "write_file"];
@@ -125,20 +127,20 @@ impl Policy {
         self.decide_with(tool, input, read_only, None)
     }
 
-    /// [`Policy::decide`] where a read-only file tool may also read inside `roots`.
+    /// [`Policy::decide`] where [`SESSION_READERS`] may also read inside `session_dir`.
     pub fn decide_with(
         &self,
         tool: &str,
         input: &Value,
         read_only: bool,
-        roots: Option<&ReadOnlyRoots>,
+        session_dir: Option<&Path>,
     ) -> Decision {
         if tool == "bash" {
             let command = input.get("command").and_then(Value::as_str).unwrap_or("");
             return self.decide_bash(command);
         }
         if FILE_TOOLS.contains(&tool) {
-            return self.decide_file(tool, input, read_only, roots);
+            return self.decide_file(tool, input, read_only, session_dir);
         }
         if tool == "web_fetch" {
             return self.decide_fetch(input);
@@ -176,11 +178,11 @@ impl Policy {
         tool: &str,
         input: &Value,
         read_only: bool,
-        roots: Option<&ReadOnlyRoots>,
+        session_dir: Option<&Path>,
     ) -> Decision {
         let raw = input.get("path").and_then(Value::as_str);
         let writes = WRITE_TOOLS.contains(&tool);
-        let readable = if read_only && !writes { roots } else { None };
+        let readable = session_dir.filter(|_| read_only && SESSION_READERS.contains(&tool));
         let rel = match raw {
             Some(p) => match self.guard.resolve_readable(p, readable) {
                 Ok(abs) => self.guard.relative(&abs),
@@ -519,31 +521,29 @@ mod tests {
     }
 
     #[test]
-    fn read_only_roots_open_reads_not_writes() {
+    fn the_session_dir_opens_reads_by_the_readers_only() {
         let f = fixture();
         let p = policy(&f, "");
         let outside = tempfile::tempdir().unwrap();
-        let spill = std::fs::canonicalize(outside.path()).unwrap();
-        std::fs::write(spill.join("out.txt"), "x").unwrap();
-        let path = json!({"path": spill.join("out.txt").to_str().unwrap()});
-        let roots = ReadOnlyRoots::default();
-        roots.add(spill.clone());
+        let session = outside.path().join("s1");
+        std::fs::create_dir_all(session.join("spill")).unwrap();
+        std::fs::write(session.join("spill/out.txt"), "x").unwrap();
+        let file = json!({"path": session.join("spill/out.txt").to_str().unwrap()});
+        let dir = json!({"path": session.join("spill").to_str().unwrap()});
+        let s = Some(session.as_path());
 
         for tool in ["read_file", "grep_text"] {
-            assert_eq!(
-                p.decide_with(tool, &path, true, Some(&roots)),
-                Decision::Allow
-            );
+            assert_eq!(p.decide_with(tool, &file, true, s), Decision::Allow);
             assert!(
-                is_deny(&p.decide(tool, &path, true)),
-                "{tool} without roots"
+                is_deny(&p.decide(tool, &file, true)),
+                "{tool} without a session"
             );
         }
+        for tool in ["list_files", "glob_files"] {
+            assert!(is_deny(&p.decide_with(tool, &dir, true, s)), "{tool}");
+        }
         for tool in ["edit_file", "write_file"] {
-            assert!(
-                is_deny(&p.decide_with(tool, &path, false, Some(&roots))),
-                "{tool}"
-            );
+            assert!(is_deny(&p.decide_with(tool, &file, false, s)), "{tool}");
         }
     }
 

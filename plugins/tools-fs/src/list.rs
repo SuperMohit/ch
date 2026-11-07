@@ -88,7 +88,7 @@ impl Tool for ListFiles {
 }
 
 fn list(ctx: &FsContext, input: Input, cancel: &CancellationToken) -> ToolOutput {
-    let base = match ctx.resolve_or_root(input.path.as_deref()) {
+    let base = match ctx.resolve_or_root(input.path.as_deref(), None) {
         Ok(p) => p,
         Err(e) => return e,
     };

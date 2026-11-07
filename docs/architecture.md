@@ -244,7 +244,7 @@ These are starting values. Every one is a config setting, and the eval runner ([
 |---|---|
 | Max steps per turn | 300 |
 | Output cap per model call | 16,384 tokens |
-| Tool result truncation | 24k chars. With `spill` (on by default) the full output is saved to `<session dir>/spill/` and the model gets head, tail and the path to read the rest with `read_file`/`grep_text` ([ADR 0002](adr/0002-spill-oversized-tool-output.md)); without it the middle is cut |
+| Tool result truncation | 24k chars. With `spill` (on by default) the full output is saved to `<session dir>/spill/` and the model gets head, tail, the omitted line range and the path, to read the rest with `read_file`/`grep_text` ([ADR 0002](adr/0002-spill-oversized-tool-output.md)); without it the middle is cut |
 | Parallel read-only tool calls | up to 8 |
 | Context: soft threshold (elide) | 0.60 × usable window |
 | Context: hard threshold (summarize) | 0.85 × usable window |

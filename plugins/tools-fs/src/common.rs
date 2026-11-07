@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use ch_kernel::{ReadOnlyRoots, ToolOutput};
+use ch_kernel::ToolOutput;
 use ch_safety::{FileState, PathGuard};
 use globset::{GlobBuilder, GlobMatcher};
 use serde::de::DeserializeOwned;
@@ -33,25 +33,18 @@ impl FsContext {
     }
 
     /// Resolves an optional directory argument (missing or empty means the root).
-    pub fn resolve_or_root(&self, path: Option<&str>) -> Result<PathBuf, ToolOutput> {
-        match path.map(str::trim) {
-            None | Some("") => Ok(self.guard.root().to_path_buf()),
-            Some(p) => self.guard.resolve(p).map_err(ToolOutput::error),
-        }
-    }
-
-    /// [`FsContext::resolve_or_root`] for a path that is only read, which may also be in
-    /// one of the session's read-only directories (outside the workspace).
-    pub fn resolve_readable_or_root(
+    /// With `session_dir`, a path the tool only reads may also be inside the session's
+    /// directory (see [`PathGuard::resolve_readable`]).
+    pub fn resolve_or_root(
         &self,
         path: Option<&str>,
-        roots: Option<&ReadOnlyRoots>,
+        session_dir: Option<&Path>,
     ) -> Result<PathBuf, ToolOutput> {
         match path.map(str::trim) {
             None | Some("") => Ok(self.guard.root().to_path_buf()),
             Some(p) => self
                 .guard
-                .resolve_readable(p, roots)
+                .resolve_readable(p, session_dir)
                 .map_err(ToolOutput::error),
         }
     }

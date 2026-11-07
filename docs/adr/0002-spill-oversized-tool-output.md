@@ -6,68 +6,90 @@
 
 ## Context
 
-The kernel cuts every tool result longer than `agent.tool_result_max_chars` (24k characters) in the middle. The model sees the head and the tail, and the middle is gone. A long test log, build output or fetched page loses exactly the part the model may need, and the only way back is to run the command again. Re-running can be slow, and some commands give a different result the second time.
+The kernel cuts every tool result longer than `agent.tool_result_max_chars` (24k characters) in the middle. The model sees the head and the tail, and the middle is gone. A long test log, build output or fetched page loses exactly the part the model may need. The only way back is to run the command again, which can be slow and may give a different result.
 
-Roadmap 6.6 planned to keep the full output and add a `read_tool_result` tool. Optional tools like that are rarely called. Models reach for the tools they already use every step, and they don't learn a recall tool that exists only for this case.
+Roadmap 6.6 planned to keep the full output and add a `read_tool_result` tool. Optional tools like that are rarely called. Models reach for the tools they use every step, not for a recall tool that exists only for this case.
 
 ## Decision
 
-A result small enough is **inlined** as it is. A larger one is **spilled**: its full text is written to a file, and the model gets a head-and-tail preview with a notice naming the file. The model **fetches** what it needs with the tools it already has: `read_file` with `offset`/`limit`, or `grep_text` on that path. In bash-only mode it uses `sed -n` or `grep`. There is no new tool.
+A result small enough is **inlined** as it is. A larger one is **spilled**: its full text is written to a file, and the model gets the head and tail with a notice that names the file and the omitted lines. The model **fetches** what it needs with the tools it already has:
+
+- `read_file` from the offset the notice gives, or `grep_text` on that path;
+- in bash-only mode, `tail -n +N | head`, `grep -n` or `cut -c`.
+
+There is no new tool.
 
 ### Pieces
 
 1. **Kernel: `post_tool` may replace a result's text.**
-   - A hook that returns `Rewrite` with a string at `post_tool` replaces the result text. Before this change the kernel ignored it.
-   - The kernel now runs `post_tool` hooks on the full output and applies the `tool_result_max_chars` cut *after* them, as the fallback. That way a hook sees what the tool really returned.
-   - Hook notes are still appended after the cut.
-   - A rewrite at `post_tool` doesn't re-run the chain. That re-run exists so the permission check sees the final input of a call, which doesn't apply after the call.
-2. **Kernel: a `ReadOnlyRoots` service.** It lists directories outside the workspace that the file tools may read but never write. It starts empty. A plugin adds the directories it owns.
-3. **`safety` and `tools-fs`: read-only paths.**
-   - `read_file`, `grep_text` and the permission check for read-only file tools accept a path that resolves, after following symlinks, inside a read-only root.
+   - A hook that returns `Rewrite` with a string at `post_tool` replaces the result text.
+   - `post_tool` hooks run on the full output. The `tool_result_max_chars` cut comes *after* them, as the fallback.
+   - Hook notes are appended after the cut.
+   - A rewrite at `post_tool` doesn't re-run the chain. That re-run exists so the permission check sees a call's final input, which doesn't apply after the call. Hooks that count calls, such as `stuck`, would count the call twice.
+2. **Kernel: the session directory is readable.**
+   - `Cx::session_dir` (`<sessions>/<id>`) is where plugins keep files for the model to read back.
+   - `read_file`, `grep_text` and the permission check for those two tools accept a path inside it. No other tool does.
+   - The path is checked after following symlinks, against the directory with its *parent* canonicalized. So a symlink at the session directory, or anywhere under it, resolves outside the directory and is refused.
    - Writes keep the strict workspace check, so a spill file can't be edited.
-   - A symlink placed in a spill directory that points elsewhere resolves outside the root, so it is refused.
-4. **The `spill` plugin.** A `post_tool` hook that runs after every other hook. When a result is longer than `max_inline_chars`, the hook:
-   - saves the full text to `<session dir>/spill/<call id>-<tool>.txt`. The directory is `0700` and is added to `ReadOnlyRoots`. Each file is created with `create_new` and mode `0600`, so a file or symlink already at that path can't redirect the write.
-   - replaces the result with a head and a tail of equal size plus the notice, within the same budget.
-   - skips `read_file` results, which already page with `offset`/`limit`. Spilling them would send the model in a loop.
-   - leaves the result to the kernel's cut if saving fails, and logs a warning. A tool call that worked never turns into an error because of the spill.
+   - The readable directory belongs to the session the call runs in. After `/clear` or `/resume`, another session's files aren't readable.
+3. **The `spill` plugin.** A `post_tool` hook that runs after every other hook. When a result is longer than `max_inline_chars`, it does the following.
+   - **Where it saves.** The full text goes to `<session dir>/spill/<call id>-<tool>-<random>.txt`.
+     - The `spill` directory is created `0700`. Saving is refused if it or the session directory is a symlink.
+     - Each file is created with `create_new` and mode `0600`, so nothing already at that path can redirect the write.
+     - The save runs off the async runtime and doesn't fsync. The file is a cache of output the model has already seen in part.
+   - **What replaces the result.** The head and tail, cut at line breaks where one is near, with this notice in between: `[… lines A–B of N omitted (C characters). The full output is saved at <path>.` and how to read it, starting at `offset=A`. All of it stays within the budget.
+     - When some line is longer than `read_file` shows (2,000 characters), the notice says so and suggests `cut -c` in bash.
+   - **What it leaves alone.**
+     - Results from `read_file`, `grep_text`, `glob_files` and `list_files`, which already page or cap their own output.
+     - Calls that never ran.
+   - **When the kernel's cut applies instead.** There is no session directory, the save fails, or the session's spill files would pass `max_session_bytes`. A tool call that worked never turns into an error because of the spill.
 
-   With `--no-save` there is no session directory. The plugin then uses a private temp directory, created on first use and deleted when `ch` exits. Spilled files of a saved session stay with the session, so their paths still work after `--continue` or `/resume`.
+   Spill files stay in the session's directory, so their paths still work after `--continue` or `/resume`: the end-to-end test resumes in a second process and reads them back.
 
 ### Settings
 
 ```toml
 [plugins.spill]
-max_inline_chars = 24000   # default: agent.tool_result_max_chars
+max_inline_chars = 24000          # default and upper bound: agent.tool_result_max_chars
+max_session_bytes = 268435456     # 256 MiB of spill files per session
 ```
 
-`max_inline_chars` can only make results shorter than the kernel's own cut, never longer. A project can set it without being trusted.
-
-Turning the plugin off (`plugins.disable = ["spill"]`) brings back the plain middle cut.
+- `max_inline_chars` can only make results shorter than the kernel's cut, never longer.
+- A value below 1,000 is raised to 1,000 with a warning. If `agent.tool_result_max_chars` itself is below 1,000, spilling is off.
+- Both settings can be set by a project without being trusted. Neither can stop `ch` from starting.
+- Turning the plugin off (`plugins.disable = ["spill"]`) brings back the plain middle cut.
 
 ### The notice
 
 ```text
-<head>
+log line 00791
 
-[… 182302 of 206302 characters omitted. The full output is saved at /…/spill/toolu_01…-bash.txt.
-Read it with read_file (offset/limit) or search it with grep_text on that path.]
+[… lines 792–4208 of 5000 omitted (51243 characters). The full output is saved at /…/s1/spill/call_0_0-big-3f9a1c2e.txt.
+Read the rest with read_file with offset=792 (and a limit), or search it with grep_text on that path.]
 
-<tail>
+log line 04209
 ```
 
-The wording of the last line follows the tools that are registered.
+The last line follows the tools that are registered.
 
 ## Consequences
 
-- The model can recover any part of a long output without re-running the command, and the context budget is the same as before.
-- Spill files take disk space under the session directory, like the session log. Deleting a session deletes them.
-- The workspace check now has one exception, for reading runtime artifacts `ch` wrote itself. It is limited to directories a plugin registers, and to reading.
-- Context management (6.4) builds on this: when it trims an old result, it can point the stub at that result's spill file so the content stays fetchable.
+- The model can recover any part of a long output without re-running the command, within the same context budget.
+- Spill files live in `<sessions>/<id>/spill/`, next to the session's `<id>.jsonl`. They take up to `max_session_bytes` per session. Nothing deletes them yet, so deleting a session's `.jsonl` by hand leaves its directory behind. Session cleanup is future work.
+- The workspace check now has one exception: `read_file` and `grep_text` may read the current session's own directory.
+- If `CH_HOME` is inside the workspace, the session directory is part of the workspace. Spill files are then ordinary workspace files, and the file tools can edit them, just as they could the session log.
+- When an earlier `post_tool` hook stops the turn (for example `stuck` on its last refusal), the chain ends before `spill`, and that one result gets the kernel's cut.
+- Context management (6.4) builds on this. When it trims an old result, it can point the stub at that result's spill file, so the content stays fetchable.
 
 ## Alternatives considered
 
-- **A `read_tool_result` tool (the old 6.6).** Rejected, because a recall tool goes unused while the file tools are used all the time.
-- **Spill files inside the workspace (`.ch/spill/`).** Rejected. They would show up in `git status` and in the model's own searches, and they would need ignore rules in every project.
-- **Spilling inside each tool.** Rejected, because every tool would repeat the same code, and tools that don't spill (MCP and external tools) would still be cut. One policy after the call covers every tool.
-- **Re-running the hook chain after a `post_tool` rewrite.** Rejected. Hooks that count calls, such as `stuck`, would count the same call twice.
+- **A `read_tool_result` tool (the old 6.6).** Rejected: a recall tool goes unused, and the file tools are used all the time.
+- **Spill files inside the workspace (`.ch/spill/`).** Rejected: they would show in `git status` and in the model's own searches, and every project would need ignore rules.
+- **A registry of read-only directories that plugins add to.** Tried first, and rejected after review:
+  - Directories were added only when something was spilled, so a resumed session couldn't read its own files.
+  - The list belonged to the process, so it stayed open across `/clear`.
+  - Only one plugin could provide the list.
+
+  Deriving the readable directory from the session fixes all three.
+- **Spilling inside each tool.** Rejected: every tool would repeat the same code, and tools that don't (MCP and external tools) would still be cut. One policy after the call covers every tool.
+- **Re-running the hook chain after a `post_tool` rewrite.** Rejected, because counting hooks would count the call twice.

@@ -100,7 +100,7 @@ fn glob(ctx: &FsContext, input: Input, cancel: &CancellationToken) -> ToolOutput
         Ok(m) => m,
         Err(e) => return ToolOutput::error(e),
     };
-    let base = match ctx.resolve_or_root(input.path.as_deref()) {
+    let base = match ctx.resolve_or_root(input.path.as_deref(), None) {
         Ok(p) => p,
         Err(e) => return e,
     };

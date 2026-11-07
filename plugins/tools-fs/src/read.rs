@@ -1,7 +1,9 @@
 //! `read_file`.
 
+use std::path::Path;
+
 use ch_kernel::reexports::async_trait;
-use ch_kernel::{Cx, ReadOnlyRoots, Tool, ToolOutput, ToolSpec};
+use ch_kernel::{Cx, Tool, ToolOutput, ToolSpec};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -74,8 +76,7 @@ impl Tool for ReadFile {
             Ok(i) => i,
             Err(e) => return e,
         };
-        let roots = cx.services.get::<ReadOnlyRoots>();
-        self.read(input, roots.as_deref())
+        self.read(input, cx.session_dir.as_deref().map(|d| d.as_path()))
     }
 
     fn summarize(&self, input: &Value) -> String {
@@ -94,9 +95,9 @@ impl Tool for ReadFile {
 }
 
 impl ReadFile {
-    fn read(&self, input: Input, roots: Option<&ReadOnlyRoots>) -> ToolOutput {
+    fn read(&self, input: Input, session_dir: Option<&Path>) -> ToolOutput {
         let ctx = &self.ctx;
-        let path = match ctx.guard.resolve_readable(&input.path, roots) {
+        let path = match ctx.guard.resolve_readable(&input.path, session_dir) {
             Ok(p) => p,
             Err(e) => return ToolOutput::error(e),
         };

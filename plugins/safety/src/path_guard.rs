@@ -4,8 +4,6 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use ch_kernel::ReadOnlyRoots;
-
 /// Symlinks followed while resolving one path before giving up (loops, deep chains).
 const MAX_SYMLINKS: usize = 40;
 
@@ -43,17 +41,18 @@ impl PathGuard {
     }
 
     /// Like [`PathGuard::resolve`] for a path that is only read: it may also be inside
-    /// one of `extra`'s directories (after following symlinks). Never use it for a path
-    /// that will be written.
+    /// the session's own directory, where plugins keep files for the model to read back.
+    /// Never use it for a path that will be written.
     pub fn resolve_readable(
         &self,
         input: &str,
-        extra: Option<&ReadOnlyRoots>,
+        session_dir: Option<&Path>,
     ) -> Result<PathBuf, String> {
-        self.resolve_in(input, extra)
+        let extra = session_dir.and_then(anchored_dir);
+        self.resolve_in(input, extra.as_deref())
     }
 
-    fn resolve_in(&self, input: &str, extra: Option<&ReadOnlyRoots>) -> Result<PathBuf, String> {
+    fn resolve_in(&self, input: &str, extra: Option<&Path>) -> Result<PathBuf, String> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return Err(format!(
@@ -83,7 +82,7 @@ impl PathGuard {
             ),
             ResolveError::Io(err) => format!("Could not resolve `{trimmed}`: {err}."),
         })?;
-        if resolved.starts_with(&self.root) || extra.is_some_and(|r| r.contains(&resolved)) {
+        if resolved.starts_with(&self.root) || extra.is_some_and(|d| resolved.starts_with(d)) {
             return Ok(resolved);
         }
         let lexical = normalize_lexically(&joined);
@@ -119,6 +118,18 @@ impl PathGuard {
     pub fn contains(&self, path: &Path) -> bool {
         path.starts_with(&self.root)
     }
+}
+
+/// `dir` with its parent canonicalized but its own name kept, if it is a real directory
+/// and not a symlink. Paths are checked against this, so a symlink placed at `dir`, or
+/// anywhere below it, resolves outside it and is refused.
+fn anchored_dir(dir: &Path) -> Option<PathBuf> {
+    let meta = std::fs::symlink_metadata(dir).ok()?;
+    if !meta.is_dir() {
+        return None;
+    }
+    let parent = std::fs::canonicalize(dir.parent()?).ok()?;
+    Some(parent.join(dir.file_name()?))
 }
 
 /// `~` and `~/x` become paths under `$HOME`; everything else is unchanged.
@@ -265,44 +276,67 @@ mod tests {
     }
 
     #[test]
-    fn read_only_roots_are_readable_but_not_resolvable_for_writes() {
+    fn the_session_dir_is_readable_but_not_resolvable_for_writes() {
         let (_d, g) = guard();
         let outside = tempfile::tempdir().unwrap();
-        let spill = std::fs::canonicalize(outside.path()).unwrap().join("spill");
-        std::fs::create_dir(&spill).unwrap();
-        std::fs::write(spill.join("out.txt"), "full output").unwrap();
+        // Not canonical on macOS (`/var` is a symlink), like a real session dir may be.
+        let session = outside.path().join("s1");
+        std::fs::create_dir_all(session.join("spill")).unwrap();
+        std::fs::write(session.join("spill/out.txt"), "full output").unwrap();
         std::fs::write(outside.path().join("secret.txt"), "no").unwrap();
-        let file = spill.join("out.txt");
+        let file = session.join("spill/out.txt");
         let file = file.to_str().unwrap();
+        let canonical = std::fs::canonicalize(&session)
+            .unwrap()
+            .join("spill/out.txt");
 
-        let roots = ReadOnlyRoots::default();
-        assert!(g.resolve_readable(file, Some(&roots)).is_err());
-        roots.add(spill.clone());
-        assert_eq!(
-            g.resolve_readable(file, Some(&roots)).unwrap(),
-            spill.join("out.txt")
-        );
+        let s = Some(session.as_path());
+        assert_eq!(g.resolve_readable(file, s).unwrap(), canonical);
         assert!(g.resolve(file).is_err(), "writes still need the workspace");
         assert!(g.resolve_readable(file, None).is_err());
-
-        // A neighbour of the root, `..` out of it, or a symlink inside it pointing
-        // elsewhere stays outside.
-        let up = spill.join("../secret.txt");
         assert!(
-            g.resolve_readable(up.to_str().unwrap(), Some(&roots))
+            g.resolve_readable("src/main.rs", s).is_ok(),
+            "the workspace still works"
+        );
+
+        // `..` out of it, or a neighbouring session, stays outside.
+        let up = session.join("../secret.txt");
+        assert!(g.resolve_readable(up.to_str().unwrap(), s).is_err());
+        let other = outside.path().join("s10/spill");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("x.txt"), "other session").unwrap();
+        let other = other.join("x.txt");
+        assert!(g.resolve_readable(other.to_str().unwrap(), s).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_in_or_at_the_session_dir_lead_nowhere() {
+        use std::os::unix::fs::symlink;
+        let (_d, g) = guard();
+        let outside = tempfile::tempdir().unwrap();
+        let secrets = outside.path().join("secrets");
+        std::fs::create_dir(&secrets).unwrap();
+        std::fs::write(secrets.join("key"), "no").unwrap();
+
+        // A symlink inside the session dir.
+        let session = outside.path().join("s1");
+        std::fs::create_dir(&session).unwrap();
+        symlink(&secrets, session.join("spill")).unwrap();
+        let via = session.join("spill/key");
+        assert!(
+            g.resolve_readable(via.to_str().unwrap(), Some(&session))
                 .is_err()
         );
-        #[cfg(unix)]
-        {
-            let link = spill.join("link.txt");
-            std::os::unix::fs::symlink(outside.path().join("secret.txt"), &link).unwrap();
-            assert!(
-                g.resolve_readable(link.to_str().unwrap(), Some(&roots))
-                    .is_err()
-            );
-        }
-        // Workspace paths work as before.
-        assert!(g.resolve_readable("src/main.rs", Some(&roots)).is_ok());
+
+        // The session dir itself replaced by a symlink.
+        let swapped = outside.path().join("s2");
+        symlink(&secrets, &swapped).unwrap();
+        let via = swapped.join("key");
+        assert!(
+            g.resolve_readable(via.to_str().unwrap(), Some(&swapped))
+                .is_err()
+        );
     }
 
     #[test]

@@ -15,12 +15,13 @@ ch-kernel.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
+tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 ch-provider-scripted.workspace = true
 ch-safety.workspace = true
 ch-testkit.workspace = true
 ch-tools-fs.workspace = true
-tokio.workspace = true

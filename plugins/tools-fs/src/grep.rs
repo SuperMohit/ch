@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use ch_kernel::reexports::{CancellationToken, async_trait};
-use ch_kernel::{Cx, ReadOnlyRoots, Tool, ToolOutput, ToolSpec};
+use ch_kernel::{Cx, Tool, ToolOutput, ToolSpec};
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::sinks::Lossy;
 use grep_searcher::{BinaryDetection, SearcherBuilder};
@@ -79,8 +79,16 @@ impl Tool for GrepText {
         };
         let ctx = self.ctx.clone();
         let cancel = cx.cancel.clone();
-        let roots = cx.services.get::<ReadOnlyRoots>();
-        blocking(move || grep(&ctx, input, roots.as_deref(), &cancel)).await
+        let session_dir = cx.session_dir.clone();
+        blocking(move || {
+            grep(
+                &ctx,
+                input,
+                session_dir.as_deref().map(|d| d.as_path()),
+                &cancel,
+            )
+        })
+        .await
     }
 
     fn summarize(&self, input: &Value) -> String {
@@ -102,7 +110,7 @@ impl Tool for GrepText {
 fn grep(
     ctx: &FsContext,
     input: Input,
-    roots: Option<&ReadOnlyRoots>,
+    session_dir: Option<&Path>,
     cancel: &CancellationToken,
 ) -> ToolOutput {
     if input.query.is_empty() {
@@ -128,7 +136,7 @@ fn grep(
             Err(e) => return ToolOutput::error(e),
         },
     };
-    let base = match ctx.resolve_readable_or_root(input.path.as_deref(), roots) {
+    let base = match ctx.resolve_or_root(input.path.as_deref(), session_dir) {
         Ok(p) => p,
         Err(e) => return e,
     };

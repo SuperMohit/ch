@@ -1,6 +1,8 @@
-//! Inline and fetch through a real session: a long result is spilled, and the model
-//! reads the rest back with the file tools, through the real permission check.
+//! Inline and fetch through real sessions: a long result is spilled, and the model reads
+//! the rest back with the file tools, through the real permission check, also after the
+//! session is resumed by another process.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use ch_kernel::reexports::async_trait;
@@ -60,23 +62,8 @@ fn results(session: &Session) -> Vec<String> {
         .collect()
 }
 
-async fn run(spill: bool) -> (Session, tempfile::TempDir) {
-    let tmp = tempfile::tempdir().unwrap();
-    let ws = tmp.path().join("ws");
-    std::fs::create_dir(&ws).unwrap();
-    let sessions = tmp.path().join("sessions");
-    // The first call has id `call_0_0`, so its spill file name is known in advance.
-    let file = sessions.join("s1/spill/call_0_0-big.txt");
-    let file = file.to_str().unwrap();
-    let steps = vec![
-        ScriptStep::tool("big", json!({})),
-        ScriptStep::tool(
-            "read_file",
-            json!({"path": file, "offset": 2500, "limit": 2}),
-        ),
-        ScriptStep::tool("grep_text", json!({"query": "line 03333", "path": file})),
-        ScriptStep::text("found it"),
-    ];
+/// A session over `steps` in `ws`, saved under `sessions`, like one `ch` process.
+fn session(steps: Vec<ScriptStep>, ws: &Path, sessions: &Path, spill: bool) -> Session {
     let mut plugins: Vec<Arc<dyn Plugin>> = vec![
         Arc::new(ScriptedPlugin::from_steps(steps)),
         Arc::new(BigPlugin),
@@ -87,27 +74,41 @@ async fn run(spill: bool) -> (Session, tempfile::TempDir) {
         plugins.push(ch_spill::plugin());
     }
     let config = Arc::new(Config::parse("plugins.enable = [\"provider-scripted\"]").unwrap());
-    let registry = RegistryBuilder::build(plugins, &config, &ws).unwrap();
-    let mut session = Session::builder(Arc::new(registry), config)
-        .workspace(&ws)
-        .id("s1")
-        .store(SessionStore::new(&sessions))
+    let registry = RegistryBuilder::build(plugins, &config, ws).unwrap();
+    Session::builder(Arc::new(registry), config)
+        .workspace(ws)
+        .store(SessionStore::new(sessions))
         .build()
-        .unwrap();
-    assert_eq!(
-        session.run_turn("find line 3333").await.reason,
-        TerminationReason::Done
-    );
-    (session, tmp)
+        .unwrap()
+}
+
+/// The path and the first omitted line named in a spill notice.
+fn notice_target(preview: &str) -> (String, usize) {
+    let path = preview.split("saved at ").nth(1).unwrap();
+    let path = path.split(".\n").next().unwrap().to_string();
+    let offset = preview.split("offset=").nth(1).unwrap();
+    let offset = offset.split(|c: char| !c.is_ascii_digit()).next().unwrap();
+    (path, offset.parse().unwrap())
 }
 
 #[tokio::test]
-async fn a_spilled_result_can_be_read_back_with_the_file_tools() {
-    let (session, _tmp) = run(true).await;
-    let results = results(&session);
-    assert_eq!(results.len(), 3);
+async fn a_spilled_result_can_be_read_back_also_after_resuming() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let sessions = tmp.path().join("sessions");
 
-    let preview = &results[0];
+    // First process: the long result is spilled.
+    let steps = vec![
+        ScriptStep::tool("big", json!({})),
+        ScriptStep::text("long log"),
+    ];
+    let mut first = session(steps, &ws, &sessions, true);
+    assert_eq!(
+        first.run_turn("show the log").await.reason,
+        TerminationReason::Done
+    );
+    let preview = results(&first)[0].clone();
     assert!(
         preview.chars().count() <= 24_000,
         "{}",
@@ -115,26 +116,53 @@ async fn a_spilled_result_can_be_read_back_with_the_file_tools() {
     );
     assert!(preview.starts_with("log line 00001\n"));
     assert!(preview.ends_with("log line 05000\n"));
-    assert!(preview.contains("characters omitted. The full output is saved at"));
     assert!(
         !preview.contains("log line 02500"),
         "the middle is in the file only"
     );
+    let (path, offset) = notice_target(&preview);
+    assert!(preview.contains(&format!("log line {:05}\n\n[… lines {offset}–", offset - 1)));
+    let id = first.id().to_string();
+    first.end().await;
+    drop(first);
 
-    assert!(results[1].contains("log line 02500\n"), "{}", results[1]);
-    assert!(results[1].contains("log line 02501"), "{}", results[1]);
-    assert!(results[2].contains("log line 03333"), "{}", results[2]);
+    // Second process: resume and follow the notice, as the model would.
+    let steps = vec![
+        ScriptStep::tool(
+            "read_file",
+            json!({"path": path, "offset": offset, "limit": 2}),
+        ),
+        ScriptStep::tool("grep_text", json!({"query": "line 02500", "path": path})),
+        ScriptStep::text("found it"),
+    ];
+    let mut resumed = session(steps, &ws, &sessions, true);
+    resumed
+        .restore(SessionStore::new(&sessions).load(&id).unwrap())
+        .unwrap();
+    assert_eq!(
+        resumed.run_turn("go on").await.reason,
+        TerminationReason::Done
+    );
+    let results = results(&resumed);
+    let read = &results[1];
+    assert!(read.contains(&format!("log line {offset:05}\n")), "{read}");
+    assert!(results[2].contains("log line 02500"), "{}", results[2]);
 }
 
 #[tokio::test]
-async fn without_the_plugin_the_middle_is_cut_and_the_path_is_refused() {
-    let (session, _tmp) = run(false).await;
-    let results = results(&session);
-    assert!(!results[0].contains("saved at"));
-    assert!(!results[0].contains("log line 02500"));
-    assert!(
-        results[1].contains("outside the workspace"),
-        "{}",
-        results[1]
-    );
+async fn without_the_plugin_the_middle_is_cut_and_the_session_dir_holds_no_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let sessions = tmp.path().join("sessions");
+    let steps = vec![
+        ScriptStep::tool("big", json!({})),
+        ScriptStep::text("long log"),
+    ];
+    let mut s = session(steps, &ws, &sessions, false);
+    s.run_turn("show the log").await;
+    let preview = &results(&s)[0];
+    assert!(!preview.contains("saved at"));
+    assert!(!preview.contains("log line 02500"));
+    assert!(!sessions.join(s.id()).join("spill").exists());
 }

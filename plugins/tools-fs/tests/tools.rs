@@ -875,18 +875,18 @@ async fn grep_is_capped() {
 // ------------------------------------------------------------------ read-only roots
 
 #[tokio::test]
-async fn read_only_roots_outside_the_workspace_can_be_read_not_changed() {
+async fn the_session_dir_can_be_read_not_changed() {
     let ws = Ws::new();
     let outside = tempfile::tempdir().unwrap();
-    let spill = std::fs::canonicalize(outside.path()).unwrap();
-    std::fs::write(spill.join("out.txt"), "line one\nneedle here\nline three\n").unwrap();
-    let file = spill.join("out.txt").to_str().unwrap().to_string();
+    let session = outside.path().join("s1");
+    std::fs::create_dir_all(session.join("spill")).unwrap();
+    let out = session.join("spill/out.txt");
+    std::fs::write(&out, "line one\nneedle here\nline three\n").unwrap();
+    let file = out.to_str().unwrap().to_string();
+    let dir = session.join("spill").to_str().unwrap().to_string();
 
-    let roots = Arc::new(ch_kernel::ReadOnlyRoots::default());
-    roots.add(spill.clone());
-    let cx = TestCx::from_registry(&ws.registry, ws.root())
-        .service(roots)
-        .build();
+    let mut cx = TestCx::from_registry(&ws.registry, ws.root()).build();
+    cx.session_dir = Some(Arc::new(session.clone()));
     let call = |name: &str, input: Value| {
         let tool = ws.tool(name);
         let cx = cx.clone();
@@ -910,18 +910,15 @@ async fn read_only_roots_outside_the_workspace_can_be_read_not_changed() {
         "{}",
         edit.content
     );
-    let write = call("write_file", json!({"path": file, "content": "x"})).await;
-    assert!(write.is_error, "{}", write.content);
     assert!(
-        std::fs::read_to_string(spill.join("out.txt"))
-            .unwrap()
-            .contains("needle")
-    );
-
-    // Without the roots the same read is refused, as before.
-    assert!(
-        ws.err("read_file", json!({"path": file}))
+        call("write_file", json!({"path": file, "content": "x"}))
             .await
-            .contains("outside the workspace")
+            .is_error
     );
+    assert!(call("list_files", json!({"path": dir})).await.is_error);
+    assert!(std::fs::read_to_string(&out).unwrap().contains("needle"));
+
+    // Without a session dir the same read is refused, as before.
+    let err = ws.err("read_file", json!({"path": file})).await;
+    assert!(err.contains("outside the workspace"), "{err}");
 }
