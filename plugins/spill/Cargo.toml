@@ -1,0 +1,26 @@
+[package]
+name = "ch-spill"
+description = "Keeps oversized tool output readable in a file instead of cutting it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ch-kernel.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+ch-provider-scripted.workspace = true
+ch-safety.workspace = true
+ch-testkit.workspace = true
+ch-tools-fs.workspace = true
+tokio.workspace = true

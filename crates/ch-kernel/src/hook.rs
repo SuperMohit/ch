@@ -11,15 +11,18 @@
 //! - `Ask` is remembered and the chain continues; the result is `Ask` unless a later hook
 //!   denies or stops. Every hook's ask is kept, so an "always allow" given for one
 //!   hook's key never approves another hook's ask.
-//! - `Rewrite(input)` replaces the tool input (pre_tool) or the prompt text (user_prompt,
-//!   input must be a string) and the chain continues.
+//! - `Rewrite(input)` replaces the tool input (pre_tool), the prompt text (user_prompt,
+//!   input must be a string) or the result text (post_tool, input must be a string), and
+//!   the chain continues.
 //! - `AppendNote(text)` notes are concatenated in order.
 //!
-//! If any hook rewrites the input, the chain runs a second time on the rewritten input
-//! with rewrites ignored, and the second run's verdict and notes are the result. So a
-//! hook that ran before the rewrite (such as the permission check, which runs first)
-//! always decides on the input that is actually used. Hooks can therefore run twice for
-//! one event; keep them free of side effects that must happen only once.
+//! If a hook rewrites the input at pre_tool or user_prompt, the chain runs a second time
+//! on the rewritten input with rewrites ignored, and the second run's verdict and notes
+//! are the result. So a hook that ran before the rewrite (such as the permission check,
+//! which runs first) always decides on the input that is actually used. Hooks at those
+//! two points can therefore run twice for one event; keep them free of side effects that
+//! must happen only once. A post_tool rewrite doesn't re-run the chain: the call has
+//! already happened, and hooks that count calls would count it twice.
 //!
 //! What a result means depends on the point:
 //!
@@ -29,7 +32,7 @@
 //! | before_model | treated as Stop | – | turn ends | added as reminders to this request |
 //! | after_model | treated as Stop | – | turn ends | added as a reminder for the next call |
 //! | pre_tool | call not run; reason returned as an error | approver asked | call not run, turn ends after this step | appended to the tool result |
-//! | post_tool | – | – | turn ends after this step | appended to the tool result |
+//! | post_tool | – | – | turn ends after this step | appended to the tool result (after the `tool_result_max_chars` cut) |
 //! | turn_end (model finished) | – | – | turn ends | turn **continues**: notes are sent to the model as a user message |
 //! | session_start / session_end | – | – | – | ignored |
 
@@ -248,7 +251,8 @@ pub async fn run_hooks(
 ) -> HookOutcome {
     let (first, rewritten) = run_chain(hooks, event, cx, true).await;
     let ended = matches!(first.verdict, Verdict::Deny { .. } | Verdict::Stop { .. });
-    if ended || !rewritten {
+    let recheck = matches!(event.point(), HookPoint::PreTool | HookPoint::UserPrompt);
+    if ended || !rewritten || !recheck {
         return first;
     }
     run_chain(hooks, event, cx, false).await.0
@@ -314,6 +318,17 @@ fn apply_rewrite(event: &mut HookEvent, input: Value, hook: &str) -> bool {
             }
             other => {
                 tracing::warn!(hook, "user_prompt rewrite must be a string, got {other}");
+                false
+            }
+        },
+        HookEvent::PostTool { output, .. } => match input {
+            Value::String(s) => {
+                let changed = output.content != s;
+                output.content = s;
+                changed
+            }
+            other => {
+                tracing::warn!(hook, "post_tool rewrite must be a string, got {other}");
                 false
             }
         },

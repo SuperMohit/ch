@@ -50,7 +50,9 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use ch_kernel::reexports::async_trait;
-use ch_kernel::{Cx, Hook, HookDecision, HookEvent, HookPoint, Plugin, PluginManifest, RegisterCx};
+use ch_kernel::{
+    Cx, Hook, HookDecision, HookEvent, HookPoint, Plugin, PluginManifest, ReadOnlyRoots, RegisterCx,
+};
 
 pub use file_state::{FileState, content_hash};
 pub use path_guard::PathGuard;
@@ -117,11 +119,15 @@ impl Hook for PermissionHook {
         -100
     }
 
-    async fn on(&self, event: &HookEvent, _cx: &Cx) -> HookDecision {
+    async fn on(&self, event: &HookEvent, cx: &Cx) -> HookDecision {
         let HookEvent::PreTool { call, read_only } = event else {
             return HookDecision::Continue;
         };
-        match self.policy.decide(&call.name, &call.input, *read_only) {
+        let roots = cx.services.get::<ReadOnlyRoots>();
+        match self
+            .policy
+            .decide_with(&call.name, &call.input, *read_only, roots.as_deref())
+        {
             Decision::Allow => HookDecision::Continue,
             Decision::Ask { reason, key } => HookDecision::ask(reason, key),
             Decision::Deny { reason } => HookDecision::deny(reason),

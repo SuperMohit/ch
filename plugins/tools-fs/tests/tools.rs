@@ -871,3 +871,57 @@ async fn grep_is_capped() {
     );
     assert!(out.content.contains("Narrow your search"));
 }
+
+// ------------------------------------------------------------------ read-only roots
+
+#[tokio::test]
+async fn read_only_roots_outside_the_workspace_can_be_read_not_changed() {
+    let ws = Ws::new();
+    let outside = tempfile::tempdir().unwrap();
+    let spill = std::fs::canonicalize(outside.path()).unwrap();
+    std::fs::write(spill.join("out.txt"), "line one\nneedle here\nline three\n").unwrap();
+    let file = spill.join("out.txt").to_str().unwrap().to_string();
+
+    let roots = Arc::new(ch_kernel::ReadOnlyRoots::default());
+    roots.add(spill.clone());
+    let cx = TestCx::from_registry(&ws.registry, ws.root())
+        .service(roots)
+        .build();
+    let call = |name: &str, input: Value| {
+        let tool = ws.tool(name);
+        let cx = cx.clone();
+        async move { tool.call(input, &cx).await }
+    };
+
+    let read = call("read_file", json!({"path": file, "offset": 2, "limit": 1})).await;
+    assert!(!read.is_error, "{}", read.content);
+    assert!(read.content.contains("needle here"), "{}", read.content);
+    let grep = call("grep_text", json!({"query": "needle", "path": file})).await;
+    assert!(!grep.is_error, "{}", grep.content);
+    assert!(grep.content.contains("needle here"), "{}", grep.content);
+
+    let edit = call(
+        "edit_file",
+        json!({"path": file, "old_text": "needle", "new_text": "pin"}),
+    )
+    .await;
+    assert!(
+        edit.is_error && edit.content.contains("outside the workspace"),
+        "{}",
+        edit.content
+    );
+    let write = call("write_file", json!({"path": file, "content": "x"})).await;
+    assert!(write.is_error, "{}", write.content);
+    assert!(
+        std::fs::read_to_string(spill.join("out.txt"))
+            .unwrap()
+            .contains("needle")
+    );
+
+    // Without the roots the same read is refused, as before.
+    assert!(
+        ws.err("read_file", json!({"path": file}))
+            .await
+            .contains("outside the workspace")
+    );
+}

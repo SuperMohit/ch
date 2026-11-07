@@ -35,6 +35,7 @@ default = [
     "stuck",
     # "diagnostics",
     "planning",
+    "spill",
     # "context",
     "prompt-base",
     "project-instructions",
@@ -60,6 +61,7 @@ safety = ["dep:ch-safety"]
 stuck = ["dep:ch-stuck"]
 # diagnostics = ["dep:ch-diagnostics"]
 planning = ["dep:ch-planning"]
+spill = ["dep:ch-spill"]
 # context = ["dep:ch-context"]
 prompt-base = ["dep:ch-prompt-base"]
 project-instructions = ["dep:ch-project-instructions"]
@@ -99,6 +101,7 @@ ch-safety = { workspace = true, optional = true }
 ch-stuck = { workspace = true, optional = true }
 # ch-diagnostics = { workspace = true, optional = true }
 ch-planning = { workspace = true, optional = true }
+ch-spill = { workspace = true, optional = true }
 # ch-context = { workspace = true, optional = true }
 ch-prompt-base = { workspace = true, optional = true }
 ch-project-instructions = { workspace = true, optional = true }

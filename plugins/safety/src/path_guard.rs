@@ -4,6 +4,8 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+use ch_kernel::ReadOnlyRoots;
+
 /// Symlinks followed while resolving one path before giving up (loops, deep chains).
 const MAX_SYMLINKS: usize = 40;
 
@@ -37,6 +39,21 @@ impl PathGuard {
     /// Resolves `input` (relative to the workspace root, or absolute) to a canonical
     /// path inside the workspace. The error is written for the model.
     pub fn resolve(&self, input: &str) -> Result<PathBuf, String> {
+        self.resolve_in(input, None)
+    }
+
+    /// Like [`PathGuard::resolve`] for a path that is only read: it may also be inside
+    /// one of `extra`'s directories (after following symlinks). Never use it for a path
+    /// that will be written.
+    pub fn resolve_readable(
+        &self,
+        input: &str,
+        extra: Option<&ReadOnlyRoots>,
+    ) -> Result<PathBuf, String> {
+        self.resolve_in(input, extra)
+    }
+
+    fn resolve_in(&self, input: &str, extra: Option<&ReadOnlyRoots>) -> Result<PathBuf, String> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return Err(format!(
@@ -66,7 +83,7 @@ impl PathGuard {
             ),
             ResolveError::Io(err) => format!("Could not resolve `{trimmed}`: {err}."),
         })?;
-        if resolved.starts_with(&self.root) {
+        if resolved.starts_with(&self.root) || extra.is_some_and(|r| r.contains(&resolved)) {
             return Ok(resolved);
         }
         let lexical = normalize_lexically(&joined);
@@ -245,6 +262,47 @@ mod tests {
         std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
         let g = PathGuard::new(dir.path()).unwrap();
         (dir, g)
+    }
+
+    #[test]
+    fn read_only_roots_are_readable_but_not_resolvable_for_writes() {
+        let (_d, g) = guard();
+        let outside = tempfile::tempdir().unwrap();
+        let spill = std::fs::canonicalize(outside.path()).unwrap().join("spill");
+        std::fs::create_dir(&spill).unwrap();
+        std::fs::write(spill.join("out.txt"), "full output").unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "no").unwrap();
+        let file = spill.join("out.txt");
+        let file = file.to_str().unwrap();
+
+        let roots = ReadOnlyRoots::default();
+        assert!(g.resolve_readable(file, Some(&roots)).is_err());
+        roots.add(spill.clone());
+        assert_eq!(
+            g.resolve_readable(file, Some(&roots)).unwrap(),
+            spill.join("out.txt")
+        );
+        assert!(g.resolve(file).is_err(), "writes still need the workspace");
+        assert!(g.resolve_readable(file, None).is_err());
+
+        // A neighbour of the root, `..` out of it, or a symlink inside it pointing
+        // elsewhere stays outside.
+        let up = spill.join("../secret.txt");
+        assert!(
+            g.resolve_readable(up.to_str().unwrap(), Some(&roots))
+                .is_err()
+        );
+        #[cfg(unix)]
+        {
+            let link = spill.join("link.txt");
+            std::os::unix::fs::symlink(outside.path().join("secret.txt"), &link).unwrap();
+            assert!(
+                g.resolve_readable(link.to_str().unwrap(), Some(&roots))
+                    .is_err()
+            );
+        }
+        // Workspace paths work as before.
+        assert!(g.resolve_readable("src/main.rs", Some(&roots)).is_ok());
     }
 
     #[test]

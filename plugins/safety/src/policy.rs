@@ -3,6 +3,7 @@
 use std::path::{Component, Path};
 use std::sync::Arc;
 
+use ch_kernel::ReadOnlyRoots;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -121,12 +122,23 @@ impl Policy {
 
     /// Decides one call. `read_only` is the tool's own flag.
     pub fn decide(&self, tool: &str, input: &Value, read_only: bool) -> Decision {
+        self.decide_with(tool, input, read_only, None)
+    }
+
+    /// [`Policy::decide`] where a read-only file tool may also read inside `roots`.
+    pub fn decide_with(
+        &self,
+        tool: &str,
+        input: &Value,
+        read_only: bool,
+        roots: Option<&ReadOnlyRoots>,
+    ) -> Decision {
         if tool == "bash" {
             let command = input.get("command").and_then(Value::as_str).unwrap_or("");
             return self.decide_bash(command);
         }
         if FILE_TOOLS.contains(&tool) {
-            return self.decide_file(tool, input, read_only);
+            return self.decide_file(tool, input, read_only, roots);
         }
         if tool == "web_fetch" {
             return self.decide_fetch(input);
@@ -159,10 +171,18 @@ impl Policy {
             .any(|r| (!with_pattern_only || r.has_pattern()) && r.matches(tool, targets))
     }
 
-    fn decide_file(&self, tool: &str, input: &Value, read_only: bool) -> Decision {
+    fn decide_file(
+        &self,
+        tool: &str,
+        input: &Value,
+        read_only: bool,
+        roots: Option<&ReadOnlyRoots>,
+    ) -> Decision {
         let raw = input.get("path").and_then(Value::as_str);
+        let writes = WRITE_TOOLS.contains(&tool);
+        let readable = if read_only && !writes { roots } else { None };
         let rel = match raw {
-            Some(p) => match self.guard.resolve(p) {
+            Some(p) => match self.guard.resolve_readable(p, readable) {
                 Ok(abs) => self.guard.relative(&abs),
                 Err(msg) => return Decision::deny(msg),
             },
@@ -178,7 +198,6 @@ impl Policy {
         // Allow rules see only the resolved path: `src/**` matches the raw
         // `src/../.git/hooks/pre-commit`.
         let allow_targets = [rel.as_str()];
-        let writes = WRITE_TOOLS.contains(&tool);
         if writes && self.mode != Mode::Bypass && is_sensitive(Path::new(&rel)) {
             // Only a rule naming the path (not a bare `edit_file`) skips the question.
             if self.allowed(tool, &allow_targets, true) {
@@ -497,6 +516,35 @@ mod tests {
             &json!({"path": "../"}),
             true
         )));
+    }
+
+    #[test]
+    fn read_only_roots_open_reads_not_writes() {
+        let f = fixture();
+        let p = policy(&f, "");
+        let outside = tempfile::tempdir().unwrap();
+        let spill = std::fs::canonicalize(outside.path()).unwrap();
+        std::fs::write(spill.join("out.txt"), "x").unwrap();
+        let path = json!({"path": spill.join("out.txt").to_str().unwrap()});
+        let roots = ReadOnlyRoots::default();
+        roots.add(spill.clone());
+
+        for tool in ["read_file", "grep_text"] {
+            assert_eq!(
+                p.decide_with(tool, &path, true, Some(&roots)),
+                Decision::Allow
+            );
+            assert!(
+                is_deny(&p.decide(tool, &path, true)),
+                "{tool} without roots"
+            );
+        }
+        for tool in ["edit_file", "write_file"] {
+            assert!(
+                is_deny(&p.decide_with(tool, &path, false, Some(&roots))),
+                "{tool}"
+            );
+        }
     }
 
     #[test]
