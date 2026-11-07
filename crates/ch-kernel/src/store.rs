@@ -129,6 +129,15 @@ impl SessionStore {
         SessionLock::acquire(file, id)
     }
 
+    /// Whether `id` can name a session: ASCII letters, digits, `-` and `_`. An id becomes
+    /// a file name and the session's directory, which the file tools may read.
+    pub fn is_valid_id(id: &str) -> bool {
+        !id.is_empty()
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    }
+
     pub fn path_for(&self, id: &str) -> PathBuf {
         self.dir.join(format!("{id}.jsonl"))
     }
@@ -176,6 +185,7 @@ impl SessionStore {
     }
 
     pub fn load(&self, id: &str) -> anyhow::Result<SessionSnapshot> {
+        anyhow::ensure!(Self::is_valid_id(id), "`{id}` is not a session id");
         let path = self.path_for(id);
         let f = fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
         let mut meta = None;
@@ -199,6 +209,12 @@ impl SessionStore {
             }
         }
         let meta = meta.with_context(|| format!("{} has no meta line", path.display()))?;
+        anyhow::ensure!(
+            meta.id == id,
+            "{} belongs to session `{}`, not `{id}`",
+            path.display(),
+            meta.id
+        );
         Ok(SessionSnapshot {
             meta,
             history: History::from_events(events),
@@ -283,6 +299,18 @@ mod tests {
         assert_eq!(loaded.meta, snap.meta);
         assert_eq!(store.list().unwrap().len(), 1);
         assert_eq!(store.latest().unwrap().unwrap().id, "s1");
+
+        // Ids that aren't plain names, or a file claiming another id, don't load: the id
+        // names the session's directory, which the file tools may read.
+        for bad in ["", "..", "../s1", "a/b"] {
+            assert!(store.load(bad).is_err(), "{bad:?}");
+        }
+        let forged = std::fs::read_to_string(store.path_for("s1"))
+            .unwrap()
+            .replacen("\"id\":\"s1\"", "\"id\":\"\"", 1);
+        std::fs::write(store.path_for("s2"), forged).unwrap();
+        let err = store.load("s2").unwrap_err().to_string();
+        assert!(err.contains("belongs to session ``"), "{err}");
     }
 
     #[cfg(unix)]

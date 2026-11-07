@@ -21,11 +21,16 @@ pub enum Hint {
 pub fn preview(content: &str, path: &str, hint: Hint, max: usize) -> Option<String> {
     let total = content.chars().count();
     let lines = line_count(content);
-    let long_lines = content
-        .split('\n')
-        .any(|l| l.chars().count() > READ_FILE_LINE_CHARS);
-    // Sized with the largest numbers it can hold, so the real notice is never longer.
-    let widest = notice(lines, lines, lines, total, path, hint, long_lines);
+    let quirks = Quirks {
+        long_lines: content
+            .split('\n')
+            .any(|l| l.chars().count() > READ_FILE_LINE_CHARS),
+        nul: content.contains('\0'),
+    };
+    // Sized with the longest range text and the largest numbers it can hold, so the
+    // real notice is never longer.
+    let widest_range = format!("lines {lines}–{lines}");
+    let widest = notice(&widest_range, lines, lines, total, path, hint, quirks);
     let keep = max.checked_sub(widest.chars().count() + "\n\n".len() * 2)?;
     if keep < 100 || keep >= total {
         return None;
@@ -61,26 +66,35 @@ pub fn preview(content: &str, path: &str, hint: Hint, max: usize) -> Option<Stri
     } else {
         breaks + 1
     };
-    let notice = notice(first, last, lines, omitted, path, hint, long_lines);
-    // A blank line on each side of the notice.
-    let gap = if head.ends_with('\n') { "\n" } else { "\n\n" };
-    Some(format!("{head}{gap}{notice}\n\n{tail}"))
-}
-
-fn notice(
-    first: usize,
-    last: usize,
-    lines: usize,
-    omitted: usize,
-    path: &str,
-    hint: Hint,
-    long_lines: bool,
-) -> String {
     let range = if first == last {
         format!("line {first}")
     } else {
         format!("lines {first}–{last}")
     };
+    let notice = notice(&range, first, lines, omitted, path, hint, quirks);
+    // A blank line on each side of the notice.
+    let gap = if head.ends_with('\n') { "\n" } else { "\n\n" };
+    Some(format!("{head}{gap}{notice}\n\n{tail}"))
+}
+
+/// What the file tools can't read in the saved output.
+#[derive(Clone, Copy)]
+struct Quirks {
+    /// Some line is longer than `read_file` shows.
+    long_lines: bool,
+    /// A NUL byte, which makes `read_file` and `grep_text` treat the file as binary.
+    nul: bool,
+}
+
+fn notice(
+    range: &str,
+    first: usize,
+    lines: usize,
+    omitted: usize,
+    path: &str,
+    hint: Hint,
+    quirks: Quirks,
+) -> String {
     let how = match hint {
         Hint::FileTools { .. } => format!(
             "Read the rest with read_file with offset={first} (and a limit), or search it \
@@ -92,20 +106,31 @@ fn notice(
         ),
         Hint::None => "It is kept for the user.".to_string(),
     };
-    let long = match (long_lines, hint) {
-        (false, _) | (true, Hint::None) => String::new(),
-        (true, Hint::FileTools { bash: false }) => format!(
+    let bash = matches!(hint, Hint::Bash | Hint::FileTools { bash: true });
+    let mut extra = String::new();
+    if quirks.long_lines && hint != Hint::None {
+        extra.push_str(&format!(
             " Some lines are longer than read_file shows ({READ_FILE_LINE_CHARS} \
-             characters)."
-        ),
-        (true, _) => format!(
-            " Some lines are longer than read_file shows ({READ_FILE_LINE_CHARS} \
-             characters); read a range of characters with `cut -c A-B <path>` in bash."
-        ),
-    };
+             characters)"
+        ));
+        extra.push_str(if bash {
+            "; read part of line N with `head -n N <path> | tail -n 1 | cut -c A-B` in \
+             bash."
+        } else {
+            "."
+        });
+    }
+    if quirks.nul && hint != Hint::None {
+        extra.push_str(" It contains NUL bytes, which read_file and grep_text treat as binary");
+        extra.push_str(if bash {
+            "; in bash, `cat -v <path> | tail -n +N | head -n 200` shows them as ^@."
+        } else {
+            "."
+        });
+    }
     format!(
         "[… {range} of {lines} omitted ({omitted} characters). The full output is saved \
-         at {path}.\n{how}{long}]"
+         at {path}.\n{how}{extra}]"
     )
 }
 
@@ -178,6 +203,8 @@ mod tests {
             "é".repeat(30_000),
             "x".repeat(30_000),
             log(1) + &"y".repeat(9000),
+            "y".repeat(30_000) + "\n" + &"z".repeat(30_000),
+            "a\0b\n".repeat(20_000),
         ] {
             for max in [1000, 1500, 4000, 24_000] {
                 if let Some(text) = preview(&content, &path, FILES, max) {
@@ -197,10 +224,26 @@ mod tests {
         let content = "x".repeat(30_000);
         let text = preview(&content, "/p.txt", FILES, 2000).unwrap();
         assert!(text.contains("[… line 1 of 1 omitted ("), "{text}");
-        assert!(text.contains("`cut -c A-B <path>`"), "{text}");
+        assert!(
+            text.contains("`head -n N <path> | tail -n 1 | cut -c A-B`"),
+            "{text}"
+        );
         let no_bash = preview(&content, "/p.txt", Hint::FileTools { bash: false }, 2000).unwrap();
         assert!(no_bash.contains("longer than read_file shows (2000 characters).]"));
         assert!(!no_bash.contains("cut -c"));
+    }
+
+    #[test]
+    fn nul_bytes_are_called_out() {
+        let content = "a\0b\n".repeat(20_000);
+        let text = preview(&content, "/p.txt", FILES, 2000).unwrap();
+        assert!(text.contains("It contains NUL bytes"), "{text}");
+        assert!(text.contains("`cat -v <path>"), "{text}");
+        assert!(
+            !preview(&log(5000), "/p.txt", FILES, 2000)
+                .unwrap()
+                .contains("NUL")
+        );
     }
 
     #[test]

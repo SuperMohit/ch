@@ -168,6 +168,8 @@ impl Hook for SpillHook {
         ) {
             Some(text) => HookDecision::Rewrite { input: json!(text) },
             None => {
+                // Nothing will point at the file, so don't keep it.
+                let _ = std::fs::remove_file(&path);
                 tracing::warn!(path = %path.display(), "the spill notice doesn't fit the budget");
                 HookDecision::Continue
             }

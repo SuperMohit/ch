@@ -38,13 +38,15 @@ There is no new tool.
      - Each file is created with `create_new` and mode `0600`, so nothing already at that path can redirect the write.
      - The save runs off the async runtime and doesn't fsync. The file is a cache of output the model has already seen in part.
    - **What replaces the result.** The head and tail, cut at line breaks where one is near, with this notice in between: `[… lines A–B of N omitted (C characters). The full output is saved at <path>.` and how to read it, starting at `offset=A`. All of it stays within the budget.
-     - When some line is longer than `read_file` shows (2,000 characters), the notice says so and suggests `cut -c` in bash.
-   - **What it leaves alone.**
-     - Results from `read_file`, `grep_text`, `glob_files` and `list_files`, which already page or cap their own output.
+     - When some line is longer than `read_file` shows (2,000 characters), the notice says so and suggests `head -n N | tail -n 1 | cut -c A-B` in bash.
+     - When the output contains NUL bytes, which the file tools treat as binary, the notice says so and suggests `cat -v` in bash.
+     - If the notice doesn't fit in the budget, the file is removed and the kernel's cut applies.
+   - **What it doesn't spill.**
+     - Results from `read_file`, `grep_text`, `glob_files` and `list_files`, which page or cap their own output. `grep_text` stops adding matches at the tool output budget and, for a single file, leaves the path off each line.
      - Calls that never ran.
    - **When the kernel's cut applies instead.** There is no session directory, the save fails, or the session's spill files would pass `max_session_bytes`. A tool call that worked never turns into an error because of the spill.
 
-   Spill files stay in the session's directory, so their paths still work after `--continue` or `/resume`: the end-to-end test resumes in a second process and reads them back.
+   Spill files stay in the session's directory, so their paths still work after `--continue` or `/resume`. The end-to-end test resumes a saved session in a fresh registry and session, as `--continue` builds them, and fetches the omitted lines by following the notice.
 
 ### Settings
 
@@ -56,7 +58,7 @@ max_session_bytes = 268435456     # 256 MiB of spill files per session
 
 - `max_inline_chars` can only make results shorter than the kernel's cut, never longer.
 - A value below 1,000 is raised to 1,000 with a warning. If `agent.tool_result_max_chars` itself is below 1,000, spilling is off.
-- Both settings can be set by a project without being trusted. Neither can stop `ch` from starting.
+- Both settings can be set by a project without being trusted. A value out of range is corrected with a warning rather than stopping `ch` from starting. A value of the wrong type, such as a negative number, is a config error like any other.
 - Turning the plugin off (`plugins.disable = ["spill"]`) brings back the plain middle cut.
 
 ### The notice
@@ -79,6 +81,7 @@ The last line follows the tools that are registered.
 - The workspace check now has one exception: `read_file` and `grep_text` may read the current session's own directory.
 - If `CH_HOME` is inside the workspace, the session directory is part of the workspace. Spill files are then ordinary workspace files, and the file tools can edit them, just as they could the session log.
 - When an earlier `post_tool` hook stops the turn (for example `stuck` on its last refusal), the chain ends before `spill`, and that one result gets the kernel's cut.
+- The directory checks run by path just before the write. A process running as the same user could swap a directory for a symlink in between. The model's tools can't do that without an approved command, and a sandbox (ADR 0001) closes it fully.
 - Context management (6.4) builds on this. When it trims an old result, it can point the stub at that result's spill file, so the content stays fetchable.
 
 ## Alternatives considered

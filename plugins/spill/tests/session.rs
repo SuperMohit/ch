@@ -1,6 +1,6 @@
 //! Inline and fetch through real sessions: a long result is spilled, and the model reads
 //! the rest back with the file tools, through the real permission check, also after the
-//! session is resumed by another process.
+//! session is resumed in a fresh registry and session, as `--continue` builds them.
 
 use std::path::Path;
 use std::sync::Arc;

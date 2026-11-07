@@ -825,7 +825,34 @@ async fn grep_prints_path_line_text() {
             json!({"query": "(?i)PRINTLN", "path": "src/a.rs"}),
         )
         .await;
-    assert_eq!(out.content, "src/a.rs:2:    println!(\"hi\");");
+    // One file: no path on each line.
+    assert_eq!(out.content, "2:    println!(\"hi\");");
+}
+
+#[tokio::test]
+async fn grep_stays_under_the_output_budget() {
+    let ws = Ws::new();
+    let long = "x".repeat(290);
+    let text: String = (1..=150).map(|i| format!("hit {i} {long}\n")).collect();
+    ws.write("big.txt", &text);
+    let out = ws
+        .ok("grep_text", json!({"query": "hit", "path": "big.txt"}))
+        .await;
+    assert!(
+        out.content.chars().count() <= 24_000,
+        "{}",
+        out.content.chars().count()
+    );
+    assert!(
+        out.content.starts_with("1:hit 1 "),
+        "{}",
+        &out.content[..40]
+    );
+    assert!(
+        out.content.contains("(Showing the first "),
+        "the note says more exist"
+    );
+    assert_eq!(out.metadata["matches"], 150);
 }
 
 #[tokio::test]
