@@ -106,9 +106,9 @@ impl Session {
             });
             let done = join_all(futs).await;
 
-            for (call, mut output, not_run, pre_notes, ms) in done {
-                output.content =
-                    truncate_middle(&output.content, self.kcfg.agent.tool_result_max_chars);
+            for (call, output, not_run, pre_notes, ms) in done {
+                // Hooks see the whole output and may replace it (a spill hook keeps it
+                // readable elsewhere); the cut below is the fallback.
                 let mut ev = HookEvent::PostTool {
                     call: call.clone(),
                     output,
@@ -118,6 +118,8 @@ impl Session {
                 let HookEvent::PostTool { mut output, .. } = ev else {
                     unreachable!("hooks cannot change the event kind")
                 };
+                output.content =
+                    truncate_middle(&output.content, self.kcfg.agent.tool_result_max_chars);
                 if let Verdict::Stop { hook, reason } = &outcome.verdict
                     && stop.is_none()
                 {

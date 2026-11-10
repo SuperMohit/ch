@@ -203,6 +203,7 @@ dependencies = [
  "ch-provider-openai",
  "ch-provider-scripted",
  "ch-safety",
+ "ch-spill",
  "ch-stuck",
  "ch-tool-bash",
  "ch-tool-web-fetch",
@@ -492,6 +493,24 @@ dependencies = [
  "tokio",
  "toml",
  "url",
+]
+
+[[package]]
+name = "ch-spill"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ch-kernel",
+ "ch-provider-scripted",
+ "ch-safety",
+ "ch-testkit",
+ "ch-tools-fs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

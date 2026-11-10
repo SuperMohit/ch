@@ -117,11 +117,15 @@ impl Hook for PermissionHook {
         -100
     }
 
-    async fn on(&self, event: &HookEvent, _cx: &Cx) -> HookDecision {
+    async fn on(&self, event: &HookEvent, cx: &Cx) -> HookDecision {
         let HookEvent::PreTool { call, read_only } = event else {
             return HookDecision::Continue;
         };
-        match self.policy.decide(&call.name, &call.input, *read_only) {
+        let session_dir = cx.session_dir.as_deref().map(|d| d.as_path());
+        match self
+            .policy
+            .decide_with(&call.name, &call.input, *read_only, session_dir)
+        {
             Decision::Allow => HookDecision::Continue,
             Decision::Ask { reason, key } => HookDecision::ask(reason, key),
             Decision::Deny { reason } => HookDecision::deny(reason),

@@ -77,11 +77,7 @@ pub fn load(
         },
         Resume::Id(id) => {
             // The id becomes a file name in the sessions directory.
-            if id.is_empty()
-                || !id
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
+            if !SessionStore::is_valid_id(id) {
                 bail!("`{id}` is not a session id; `ch --resume` lists them");
             }
             if !store.path_for(id).exists() {

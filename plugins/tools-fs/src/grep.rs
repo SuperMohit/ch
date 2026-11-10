@@ -46,7 +46,8 @@ impl Tool for GrepText {
             name: "grep_text".into(),
             description: format!(
                 "Search file contents with a regular expression (ripgrep engine). Prints \
-                 `path:line:text` for each matching line.\n\
+                 `path:line:text` for each matching line (`line:text` when `path` is one \
+                 file).\n\
                  When: finding where something is defined or used, error strings, TODOs. \
                  To find files by name use glob_files.\n\
                  Protocol: `query` is a Rust regex (`(?i)` for case-insensitive; escape \
@@ -54,7 +55,8 @@ impl Tool for GrepText {
                  directory or a single file (default: the workspace root). `include` is a \
                  glob that limits which files are searched (`*.rs`, `src/**/*.ts`). \
                  Respects .gitignore, skips binary files and .git, node_modules, target and \
-                 similar directories. At most {MAX_MATCHES} matches are shown.\n\
+                 similar directories. At most {MAX_MATCHES} matches are shown, fewer when \
+                 they are long.\n\
                  Error modes: invalid regex (escape special characters), invalid include \
                  glob, path missing or outside the workspace. No match is not an error.\n\
                  Side effects: none."
@@ -79,7 +81,16 @@ impl Tool for GrepText {
         };
         let ctx = self.ctx.clone();
         let cancel = cx.cancel.clone();
-        blocking(move || grep(&ctx, input, &cancel)).await
+        let session_dir = cx.session_dir.clone();
+        blocking(move || {
+            grep(
+                &ctx,
+                input,
+                session_dir.as_deref().map(|d| d.as_path()),
+                &cancel,
+            )
+        })
+        .await
     }
 
     fn summarize(&self, input: &Value) -> String {
@@ -98,7 +109,12 @@ impl Tool for GrepText {
     }
 }
 
-fn grep(ctx: &FsContext, input: Input, cancel: &CancellationToken) -> ToolOutput {
+fn grep(
+    ctx: &FsContext,
+    input: Input,
+    session_dir: Option<&Path>,
+    cancel: &CancellationToken,
+) -> ToolOutput {
     if input.query.is_empty() {
         return ToolOutput::error("query is empty. Give a regex to search for.");
     }
@@ -122,7 +138,7 @@ fn grep(ctx: &FsContext, input: Input, cancel: &CancellationToken) -> ToolOutput
             Err(e) => return ToolOutput::error(e),
         },
     };
-    let base = match ctx.resolve_or_root(input.path.as_deref()) {
+    let base = match ctx.resolve_or_root(input.path.as_deref(), session_dir) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -141,6 +157,11 @@ fn grep(ctx: &FsContext, input: Input, cancel: &CancellationToken) -> ToolOutput
         .build();
     let mut lines: Vec<String> = Vec::new();
     let mut total = 0usize;
+    // Room for the closing note within the tool's output budget.
+    let budget = ctx.max_output_chars.saturating_sub(300);
+    let mut used = 0usize;
+    // A single file needs no path on every line (it can be long, e.g. a spilled output).
+    let single = meta.is_file();
     let mut search_file = |path: &Path, lines: &mut Vec<String>, total: &mut usize| {
         let rel = ctx.rel(path);
         // Errors on a single file (permissions, races) are skipped like ripgrep does.
@@ -149,14 +170,25 @@ fn grep(ctx: &FsContext, input: Input, cancel: &CancellationToken) -> ToolOutput
             path,
             Lossy(|lnum, line| {
                 *total += 1;
-                if lines.len() < MAX_MATCHES {
+                if lines.len() < MAX_MATCHES && used < budget {
                     let text = line.trim_end_matches(['\n', '\r']);
                     let text = if text.chars().count() > MAX_LINE_CHARS {
                         format!("{}…", text.chars().take(MAX_LINE_CHARS).collect::<String>())
                     } else {
                         text.to_string()
                     };
-                    lines.push(format!("{rel}:{lnum}:{text}"));
+                    let entry = if single {
+                        format!("{lnum}:{text}")
+                    } else {
+                        format!("{rel}:{lnum}:{text}")
+                    };
+                    let len = entry.chars().count() + 1;
+                    if used + len <= budget {
+                        used += len;
+                        lines.push(entry);
+                    } else {
+                        used = budget;
+                    }
                 }
                 // Keep counting a little past the cap so the note can say "more".
                 Ok(*total <= MAX_MATCHES * 5)

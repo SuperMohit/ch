@@ -33,10 +33,19 @@ impl FsContext {
     }
 
     /// Resolves an optional directory argument (missing or empty means the root).
-    pub fn resolve_or_root(&self, path: Option<&str>) -> Result<PathBuf, ToolOutput> {
+    /// With `session_dir`, a path the tool only reads may also be inside the session's
+    /// directory (see [`PathGuard::resolve_readable`]).
+    pub fn resolve_or_root(
+        &self,
+        path: Option<&str>,
+        session_dir: Option<&Path>,
+    ) -> Result<PathBuf, ToolOutput> {
         match path.map(str::trim) {
             None | Some("") => Ok(self.guard.root().to_path_buf()),
-            Some(p) => self.guard.resolve(p).map_err(ToolOutput::error),
+            Some(p) => self
+                .guard
+                .resolve_readable(p, session_dir)
+                .map_err(ToolOutput::error),
         }
     }
 

@@ -31,6 +31,7 @@ ch-safety = { path = "plugins/safety" }
 ch-stuck = { path = "plugins/stuck" }
 ch-diagnostics = { path = "plugins/diagnostics" }
 ch-planning = { path = "plugins/planning" }
+ch-spill = { path = "plugins/spill" }
 ch-context = { path = "plugins/context" }
 ch-prompt-base = { path = "plugins/prompt-base" }
 ch-project-instructions = { path = "plugins/project-instructions" }

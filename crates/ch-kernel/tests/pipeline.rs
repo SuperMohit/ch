@@ -492,6 +492,97 @@ async fn rewrite_changes_tool_input() {
 }
 
 #[tokio::test]
+async fn post_tool_hooks_see_the_whole_output_and_may_replace_it() {
+    let log: Log = Default::default();
+    let seen: Arc<Mutex<Vec<usize>>> = Default::default();
+    let (l1, l2, l3, s) = (log.clone(), log.clone(), log.clone(), seen.clone());
+    let hooks = plugin("hooks", move |cx| {
+        let s = s.clone();
+        cx.add_hook(ScriptedHook {
+            id: "count",
+            priority: 0,
+            points: vec![HookPoint::PostTool],
+            log: l1.clone(),
+            decide: Box::new(move |ev| {
+                if let HookEvent::PostTool { output, .. } = ev {
+                    s.lock().unwrap().push(output.content.len());
+                }
+                HookDecision::note("counted")
+            }),
+        });
+        cx.add_hook(ScriptedHook {
+            id: "replace",
+            priority: 100,
+            points: vec![HookPoint::PostTool],
+            log: l2.clone(),
+            decide: Box::new(|ev| match ev {
+                HookEvent::PostTool { call, .. } if call.id == "t1" => HookDecision::Rewrite {
+                    input: json!("short preview"),
+                },
+                _ => HookDecision::Continue,
+            }),
+        });
+        cx.add_hook(ScriptedHook {
+            id: "after",
+            priority: 200,
+            points: vec![HookPoint::PostTool],
+            log: l3.clone(),
+            decide: Box::new(|ev| match ev {
+                HookEvent::PostTool { output, .. } => {
+                    HookDecision::note(format!("saw {} chars", output.content.len()))
+                }
+                _ => HookDecision::Continue,
+            }),
+        });
+        Ok(())
+    });
+    let long = "x".repeat(500);
+    let cfg = Config::parse(
+        r#"
+        [model]
+        provider = "scripted"
+        id = "test-model"
+        [agent]
+        tool_result_max_chars = 100
+        "#,
+    )
+    .unwrap();
+    let mut h = harness(
+        vec![
+            Ok(tool_reply(&[
+                ("t1", "echo", json!({"text": long})),
+                ("t2", "echo", json!({"text": long})),
+            ])),
+            Ok(text_reply("ok")),
+        ],
+        vec![hooks],
+        cfg,
+    );
+    h.session.run_turn("go").await;
+
+    // Every hook saw the whole output, each hook ran once per call (a post_tool
+    // rewrite doesn't re-run the chain), and the later hook saw the replacement.
+    assert_eq!(*seen.lock().unwrap(), [500, 500]);
+    assert_eq!(
+        *log.lock().unwrap(),
+        [
+            "count:post_tool",
+            "replace:post_tool",
+            "after:post_tool",
+            "count:post_tool",
+            "replace:post_tool",
+            "after:post_tool"
+        ]
+    );
+    let results = tool_results(&h.session.history().events()[2].message);
+    assert_eq!(results[0].1, "short preview\n\ncounted\n\nsaw 13 chars");
+    // Without a replacement the kernel still cuts the output, then adds the notes.
+    let (cut, notes) = results[1].1.split_once("\n\ncounted").unwrap();
+    assert!(cut.chars().count() <= 100, "{cut}");
+    assert_eq!(notes, "\n\nsaw 500 chars");
+}
+
+#[tokio::test]
 async fn hooks_before_a_rewrite_judge_the_rewritten_input() {
     let log: Log = Default::default();
     let (l1, l2) = (log.clone(), log.clone());

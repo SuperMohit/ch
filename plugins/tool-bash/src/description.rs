@@ -20,8 +20,9 @@ calls; chain dependent steps with `&&`.
 - Long-running servers or watchers: start them in the background with their output \
 redirected (`cmd > /tmp/server.log 2>&1 &`), or the call waits until the timeout.
 - Output is stdout, then stderr under `[stderr]`, then a final status line such as \
-`[exit code: 0]`. Very long output is truncated in the middle, so narrow it with \
-`head`, `tail`, `grep` or quieter flags.
+`[exit code: 0]`. Very long output is cut to its head and tail (the result says \
+where the full output was saved, when it was), so narrow it with `head`, `tail`, \
+`grep` or quieter flags.
 
 Error modes:
 - Nonzero exit: returned as an error with the output. Read stderr, fix the cause, then \
@@ -70,8 +71,9 @@ tests or a syntax check) before moving on.
 - Long-running servers or watchers: start them in the background with their output \
 redirected (`cmd > /tmp/server.log 2>&1 &`), or the call waits until the timeout.
 - Output is stdout, then stderr under `[stderr]`, then a final status line such as \
-`[exit code: 0]`. Very long output is truncated in the middle, so narrow it with \
-`head`, `tail`, `grep` or quieter flags.
+`[exit code: 0]`. Very long output is cut to its head and tail (the result says \
+where the full output was saved, when it was), so narrow it with `head`, `tail`, \
+`grep` or quieter flags.
 
 Error modes:
 - Nonzero exit: returned as an error with the output. Read stderr, fix the cause, then \

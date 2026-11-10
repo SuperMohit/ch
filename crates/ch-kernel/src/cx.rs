@@ -32,6 +32,8 @@ pub struct Cx {
     /// Set while a tool call is being handled.
     pub tool_use_id: Option<String>,
     /// Directory for this session's files (elided outputs, etc.), if persistence is on.
+    /// The file tools may read inside it (never write), so a plugin can save something
+    /// there for the model to read back, such as spilled tool output.
     pub session_dir: Option<Arc<PathBuf>>,
 }
 

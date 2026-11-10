@@ -47,8 +47,9 @@ a new call if you still need it.
 - `format`: `markdown` (default) converts HTML to markdown and drops scripts, styles and \
 navigation; `text` returns only the visible text; `raw` returns the body unchanged. JSON \
 and plain-text responses are returned as-is in every format.
-- The download stops at {} bytes and long results are truncated in the middle, so fetch \
-the most specific page you can rather than a site index.
+- The download stops at {} bytes, and long results are cut to their head and tail (the \
+result says where the full text was saved, when it was), so fetch the most specific \
+page you can rather than a site index.
 - This is a plain GET without cookies or credentials. Pages that render with JavaScript \
 may come back nearly empty; look for an API, raw file or docs URL instead.
 

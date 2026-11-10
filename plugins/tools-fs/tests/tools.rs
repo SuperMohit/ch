@@ -825,7 +825,34 @@ async fn grep_prints_path_line_text() {
             json!({"query": "(?i)PRINTLN", "path": "src/a.rs"}),
         )
         .await;
-    assert_eq!(out.content, "src/a.rs:2:    println!(\"hi\");");
+    // One file: no path on each line.
+    assert_eq!(out.content, "2:    println!(\"hi\");");
+}
+
+#[tokio::test]
+async fn grep_stays_under_the_output_budget() {
+    let ws = Ws::new();
+    let long = "x".repeat(290);
+    let text: String = (1..=150).map(|i| format!("hit {i} {long}\n")).collect();
+    ws.write("big.txt", &text);
+    let out = ws
+        .ok("grep_text", json!({"query": "hit", "path": "big.txt"}))
+        .await;
+    assert!(
+        out.content.chars().count() <= 24_000,
+        "{}",
+        out.content.chars().count()
+    );
+    assert!(
+        out.content.starts_with("1:hit 1 "),
+        "{}",
+        &out.content[..40]
+    );
+    assert!(
+        out.content.contains("(Showing the first "),
+        "the note says more exist"
+    );
+    assert_eq!(out.metadata["matches"], 150);
 }
 
 #[tokio::test]
@@ -870,4 +897,55 @@ async fn grep_is_capped() {
         out.content
     );
     assert!(out.content.contains("Narrow your search"));
+}
+
+// ------------------------------------------------------------------ read-only roots
+
+#[tokio::test]
+async fn the_session_dir_can_be_read_not_changed() {
+    let ws = Ws::new();
+    let outside = tempfile::tempdir().unwrap();
+    let session = outside.path().join("s1");
+    std::fs::create_dir_all(session.join("spill")).unwrap();
+    let out = session.join("spill/out.txt");
+    std::fs::write(&out, "line one\nneedle here\nline three\n").unwrap();
+    let file = out.to_str().unwrap().to_string();
+    let dir = session.join("spill").to_str().unwrap().to_string();
+
+    let mut cx = TestCx::from_registry(&ws.registry, ws.root()).build();
+    cx.session_dir = Some(Arc::new(session.clone()));
+    let call = |name: &str, input: Value| {
+        let tool = ws.tool(name);
+        let cx = cx.clone();
+        async move { tool.call(input, &cx).await }
+    };
+
+    let read = call("read_file", json!({"path": file, "offset": 2, "limit": 1})).await;
+    assert!(!read.is_error, "{}", read.content);
+    assert!(read.content.contains("needle here"), "{}", read.content);
+    let grep = call("grep_text", json!({"query": "needle", "path": file})).await;
+    assert!(!grep.is_error, "{}", grep.content);
+    assert!(grep.content.contains("needle here"), "{}", grep.content);
+
+    let edit = call(
+        "edit_file",
+        json!({"path": file, "old_text": "needle", "new_text": "pin"}),
+    )
+    .await;
+    assert!(
+        edit.is_error && edit.content.contains("outside the workspace"),
+        "{}",
+        edit.content
+    );
+    assert!(
+        call("write_file", json!({"path": file, "content": "x"}))
+            .await
+            .is_error
+    );
+    assert!(call("list_files", json!({"path": dir})).await.is_error);
+    assert!(std::fs::read_to_string(&out).unwrap().contains("needle"));
+
+    // Without a session dir the same read is refused, as before.
+    let err = ws.err("read_file", json!({"path": file})).await;
+    assert!(err.contains("outside the workspace"), "{err}");
 }

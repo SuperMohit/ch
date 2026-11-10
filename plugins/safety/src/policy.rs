@@ -20,6 +20,9 @@ pub const FILE_TOOLS: &[&str] = &[
     "grep_text",
 ];
 
+/// File tools that may also read inside the session's directory (spilled output).
+pub const SESSION_READERS: &[&str] = &["read_file", "grep_text"];
+
 /// Tools that change files in the workspace.
 pub const WRITE_TOOLS: &[&str] = &["edit_file", "write_file"];
 
@@ -121,12 +124,23 @@ impl Policy {
 
     /// Decides one call. `read_only` is the tool's own flag.
     pub fn decide(&self, tool: &str, input: &Value, read_only: bool) -> Decision {
+        self.decide_with(tool, input, read_only, None)
+    }
+
+    /// [`Policy::decide`] where [`SESSION_READERS`] may also read inside `session_dir`.
+    pub fn decide_with(
+        &self,
+        tool: &str,
+        input: &Value,
+        read_only: bool,
+        session_dir: Option<&Path>,
+    ) -> Decision {
         if tool == "bash" {
             let command = input.get("command").and_then(Value::as_str).unwrap_or("");
             return self.decide_bash(command);
         }
         if FILE_TOOLS.contains(&tool) {
-            return self.decide_file(tool, input, read_only);
+            return self.decide_file(tool, input, read_only, session_dir);
         }
         if tool == "web_fetch" {
             return self.decide_fetch(input);
@@ -159,10 +173,18 @@ impl Policy {
             .any(|r| (!with_pattern_only || r.has_pattern()) && r.matches(tool, targets))
     }
 
-    fn decide_file(&self, tool: &str, input: &Value, read_only: bool) -> Decision {
+    fn decide_file(
+        &self,
+        tool: &str,
+        input: &Value,
+        read_only: bool,
+        session_dir: Option<&Path>,
+    ) -> Decision {
         let raw = input.get("path").and_then(Value::as_str);
+        let writes = WRITE_TOOLS.contains(&tool);
+        let readable = session_dir.filter(|_| read_only && SESSION_READERS.contains(&tool));
         let rel = match raw {
-            Some(p) => match self.guard.resolve(p) {
+            Some(p) => match self.guard.resolve_readable(p, readable) {
                 Ok(abs) => self.guard.relative(&abs),
                 Err(msg) => return Decision::deny(msg),
             },
@@ -178,7 +200,6 @@ impl Policy {
         // Allow rules see only the resolved path: `src/**` matches the raw
         // `src/../.git/hooks/pre-commit`.
         let allow_targets = [rel.as_str()];
-        let writes = WRITE_TOOLS.contains(&tool);
         if writes && self.mode != Mode::Bypass && is_sensitive(Path::new(&rel)) {
             // Only a rule naming the path (not a bare `edit_file`) skips the question.
             if self.allowed(tool, &allow_targets, true) {
@@ -497,6 +518,33 @@ mod tests {
             &json!({"path": "../"}),
             true
         )));
+    }
+
+    #[test]
+    fn the_session_dir_opens_reads_by_the_readers_only() {
+        let f = fixture();
+        let p = policy(&f, "");
+        let outside = tempfile::tempdir().unwrap();
+        let session = outside.path().join("s1");
+        std::fs::create_dir_all(session.join("spill")).unwrap();
+        std::fs::write(session.join("spill/out.txt"), "x").unwrap();
+        let file = json!({"path": session.join("spill/out.txt").to_str().unwrap()});
+        let dir = json!({"path": session.join("spill").to_str().unwrap()});
+        let s = Some(session.as_path());
+
+        for tool in ["read_file", "grep_text"] {
+            assert_eq!(p.decide_with(tool, &file, true, s), Decision::Allow);
+            assert!(
+                is_deny(&p.decide(tool, &file, true)),
+                "{tool} without a session"
+            );
+        }
+        for tool in ["list_files", "glob_files"] {
+            assert!(is_deny(&p.decide_with(tool, &dir, true, s)), "{tool}");
+        }
+        for tool in ["edit_file", "write_file"] {
+            assert!(is_deny(&p.decide_with(tool, &file, false, s)), "{tool}");
+        }
     }
 
     #[test]

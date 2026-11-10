@@ -1,5 +1,7 @@
 //! `read_file`.
 
+use std::path::Path;
+
 use ch_kernel::reexports::async_trait;
 use ch_kernel::{Cx, Tool, ToolOutput, ToolSpec};
 use serde::Deserialize;
@@ -69,12 +71,12 @@ impl Tool for ReadFile {
         }
     }
 
-    async fn call(&self, input: Value, _cx: &Cx) -> ToolOutput {
+    async fn call(&self, input: Value, cx: &Cx) -> ToolOutput {
         let input: Input = match parse_input("read_file", input, USAGE) {
             Ok(i) => i,
             Err(e) => return e,
         };
-        self.read(input)
+        self.read(input, cx.session_dir.as_deref().map(|d| d.as_path()))
     }
 
     fn summarize(&self, input: &Value) -> String {
@@ -93,9 +95,9 @@ impl Tool for ReadFile {
 }
 
 impl ReadFile {
-    fn read(&self, input: Input) -> ToolOutput {
+    fn read(&self, input: Input, session_dir: Option<&Path>) -> ToolOutput {
         let ctx = &self.ctx;
-        let path = match ctx.guard.resolve(&input.path) {
+        let path = match ctx.guard.resolve_readable(&input.path, session_dir) {
             Ok(p) => p,
             Err(e) => return ToolOutput::error(e),
         };
