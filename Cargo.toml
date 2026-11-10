@@ -94,3 +94,9 @@ wiremock = "0.6"
 
 [profile.release]
 lto = "thin"
+
+# Dependencies build without debug info: it was most of `target/` (tens of GB across
+# toolchains and test builds). Our own crates keep it, so backtraces and debuggers still
+# show their lines.
+[profile.dev.package."*"]
+debug = false
