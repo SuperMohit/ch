@@ -3,6 +3,7 @@
 use std::io::Write;
 use std::time::Instant;
 
+use ch_kernel::util::{printable, strip_ansi, terminal_text};
 use ch_kernel::{AgentEvent, Session, TerminationReason, Usage};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Receiver;
@@ -102,6 +103,7 @@ impl<O: Write, E: Write> Printer<'_, O, E> {
                     let _ = self.out.write_all(sep.as_bytes());
                 }
                 self.block_ended = false;
+                let text = terminal_text(text);
                 let _ = self.out.write_all(text.as_bytes());
                 let _ = self.out.flush();
                 self.wrote_text = true;
@@ -109,7 +111,7 @@ impl<O: Write, E: Write> Printer<'_, O, E> {
             }
             AgentEvent::AssistantMessage { .. } => self.block_ended = true,
             AgentEvent::Warning { message } => {
-                let _ = writeln!(self.err, "warning: {message}");
+                let _ = writeln!(self.err, "warning: {}", terminal_text(message));
             }
             other if self.verbose => {
                 if let Some(line) = verbose_line(other) {
@@ -119,7 +121,8 @@ impl<O: Write, E: Write> Printer<'_, O, E> {
                         let _ = self.out.flush();
                         self.at_line_start = true;
                     }
-                    let _ = writeln!(self.err, "{line}");
+                    // One line per event, so a newline in it can't forge another.
+                    let _ = writeln!(self.err, "{}", printable(&strip_ansi(&line)));
                 }
             }
             _ => {}
@@ -138,6 +141,7 @@ impl<O: Write, E: Write> Printer<'_, O, E> {
                         .as_deref()
                         .map(|d| format!(": {d}"))
                         .unwrap_or_default();
+                    let detail = terminal_text(&detail);
                     let _ = writeln!(self.err, "ch: stopped ({}){detail}", result.reason);
                 }
             }

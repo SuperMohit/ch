@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use ch_kernel::util::{printable, terminal_text};
 use ch_kernel::{Approval, ApprovalRequest};
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -92,7 +93,8 @@ async fn offer_to_save(
 ) {
     let path = project_config_path(workspace);
     term.write(&format!(
-        "  save `{rule}` to {} for future sessions? [y/N] ",
+        "  save `{}` to {} for future sessions? [y/N] ",
+        printable(rule),
         dim(PROJECT_CONFIG)
     ));
     let yes = poller.next().await.is_some_and(|k| is_yes_key(&k));
@@ -108,7 +110,10 @@ async fn offer_to_save(
             }
         }
         Ok(false) => term.line(&dim("already in the allow list")),
-        Err(e) => term.line(&yellow(&format!("could not save: {e:#}"))),
+        Err(e) => term.line(&yellow(&format!(
+            "could not save: {}",
+            terminal_text(&format!("{e:#}"))
+        ))),
     }
 }
 
@@ -136,7 +141,7 @@ async fn read_text(poller: &mut KeyPoller, term: &mut Term) -> Option<String> {
             }
             KeyCode::Backspace => {
                 if text.pop().is_some() {
-                    term.write("\u{8} \u{8}");
+                    term.backspace();
                 }
             }
             KeyCode::Char(c) => {
