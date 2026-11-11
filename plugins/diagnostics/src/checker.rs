@@ -1,35 +1,19 @@
-//! Checkers: the command for one file extension, its probe and how a run is read.
+//! Checkers: the configured command for one file extension, its probe and how a run is
+//! read.
 
-use std::path::Path;
 use std::time::Duration;
 
 use ch_kernel::{Cx, ExecRequest, ExecResult};
 
-use crate::edition::rust_edition;
-use crate::findings::{Finding, Parser};
+use crate::findings::{Finding, parse};
 
-/// The built-in `.rs` checker. Only the exit code and stderr count: valid code exits 0
-/// however it is formatted, and `mod x;` isn't followed on stdin.
-const RUSTFMT: &str = "rustfmt --edition {edition} --emit stdout >/dev/null";
-
-/// The built-in `.py` checker: syntax errors (always reported), undefined names and
-/// statements in the wrong place. `--select` replaces the project's own rule set.
-const RUFF: &str = "ruff check --no-fix --force-exclude --output-format concise \
-                    --select F63,F7,F82 --stdin-filename={path} -";
-
-/// One extension's checker.
+/// One extension's checker, from config.
 #[derive(Debug, Clone)]
 pub struct Checker {
-    /// The command; `{path}` and `{edition}` are filled in per file.
+    /// The command; `{path}` is filled in per file. It reads the content on stdin.
     template: String,
     /// The program the command starts, for the probe.
     program: String,
-    /// The built-in checkers run programs the repository can't choose: they are probed
-    /// with `--version`, turned off if they resolve inside the workspace, and only exit
-    /// 1 means findings.
-    builtin: bool,
-    env: Vec<(String, String)>,
-    parser: Parser,
     timeout: Duration,
 }
 
@@ -37,60 +21,27 @@ pub struct Checker {
 pub type Failure = String;
 
 impl Checker {
-    /// The built-in checker for `ext`, if there is one.
-    pub fn builtin(ext: &str, rust_toolchain: &str, timeout: Duration) -> Option<Self> {
-        let (template, program, env, parser) = match ext {
-            // The toolchain is pinned so a `rust-toolchain.toml` in the repository can't
-            // pick the program (its `path` may point into the repository).
-            "rs" => (
-                RUSTFMT,
-                "rustfmt",
-                vec![
-                    ("RUSTUP_TOOLCHAIN".into(), rust_toolchain.to_string()),
-                    ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
-                ],
-                Parser::Rustfmt,
-            ),
-            "py" => (RUFF, "ruff", Vec::new(), Parser::Ruff),
-            _ => return None,
-        };
-        Some(Self {
-            template: template.into(),
-            program: program.into(),
-            builtin: true,
-            env,
-            parser,
-            timeout,
-        })
-    }
-
-    /// A checker from the user's config.
-    pub fn custom(command: &str, timeout: Duration) -> Self {
+    pub fn new(command: &str, timeout: Duration) -> Self {
+        // The first word that isn't a `NAME=value` assignment.
         let program = shell_words::split(command)
-            .ok()
-            .and_then(|words| words.into_iter().next())
+            .unwrap_or_default()
+            .into_iter()
+            .find(|word| !is_assignment(word))
             .unwrap_or_default();
         Self {
             template: command.into(),
             program,
-            builtin: false,
-            env: Vec::new(),
-            parser: Parser::Generic,
             timeout,
         }
     }
 
-    /// The command for `rel`.
-    pub fn command(&self, root: &Path, rel: &str) -> String {
-        let mut command = self.template.replace("{path}", &shell_words::quote(rel));
-        if command.contains("{edition}") {
-            command = command.replace("{edition}", &rust_edition(root, rel));
-        }
-        command
+    /// The command for `rel`, with the path shell-quoted.
+    pub fn command(&self, rel: &str) -> String {
+        self.template.replace("{path}", &shell_words::quote(rel))
     }
 
-    /// Checks that the checker can run here. `Err` says why it can't, for the user.
-    pub async fn probe(&self, cx: &Cx, root: &Path) -> Result<(), Failure> {
+    /// Checks that the command's program can be found. `Err` says why not, for the user.
+    pub async fn probe(&self, cx: &Cx) -> Result<(), Failure> {
         let program = &self.program;
         if program.is_empty() {
             return Err("its command names no program".into());
@@ -102,60 +53,23 @@ impl Checker {
                 None,
             )
             .await?;
-        let location = found.stdout.trim();
-        if found.exit_code != Some(0) || location.is_empty() {
+        if found.exit_code != Some(0) || found.stdout.trim().is_empty() {
             return Err(format!("`{program}` was not found"));
-        }
-        if !self.builtin {
-            return Ok(());
-        }
-        let resolved = std::fs::canonicalize(root.join(location));
-        if resolved
-            .as_deref()
-            .unwrap_or(Path::new(location))
-            .starts_with(root)
-        {
-            return Err(format!(
-                "`{program}` resolves to `{location}`, inside the workspace, so the \
-                 repository could choose what runs"
-            ));
-        }
-        let version = self
-            .exec(
-                cx,
-                format!("{} --version", shell_words::quote(program)),
-                None,
-            )
-            .await?;
-        if version.exit_code != Some(0) {
-            let why = version.stderr.lines().next().unwrap_or("").trim();
-            return Err(format!("`{program} --version` failed: {why}"));
         }
         Ok(())
     }
 
-    /// Checks `content` as the file `rel`.
-    pub async fn run(
-        &self,
-        cx: &Cx,
-        root: &Path,
-        rel: &str,
-        content: &str,
-    ) -> Result<Vec<Finding>, Failure> {
-        let command = self.command(root, rel);
+    /// Checks `content` as the file `rel`. Exit 0 means no findings; any other exit
+    /// except 126 and 127 may carry them, and must, or the run counts as failed.
+    pub async fn run(&self, cx: &Cx, rel: &str, content: &str) -> Result<Vec<Finding>, Failure> {
+        let command = self.command(rel);
         let result = self
             .exec(cx, command.clone(), Some(content.to_string()))
             .await?;
-        let findings_code = match result.exit_code {
+        let findings = match result.exit_code {
             Some(0) => return Ok(Vec::new()),
-            Some(1) => true,
-            Some(126 | 127) | None => false,
-            Some(_) => !self.builtin,
-        };
-        let findings = if findings_code {
-            self.parser.parse(rel, &result.stdout, &result.stderr)
-        } else {
-            Vec::new()
+            Some(126 | 127) | None => Vec::new(),
+            Some(_) => parse(&result.stdout, &result.stderr),
         };
         if findings.is_empty() {
             let why = match result.exit_code {
@@ -182,7 +96,7 @@ impl Checker {
             command,
             cwd: cx.workspace().to_path_buf(),
             timeout: self.timeout,
-            env: self.env.clone(),
+            env: Vec::new(),
             stdin,
         };
         executor
@@ -192,30 +106,32 @@ impl Checker {
     }
 }
 
+/// Whether `word` sets a variable for the command after it (`NAME=value`).
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn paths_are_quoted_and_the_edition_filled_in() {
+    fn the_path_is_quoted_and_the_program_found() {
+        let checker = Checker::new(
+            "npx --no-install eslint --stdin --stdin-filename={path}",
+            Duration::from_secs(1),
+        );
+        assert_eq!(checker.program, "npx");
+        assert_eq!(
+            checker.command("a b/$(x).ts"),
+            "npx --no-install eslint --stdin --stdin-filename='a b/$(x).ts'"
+        );
         let t = Duration::from_secs(1);
-        let root = Path::new("/nonexistent");
-        let py = Checker::builtin("py", "stable", t).unwrap();
-        assert!(
-            py.command(root, "a b/-x.py")
-                .contains("--stdin-filename='a b/-x.py' -")
-        );
-        let rs = Checker::builtin("rs", "stable", t).unwrap();
-        assert_eq!(
-            rs.command(root, "src/lib.rs"),
-            "rustfmt --edition 2021 --emit stdout >/dev/null"
-        );
-        assert!(Checker::builtin("ts", "stable", t).is_none());
-        let custom = Checker::custom("npx --no-install eslint --stdin {path}", t);
-        assert_eq!(custom.program, "npx");
-        assert_eq!(
-            custom.command(root, "$(x).ts"),
-            "npx --no-install eslint --stdin '$(x).ts'"
-        );
+        assert_eq!(Checker::new("A=1 _B2=x lint --x=1 -", t).program, "lint");
+        assert_eq!(Checker::new("./bin/lint=x -", t).program, "./bin/lint=x");
+        assert_eq!(Checker::new("A=1", t).program, "");
     }
 }

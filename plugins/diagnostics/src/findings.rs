@@ -9,9 +9,9 @@ use regex::Regex;
 /// One problem a checker reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
-    /// The rule and message without line or column: what "the same problem" means.
+    /// The line without its locations: what "the same problem" means.
     pub key: String,
-    /// The line shown to the model: `path:line:col: message`.
+    /// The line as the checker printed it, shown to the model.
     pub display: String,
 }
 
@@ -34,148 +34,41 @@ pub fn introduced<'a>(before: &[Finding], after: &'a [Finding]) -> Vec<&'a Findi
         .collect()
 }
 
-/// How a checker's output is read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Parser {
-    /// rustfmt's parse errors on stderr: an `error…` line, then ` --> <stdin>:L:C`.
-    Rustfmt,
-    /// `ruff check --output-format concise`: `path:L:C: rule message` on stdout.
-    Ruff,
-    /// Any line with a location (`:L`, `:L:C` or `(L,C)`), on stdout or stderr. The key
-    /// is the line with its locations removed.
-    Generic,
-}
-
-/// `path:L:C: rest`, for ruff.
-static CONCISE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^.*?:(\d+:\d+): (.+)$").expect("valid regex"));
-
-/// The ` --> <stdin>:L:C` line under a rustfmt error.
-static ARROW: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\s*--> .*?:(\d+:\d+)\s*$").expect("valid regex"));
-
-/// A location inside a line, for the generic parser.
+/// A location inside a line: `:L`, `:L:C` or `(L,C)`.
 static LOCATION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r":\d+(?::\d+)?\b|\(\d+(?:,\s*\d+)?\)").expect("valid regex"));
 
-impl Parser {
-    /// The findings in a checker's output, shown with `rel` as the file's path.
-    pub fn parse(self, rel: &str, stdout: &str, stderr: &str) -> Vec<Finding> {
-        match self {
-            Self::Rustfmt => rustfmt(rel, stderr),
-            Self::Ruff => stdout
-                .lines()
-                .filter_map(|line| {
-                    let caps = CONCISE.captures(line.trim_end())?;
-                    let message = caps[2].trim();
-                    Some(Finding {
-                        key: message.to_string(),
-                        display: format!("{rel}:{}: {message}", &caps[1]),
-                    })
-                })
-                .collect(),
-            Self::Generic => stdout
-                .lines()
-                .chain(stderr.lines())
-                .map(str::trim)
-                .filter(|line| LOCATION.is_match(line))
-                .map(|line| Finding {
-                    key: LOCATION.replace_all(line, "").into_owned(),
-                    display: line.to_string(),
-                })
-                .collect(),
-        }
-    }
-}
-
-/// rustfmt prints each parse error as a header line followed by its location. A header
-/// with no location in the input (a config error, say) is not a finding.
-fn rustfmt(rel: &str, stderr: &str) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    let mut header: Option<&str> = None;
-    for line in stderr.lines() {
-        if line.starts_with("error") {
-            header = Some(line.trim_end());
-        } else if line.starts_with("warning") {
-            header = None;
-        } else if let (Some(h), Some(caps)) = (header, ARROW.captures(line)) {
-            findings.push(Finding {
-                key: h.to_string(),
-                display: format!("{rel}:{}: {h}", &caps[1]),
-            });
-            header = None;
-        }
-    }
-    findings
+/// The findings in a checker's output: every line on stdout or stderr that carries a
+/// location. Lines without one (summaries, banners) are skipped.
+pub fn parse(stdout: &str, stderr: &str) -> Vec<Finding> {
+    stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(str::trim)
+        .filter(|line| LOCATION.is_match(line))
+        .map(|line| Finding {
+            key: LOCATION.replace_all(line, "").into_owned(),
+            display: line.to_string(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn keys(findings: &[Finding]) -> Vec<&str> {
-        findings.iter().map(|f| f.key.as_str()).collect()
-    }
-
     #[test]
-    fn rustfmt_errors_need_a_location() {
-        let stderr = "\
-error: expected expression, found `;`
- --> <stdin>:2:21
-  |
-2 | fn main() { let x = ; }
-  |                     ^ expected expression
-
-warning: unknown configuration option `foo`
-error: this file contains an unclosed delimiter
- --> <stdin>:9:3
-error: invalid rustfmt.toml
-";
-        let found = Parser::Rustfmt.parse("src/a.rs", "", stderr);
-        assert_eq!(
-            keys(&found),
-            [
-                "error: expected expression, found `;`",
-                "error: this file contains an unclosed delimiter"
-            ]
-        );
-        assert_eq!(
-            found[0].display,
-            "src/a.rs:2:21: error: expected expression, found `;`"
-        );
-    }
-
-    #[test]
-    fn ruff_concise_lines() {
-        let stdout = "\
-a.py:4:5: invalid-syntax: Expected an expression
-sub/b.py:2:12: F821 Undefined name `reponse`
-Found 2 errors.
-";
-        let found = Parser::Ruff.parse("app/b.py", stdout, "");
-        assert_eq!(
-            keys(&found),
-            [
-                "invalid-syntax: Expected an expression",
-                "F821 Undefined name `reponse`"
-            ]
-        );
-        assert_eq!(
-            found[1].display,
-            "app/b.py:2:12: F821 Undefined name `reponse`"
-        );
-    }
-
-    #[test]
-    fn generic_lines_drop_their_locations_from_the_key() {
+    fn lines_with_a_location_are_findings_keyed_without_it() {
         let stdout = "src/a.ts(3,5): error TS2304: Cannot find name 'x'.\n2 problems\n";
-        let stderr = "src/a.ts:7:1: no-undef 'y' is not defined\n";
-        let found = Parser::Generic.parse("src/a.ts", stdout, stderr);
+        let stderr = "src/a.ts:7:1: no-undef 'y' is not defined\nlib.c:12: warning: unused\n";
+        let found = parse(stdout, stderr);
+        let keys: Vec<_> = found.iter().map(|f| f.key.as_str()).collect();
         assert_eq!(
-            keys(&found),
+            keys,
             [
                 "src/a.ts: error TS2304: Cannot find name 'x'.",
-                "src/a.ts: no-undef 'y' is not defined"
+                "src/a.ts: no-undef 'y' is not defined",
+                "lib.c: warning: unused",
             ]
         );
         assert_eq!(

@@ -10,10 +10,11 @@
 //! - `turn_end`, when the model says it is done: if problems the turn introduced are
 //!   still there, one note lists them and the turn continues. At most once per turn.
 //!
-//! Checkers read the file on stdin. The built-in ones look for parse errors (`.rs`,
-//! with `rustfmt`) and for syntax errors and undefined names (`.py`, with `ruff`), and
-//! run only programs the repository can't choose. Nothing runs while the model has no
-//! `bash`: an agent without bash runs no programs.
+//! The plugin knows no language. Checkers come from config, one command per file
+//! extension, and read the file on stdin; with none configured it does nothing. Any
+//! output line with a location (`path:L:C: message`, `path(L,C): message`) is a
+//! finding. Nothing runs while the model has no `bash`: an agent without bash runs no
+//! programs.
 //!
 //! ```toml
 //! [plugins.diagnostics]
@@ -21,17 +22,16 @@
 //! max_report_chars = 2000
 //! max_files_per_step = 10
 //! nudge_at_turn_end = true
-//! rust_toolchain = "stable"
 //!
 //! [plugins.diagnostics.checkers.ts]   # by extension; `enabled = false` turns one off
 //! command = "npx --no-install eslint --format unix --stdin --stdin-filename={path}"
 //! ```
 //!
-//! A checker that can't be found, fails its probe, or fails three runs in a row is off
-//! for the session, with a warning to the user and nothing to the model.
+//! `{path}` is the file's shell-quoted path relative to the workspace. A checker whose
+//! program can't be found, or that fails three runs in a row, is off for the session,
+//! with a warning to the user and nothing to the model.
 
 mod checker;
-mod edition;
 mod findings;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -50,8 +50,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub use checker::Checker;
-pub use edition::rust_edition;
-pub use findings::{Finding, Parser, introduced};
+pub use findings::{Finding, introduced, parse};
 
 /// Plugin id, also the hook id and the `source` of its events.
 pub const ID: &str = "diagnostics";
@@ -85,8 +84,6 @@ pub struct DiagnosticsConfig {
     pub max_files_per_step: usize,
     /// Whether the end of a turn lists the problems it introduced that are still there.
     pub nudge_at_turn_end: bool,
-    /// `RUSTUP_TOOLCHAIN` for the `.rs` checker.
-    pub rust_toolchain: String,
     /// By extension (lowercase, no dot).
     pub checkers: BTreeMap<String, CheckerConfig>,
 }
@@ -98,7 +95,6 @@ impl Default for DiagnosticsConfig {
             max_report_chars: 2000,
             max_files_per_step: 10,
             nudge_at_turn_end: true,
-            rust_toolchain: "stable".into(),
             checkers: BTreeMap::new(),
         }
     }
@@ -108,9 +104,10 @@ impl Default for DiagnosticsConfig {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CheckerConfig {
+    /// `false` turns off a checker another config layer added.
     pub enabled: bool,
-    /// Replaces the built-in command. `{path}` is the shell-quoted path relative to the
-    /// workspace; `{edition}` is the file's Rust edition.
+    /// Reads the file on stdin. `{path}` is the shell-quoted path relative to the
+    /// workspace.
     pub command: Option<String>,
     /// Whether the command reads the file on stdin, the only kind supported for now: a
     /// checker that reads the file on disk can't see the content from before the edit.
@@ -128,7 +125,7 @@ impl Default for CheckerConfig {
 }
 
 impl DiagnosticsConfig {
-    /// The checker for each extension: the built-in ones, changed by config.
+    /// The configured checker for each extension.
     pub fn checkers(&self) -> anyhow::Result<BTreeMap<String, Checker>> {
         if self.timeout_secs == 0 {
             bail!("plugins.diagnostics.timeout_secs must be at least 1");
@@ -136,24 +133,12 @@ impl DiagnosticsConfig {
         if self.max_files_per_step == 0 {
             bail!("plugins.diagnostics.max_files_per_step must be at least 1");
         }
-        if self.rust_toolchain.trim().is_empty() {
-            bail!("plugins.diagnostics.rust_toolchain is empty");
-        }
         let timeout = Duration::from_secs(self.timeout_secs);
-        let mut checkers: BTreeMap<String, Checker> = ["rs", "py"]
-            .into_iter()
-            .filter_map(|ext| {
-                Some((
-                    ext.to_string(),
-                    Checker::builtin(ext, &self.rust_toolchain, timeout)?,
-                ))
-            })
-            .collect();
+        let mut checkers = BTreeMap::new();
         for (ext, c) in &self.checkers {
             let ext = ext.trim_start_matches('.').to_ascii_lowercase();
             let field = format!("plugins.diagnostics.checkers.{ext}");
             if !c.enabled {
-                checkers.remove(&ext);
                 continue;
             }
             if !c.stdin {
@@ -165,9 +150,8 @@ impl DiagnosticsConfig {
             match c.command.as_deref().map(str::trim) {
                 Some("") => bail!("{field}.command is empty; use `enabled = false` to turn it off"),
                 Some(command) => {
-                    checkers.insert(ext, Checker::custom(command, timeout));
+                    checkers.insert(ext, Checker::new(command, timeout));
                 }
-                None if checkers.contains_key(&ext) => {}
                 None => bail!("{field} needs a `command`"),
             }
         }
@@ -187,7 +171,7 @@ impl Plugin for DiagnosticsPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest::new(
             ID,
-            "Tells the model about problems its edits introduced, such as parse errors",
+            "Runs configured checkers on edited files and tells the model what its edits broke",
         )
         .version(env!("CARGO_PKG_VERSION"))
         .requires(&["safety"])
@@ -314,7 +298,7 @@ impl DiagnosticsHook {
                 return true;
             }
         }
-        match self.checkers[ext].probe(cx, self.guard.root()).await {
+        match self.checkers[ext].probe(cx).await {
             Ok(()) => {
                 self.state().probed.insert(ext.to_string());
                 true
@@ -335,14 +319,11 @@ impl DiagnosticsHook {
         cx: &Cx,
     ) -> Option<Arc<Vec<Finding>>> {
         let checker = &self.checkers[ext];
-        let key = (
-            checker.command(self.guard.root(), rel),
-            content_hash(content.as_bytes()),
-        );
+        let key = (checker.command(rel), content_hash(content.as_bytes()));
         if let Some(found) = self.state().cache.get(&key) {
             return Some(found.clone());
         }
-        match checker.run(cx, self.guard.root(), rel, content).await {
+        match checker.run(cx, rel, content).await {
             Ok(found) => {
                 let found = Arc::new(found);
                 let mut state = self.state();
@@ -582,23 +563,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_adds_replaces_and_removes_checkers() {
+    fn there_are_no_checkers_until_config_adds_them() {
+        assert!(DiagnosticsConfig::default().checkers().unwrap().is_empty());
         let config: DiagnosticsConfig = toml::from_str(
             r#"
             [checkers.".TS"]
             command = "eslint --stdin {path}"
-            [checkers.py]
+            [checkers.md]
             enabled = false
-            [checkers.rs]
-            command = "my-rust-check"
+            command = "mdlint -"
             "#,
         )
         .unwrap();
         let checkers = config.checkers().unwrap();
-        assert_eq!(checkers.keys().collect::<Vec<_>>(), ["rs", "ts"]);
-        let root = Path::new("/nonexistent");
-        assert_eq!(checkers["rs"].command(root, "a.rs"), "my-rust-check");
-        assert_eq!(checkers["ts"].command(root, "a.ts"), "eslint --stdin a.ts");
+        assert_eq!(checkers.keys().collect::<Vec<_>>(), ["ts"]);
+        assert_eq!(checkers["ts"].command("a.ts"), "eslint --stdin a.ts");
     }
 
     #[test]
@@ -612,7 +591,6 @@ mod tests {
             ),
             ("timeout_secs = 0", "timeout_secs"),
             ("max_files_per_step = 0", "max_files_per_step"),
-            ("rust_toolchain = \"\"", "rust_toolchain"),
         ] {
             let config: DiagnosticsConfig = toml::from_str(toml_cfg).unwrap();
             let err = config.checkers().unwrap_err().to_string();
@@ -623,14 +601,14 @@ mod tests {
     #[test]
     fn the_report_is_cut_at_whole_lines() {
         let lines: Vec<String> = (1..=50)
-            .map(|i| format!("a.py:{i}:1: F821 Undefined name `x{i}`"))
+            .map(|i| format!("a.txt:{i}:1: undefined name `x{i}`"))
             .collect();
         let text = report(INTRODUCED, &lines, 200);
         assert!(
-            text.starts_with("Your last edits introduced these problems:\na.py:1:1:"),
+            text.starts_with("Your last edits introduced these problems:\na.txt:1:1:"),
             "{text}"
         );
-        assert!(text.contains("… and 45 more."), "{text}");
+        assert!(text.contains("… and 44 more."), "{text}");
         assert!(text.ends_with("already does."), "{text}");
         assert!(text.len() < 400, "{}", text.len());
     }

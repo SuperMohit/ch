@@ -18,7 +18,6 @@ regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shell-words.workspace = true
-toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
@@ -29,3 +28,4 @@ ch-testkit.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+toml.workspace = true

@@ -14,11 +14,13 @@ Roadmap 6.3 planned a `post_tool` hook that runs a checker after every edit and 
 - **A missing checker looks like a finding.** A rustup proxy without the `rustfmt` component exits 1, the same code as a real problem.
 - **The repo chooses what runs.** `rust-toolchain.toml` can set `path` to a directory in the repo. rustup then runs that directory's `bin/rustfmt`, automatically and without the model or the user asking for a command.
 
+A first version of this design fixed those problems by keeping built-in checkers (rustfmt for `.rs`, ruff for `.py`) and pinning them so the repository couldn't choose the program. That put Rust and Python knowledge into the harness: two output parsers, a `Cargo.toml` edition lookup, rustup environment variables. It was removed before release. `ch` is a generic harness: it provides the mechanism, and language tooling comes from configuration or from the model running it through bash.
+
 The published evidence points the same way: catching broken edits helps a little, checking every step costs more than it gains, and detailed error feedback matters mostly for weaker models. See [Evidence](#evidence) below.
 
 ## Decision
 
-The `diagnostics` plugin checks each file the agent changed **once, just before the next model call**. It reports only the findings that are **new** compared with the file before the edit, as a **reminder** on that one request. Defaults look for **parse errors and undefined names**, never style, and run only programs the repository cannot replace.
+The `diagnostics` plugin checks each file the agent changed **once, just before the next model call**. It reports only the findings that are **new** compared with the file before the edit, as a **reminder** on that one request. The plugin knows **no language**: each checker is a command from config, and with none configured the plugin does nothing.
 
 ### When a check runs
 
@@ -44,9 +46,9 @@ A finding's key is the rule plus the message, with line and column numbers remov
 
   ```text
   Your last edits introduced these problems:
-  src/lib.rs:2:21: expected expression, found `;`
+  src/lib.rs:2:21: error: expected expression, found `;`
   app/main.py:14:5: F821 Undefined name `reponse`
-  Fix them before moving on.
+  Fix them, unless a change you are about to make already does.
   ```
 
 - **Size.** Capped at `max_report_chars` (default 2,000).
@@ -58,45 +60,9 @@ A finding's key is the rule plus the message, with line and column numbers remov
 - It is a narrow form of "check before finishing": only for findings the turn's own edits introduced, with no nudge to run tests.
 - `nudge_at_turn_end = false` turns it off.
 
-### Default checkers
+### Checkers come from config
 
-Both take the content on **stdin**, so before and after can be checked without touching the file, and neither puts a path on the command line where it could be read as an option.
-
-| Extension | Command | Finds |
-|---|---|---|
-| `.rs` | `rustfmt --edition {edition} --emit stdout` with `RUSTUP_TOOLCHAIN={rust_toolchain}` | parse errors only (valid code exits 0 however it's formatted; `mod x;` isn't followed) |
-| `.py` | `ruff check --no-fix --force-exclude --output-format concise --select F63,F7,F82 --stdin-filename={path} -` | syntax errors, which ruff always reports, plus undefined names and invalid statements |
-
-- **`{edition}`** comes from the nearest `Cargo.toml`, parsed with `toml`. `edition.workspace = true` is followed to the workspace's `[workspace.package]`. The default is `2021`.
-- **`{path}`** is shell-quoted and joined to its flag with `=`.
-- **`rust_toolchain`** defaults to `stable`.
-- **Formatter output is never used.** rustfmt's stdout is discarded: only its exit code and stderr count.
-- **Exit codes.** A finding needs exit 1 and at least one line that parses. Anything else is a checker failure, logged and not reported: exit 2 (ruff's "couldn't run"), 126, 127, a timeout, or exit 1 with output that doesn't parse.
-- **Probing.** Each checker is probed once per session on first use: `command -v` finds the program, and the built-in ones also run `--version` under the same environment (with `RUSTUP_AUTO_INSTALL=0`, so a missing toolchain is never downloaded). A failed probe turns it off for the session, with one warning to the user and nothing to the model. Three failed runs in a row do the same.
-- **User-configured checkers** use a generic reader: any line with a location (`:L`, `:L:C` or `(L,C)`) on stdout or stderr is a finding, keyed on the line with its locations removed. Any non-zero exit other than 126 and 127 can mean findings.
-- **Events.** Each report emits `Custom { source: "diagnostics", name: "introduced" }` (or `"turn_end"`) with the number of findings, for telemetry and the Phase 9 comparison.
-
-### Who decides that a checker may run
-
-The defaults run without anyone approving a command. The checks below make sure that adds nothing a hostile repository could use.
-
-1. **Diagnostics run only while `bash` is available to the model.** That means the `bash` tool is registered and the safety policy doesn't deny it outright (`deny = ["bash"]`). For that, `safety` provides its `Policy` as a service. With bash off, the user has chosen an agent that runs no programs, and diagnostics would quietly break that.
-2. **Defaults are pinned so the repo can't choose the program:**
-   - `RUSTUP_TOOLCHAIN` overrides `rust-toolchain.toml`, which closes the `path` hole. Tested: with a toolchain file whose `path` is bogus, plain `rustfmt` fails trying to run from it, and `RUSTUP_TOOLCHAIN=stable rustfmt` runs normally.
-   - Neither ruff's nor rustfmt's config can load code.
-   - The probe resolves each program with `command -v`. If it resolves inside the workspace (a `PATH` that includes `.venv/bin` or `node_modules/.bin`), the checker is turned off for the session with a warning.
-3. **Other commands are opt-in.** Checkers that run project code (`cargo check`, `tsc`, `mypy` with plugins) are never defaults. A checker added in the user's own config is the user's choice. A project's `.ch/config.toml` can add or change checkers only once the project is trusted, as it can already for any setting that runs a command.
-
-**Bash in `ask` mode.** Under the default `ask` mode, most bash commands need the user's approval. So the first check alone would not stop a hostile repo: an automatic checker could run its code with no approval. The second check is what does. The defaults run the user's own `rustfmt` and `ruff`, never a program the repo picked.
-
-**Alternative: gate on the permission policy.** Run a checker only if the same command, sent as a bash call, would run without asking.
-- It is stricter.
-- But it turns diagnostics off for most users until they add an allow rule.
-- It also misses "always allow" answers given during the session, which the approver holds and the policy doesn't.
-
-Rejected for now. It can come back if user-configured checkers need it.
-
-### Settings
+There are **no built-in checkers**. A checker is a command for one file extension, set in the user's config or a trusted project's:
 
 ```toml
 [plugins.diagnostics]
@@ -104,16 +70,57 @@ timeout_secs = 10
 max_report_chars = 2000
 max_files_per_step = 10
 nudge_at_turn_end = true
-rust_toolchain = "stable"
 
-[plugins.diagnostics.checkers.ts]      # by extension; `enabled = false` turns a default off
+[plugins.diagnostics.checkers.ts]      # by extension; `enabled = false` turns off one another layer added
 command = "npx --no-install eslint --format unix --stdin --stdin-filename={path}"
-stdin = true                           # the only value version 1 accepts; see "Limits"
+stdin = true                           # the only value accepted for now; see "Limits"
 ```
 
-- **Optional.** The plugin is its own cargo feature. Like `stuck`, `planning` and `spill`, it is enabled by default, and `plugins.disable = ["diagnostics"]` turns it off.
-- **Settable by a project without trust:** `timeout_secs`, `max_report_chars` and `max_files_per_step`.
-- **Need trust:** `checkers`, `rust_toolchain` and `nudge_at_turn_end`.
+- **Input.** The command reads the file's content on **stdin**, so **before** and **after** can be checked without touching the file. `{path}` is the file's path relative to the workspace, shell-quoted; join it to its flag with `=` so a path starting with `-` can't become an option.
+- **Output.** Any line on stdout or stderr with a location (`path:L`, `path:L:C`, `path(L,C)`) is a finding. Its key is the line with the locations removed. Lines without a location, such as summaries, are ignored.
+- **Exit codes.** Exit 0 means no findings. Any other exit except 126 and 127 may carry findings, and must: a non-zero exit with no line to read is a checker failure. So are 126, 127, a timeout and a failure to start. Failures are logged and never reported to the model.
+- **Probing.** On first use, `command -v` looks for the command's program. If it isn't found, the checker is off for the session, with one warning to the user and nothing to the model. Three failed runs in a row do the same.
+- **What to configure.** Checks with no false positives that look at one file: parse errors, undefined names. Not formatters (they report style) and not project-wide builds (see "Limits").
+- **Events.** Each report emits `Custom { source: "diagnostics", name: "introduced" }` (or `"turn_end"`) with the number of findings, for telemetry and the Phase 9 comparison.
+- **Optional.** The plugin is its own cargo feature, enabled by default like `stuck`, `planning` and `spill`. Without checkers it only records which files changed. `plugins.disable = ["diagnostics"]` turns it off.
+- **Settable by a project without trust:** `timeout_secs`, `max_report_chars` and `max_files_per_step`. **Need trust:** `checkers` and `nudge_at_turn_end`.
+
+#### Example configurations
+
+These are documentation, not defaults. Each was tried by hand when this ADR was written.
+
+| Extension | Command | Finds |
+|---|---|---|
+| `.rs` | rustfmt with an awk wrapper (below) | Parse errors only. Valid code exits 0 however it is formatted, and `mod x;` isn't followed on stdin. |
+| `.py` | `ruff check --no-fix --force-exclude --output-format concise --select F63,F7,F82 --stdin-filename={path} -` | Syntax errors (always reported), undefined names, statements in the wrong place. `--select` replaces the project's own rule set, so style isn't reported. Exit 2 means ruff itself failed. |
+| `.ts`, `.js` | `npx --no-install eslint --format unix --stdin --stdin-filename={path}` | Whatever the project's eslint config enables. `npx` runs the repository's own eslint. |
+
+rustfmt prints each error as `error: …` with its location on a later ` --> <stdin>:L:C` line, so the wrapper joins the two into one line per error and exits 1 when there was one. Set the edition your code uses:
+
+```toml
+[plugins.diagnostics.checkers.rs]
+command = '''RUSTUP_TOOLCHAIN=stable RUSTUP_AUTO_INSTALL=0 rustfmt --edition 2021 --emit stdout 2>&1 >/dev/null | awk -v p={path} '/^error/ { m = $0 } /^ *--> / && m != "" { n = split($0, a, ":"); print p ":" a[n-1] ":" a[n] ": " m; m = ""; bad = 1 } END { exit bad }' '''
+```
+
+The probe skips leading `NAME=value` words, so it looks for `rustfmt` here. The pipeline's exit code is awk's, so a rustfmt that fails without printing an error counts as "no findings" rather than as a failure.
+
+Mind what a command lets the repository choose. A rustup proxy follows `rust-toolchain.toml`, whose `path` can point into the repository; set `RUSTUP_TOOLCHAIN` in the command to stop that. `npx` and anything else found through the repository runs the repository's code.
+
+### Who decides that a checker may run
+
+Checkers run without anyone approving a command, so two rules limit them:
+
+1. **Only while `bash` is available to the model.** That means the `bash` tool is registered and the safety policy doesn't deny it outright (`deny = ["bash"]`). For that, `safety` provides its `Policy` as a service. With bash off, the user has chosen an agent that runs no programs, and diagnostics would quietly break that.
+2. **Only commands the user chose.** The user's own config, or a project's `.ch/config.toml` once the project is trusted, as for any setting that runs a command. The harness ships none.
+
+**Bash in `ask` mode.** Under the default `ask` mode most bash commands need the user's approval, so the first rule alone doesn't stop a hostile repository. The second does: no checker runs that the user didn't configure, and the example commands above say what each lets the repository choose.
+
+**Alternative: gate on the permission policy.** Run a checker only if the same command, sent as a bash call, would run without asking.
+- It is stricter.
+- But a checker the user configured would still need an allow rule as well.
+- It also misses "always allow" answers given during the session, which the approver holds and the policy doesn't.
+
+Rejected for now.
 
 ## Evidence
 
@@ -126,20 +133,21 @@ These are the findings the design rests on. The figures are as their authors rep
 | A lint gate that rejected syntactically broken edits raised the solve rate on a SWE-bench subset from 15.0% to 18.0%. | The SWE-agent ablations | Parse errors are worth catching. This design reports instead of blocking, so a change spread over several edits isn't refused halfway. |
 | Verifying under 4% of steps gained 1.7 points at 1.1× the cost. Verifying every step raised cost without that gain. | A study of selective step verification | Check only steps that changed a file, once per file, and stay silent when nothing new is wrong. |
 | Detailed error messages with locations took a 14B open model from 41% to 63% on fixing type errors. A frontier model was at 95–100% either way. | An ablation of type-error feedback for coding agents | Show rule, message and location. Expect the gain mainly on weaker and open-weight models; for frontier models this is cheap insurance. |
-| Syntax checks have zero false positives. Edits anchored on line numbers fail silently after a shift. | A study of verifying agent actions before they run | Default to parse errors and undefined names only. Match findings on their message, never on their line. |
+| Syntax checks have zero false positives. Edits anchored on line numbers fail silently after a shift. | A study of verifying agent actions before they run | Configure parse errors and undefined names, not style. Match findings on their message, never on their line. |
 | Models rarely call optional tools: language-server tools were used in 0–6% of localisation tasks. | A study of language-server tools in coding agents | Push findings as a reminder instead of offering a "diagnostics" tool the model would have to remember. |
 | Open agents ship a capped "check before finishing" nudge (Hermes, OpenDev). | Source reviews of open coding agents | One turn-end note per turn, then accept the stop. |
-| No controlled study of advisory, per-edit linting was found. | — | This design is a bet. The measurement below decides whether it stays on by default. |
+| Strong agents already check their own work through bash. | The trajectory studies above | Ship the mechanism, not language defaults: users who want push-style checks configure them, and the model can always run its own. |
+| No controlled study of advisory, per-edit linting was found. | — | This design is a bet. The measurement below decides whether it is worth configuring. |
 
 ## Limits and later work
 
 - **Only `edit_file` and `write_file` changes are seen.** Changes made through bash (`sed -i`, a code generator) aren't checked.
-- **Checkers that can't read stdin get no before/after diff.** A user-configured checker with `stdin = false` only reads the file on disk, and by check time the **before** content exists only in the snapshot. Two options:
+- **Checkers that can't read stdin get no before/after diff.** A checker with `stdin = false` only reads the file on disk, and by check time the **before** content exists only in the snapshot. Two options:
   - write the snapshot to a temp file beside the original (which some tools mis-resolve);
   - or run it only at turn end against a baseline.
 
   Version 1 accepts `stdin = true` checkers only, and the setting exists so the config doesn't change later.
-- **Project-wide semantic checks** (type errors through `cargo check`, `tsc`, `mypy`) come as a separate, opt-in turn-end tier with its own short design. Its open question is the baseline: the first run of a session has nothing to compare against unless it runs before the first edit, which blocks that edit for the length of a build.
+- **Project-wide checks** (type errors through a build or a type checker) could come as a separate, configured turn-end tier with its own short design. Its open question is the baseline: the first run of a session has nothing to compare against unless it runs before the first edit, which blocks that edit for the length of a build.
 - **Measuring it** (Phase 9). Compare off, the PR #31 behavior, this design, and this design with the turn-end check. Report:
   - success, cost and extra steps;
   - how often the model claims done with a known finding still open;
@@ -148,8 +156,9 @@ These are the findings the design rests on. The figures are as their authors rep
 ## Consequences
 
 - **What the model gets:** at most one short reminder per step, only about problems its own edits introduced, and at most one turn-end nudge. Nothing is added to history except that nudge.
-- **Cost per changed file per step:** two fast stdin runs. One of them is usually a cache hit.
-- **The trust model doesn't change.** No repo-chosen program runs without a trusted project config or an explicit user setting.
+- **Cost per changed file per step:** two stdin runs of the configured checker. One of them is usually a cache hit. With no checkers configured, nothing runs.
+- **The trust model doesn't change.** No program runs that the user or a trusted project didn't configure.
+- **No language knowledge in the harness.** Language setups live in the examples above, not in code.
 - **Two small changes outside the plugin:**
   - `safety` provides `Policy` as a service;
   - `diagnostics` declares that it requires `safety`, for `PathGuard`.
