@@ -291,4 +291,6 @@ The [justfile](justfile) wraps these commands: `just fmt`, `just lint`, `just te
 
 Tests use fake plugins and a scripted model, so they need no API key. The end-to-end tests in [crates/ch-cli/tests/e2e.rs](crates/ch-cli/tests/e2e.rs) run the real binary against the fixture repo in [tests/fixtures/calc-py](tests/fixtures/calc-py). One of them snapshots the full prompt sent to the model. After an intentional prompt change, review the new snapshot with `cargo insta review`; [docs/snapshot-testing.md](docs/snapshot-testing.md) explains how snapshots work.
 
+To learn the Rust this code uses, read the tutorial in [docs/tutorial](docs/tutorial/README.md). It explains each language feature with code from this repository, and each pull request that adds Rust code keeps it current.
+
 Tests that call the real Anthropic and OpenAI APIs are marked `#[ignore]`. With API keys set, run them with `cargo test -- --ignored`.
