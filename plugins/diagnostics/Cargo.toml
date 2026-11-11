@@ -12,3 +12,20 @@ workspace = true
 
 [dependencies]
 ch-kernel.workspace = true
+ch-safety.workspace = true
+anyhow.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+shell-words.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+ch-executor-local.workspace = true
+ch-provider-scripted.workspace = true
+ch-tools-fs.workspace = true
+ch-testkit.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
