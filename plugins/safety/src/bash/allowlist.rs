@@ -28,7 +28,7 @@ pub fn segment_is_read_only(seg: &Segment) -> bool {
     let cmd = Cmd::of(seg);
     // Environment variables can make an allowlisted program run another one
     // (`GIT_CONFIG_*` setting `core.fsmonitor`, `HOME` pointing git at another
-    // `.gitconfig`, `LD_PRELOAD`, `RUSTC_WRAPPER`), so only locale and display
+    // `.gitconfig`, `LD_PRELOAD`), so only locale and display
     // settings keep a command read-only.
     if !cmd.assignments.iter().all(|a| is_display_assignment(a)) {
         return false;
