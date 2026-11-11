@@ -11,7 +11,7 @@ The `safety` plugin decides, before every tool call, whether the call runs, asks
 A shell-command parser can't be a complete security boundary. Programs on the read-only allowlist run other programs when given the right environment variable, config file or option:
 
 - `GIT_EXTERNAL_DIFF='<cmd> #' git diff` and `X='<cmd>' git --config-env=core.fsmonitor=X status` both run `<cmd>` through `sh`.
-- `cargo check` compiles and runs `build.rs` and proc-macros.
+- `cargo check` compiles and runs `build.rs` and proc-macros, and a project's `.cargo/config.toml` can name the `rustc` that `cargo metadata` runs. `cargo` was taken off the allowlist for this reason.
 - `sort --compress-program=<prog>`, and `rg` with `--pre` set in a `RIPGREP_CONFIG_PATH` file, run other programs.
 
 The deny list can be dodged the same way: `timeout -s KILL 5 git push`, `$'\x67it' push`, `sh <<EOF … EOF`. Each case can be patched, but the list of patches never ends.
