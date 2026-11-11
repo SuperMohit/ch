@@ -322,7 +322,7 @@ impl Session {
         let cancel = self.cancel.begin();
         let cx = self.cx(0, cancel);
         let system = self.system_blocks(&cx).await;
-        let budget = self.budget(&system);
+        let budget = self.budget(&system, &[]);
         let ccx = self.context_cx(cx);
         let result = self.context.compact(&self.history, budget, &ccx).await;
         self.cancel.finish();
