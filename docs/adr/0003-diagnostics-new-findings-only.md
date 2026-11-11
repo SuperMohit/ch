@@ -39,7 +39,8 @@ So a file edited five times in one step is checked once, on its final state. Che
 A finding's key is its message, without its location; a `line N` inside the message is normalised too. Keys are compared as multisets, so two identical errors before and three after report one.
 - Line numbers aren't part of the key. An edit above an old error moves it, and the model shouldn't be blamed for that.
 - **Two baselines.** A finding is new if the **after** run has more of it than the step's **before** *and* than the turn's: the file's findings before the turn's first change, plus what was already reported this turn. Many checkers hide some problems while another is present (a syntax error hides undefined names). Without the turn's baseline, fixing the hiding error would make a problem from before the turn look new, or report one a second time.
-- **When the file is clean,** what was reported is forgotten, so a problem fixed and later made again is reported again.
+- **A fix is remembered.** In a step that adds nothing new, nothing can be hiding a problem, so a reported problem that is gone was fixed. It is forgotten, and if it comes back it is reported again.
+- **Not covered:** a problem that a parse error already hid when the turn started looks new once the model fixes that parse error.
 - **Display:** a reported finding shows the edited file's path and its location from the **after** run. When the same message occurs more than once, which occurrence is shown isn't always the new one.
 
 ### How findings reach the model
@@ -81,19 +82,29 @@ findings_exit = [1]                 # exit codes that mean "findings"; the defau
 stdin = true                        # the only value accepted for now; see "Limits"
 ```
 
-- **Input.** The command reads the file's content on **stdin**, so **before** and **after** can be checked without touching the file. `{path}` becomes `"$CH_PATH"`, and `CH_PATH` holds the path relative to the workspace. A file name therefore never reaches the shell's parser, however `{path}` is quoted in the command. Join it to its flag with `=` so a name starting with `-` can't become an option. `NO_COLOR=1` is set.
-- **Output.** A finding is a line on stdout or stderr that **starts** with a file name and a location: `file:L: message`, `file:L:C: message` or `file(L,C): message`. Other lines are ignored: summaries such as `Found 2 errors (checked 3:00)`, code frames, stack traces, timestamps, URLs. Colour codes are removed first. A tool needs a one-line-per-problem output format; a multi-line one, like rustfmt's, needs a wrapper (below). At most 200 findings are kept per run.
+- **Input.** The command reads the file's content on **stdin**, so **before** and **after** can be checked without touching the file. `{path}` becomes `"$CH_PATH"`, and `CH_PATH` holds the path relative to the workspace. A file name therefore never reaches the shell's parser. Join it to its flag with `=` so a name starting with `-` can't become an option. `NO_COLOR=1` is set.
+- **Output.** A finding is a line on stdout or stderr that **starts** with the edited file's name and a location: `name:L: message`, `name:L:C: message` or `name(L,C): message`.
+  - The name may be the path as given, a longer path ending in it, the file name alone, or what a tool reading stdin calls it: `-`, `stdin` or `<stdin>`.
+  - Lines about other files are ignored. So are summaries such as `Found 2 errors (checked 3:00)`, code frames, stack traces, timestamps and URLs.
+  - Colour codes are removed first, and control characters from both the path and the message.
+  - A tool needs a one-line-per-problem output format; a multi-line one, like rustfmt's, needs a wrapper (below).
+  - At most 200 findings are kept per run, and each message is cut to 1,000 characters.
 - **Exit codes.** Exit 0 means no findings. An exit code in `findings_exit` (default `[1]`) must come with at least one finding line. Any other exit, a timeout or a failure to start is a checker failure. Its output is logged and **never** reaches the model, even if a line looks like a finding: a crashing tool, or one that prints a config file it couldn't parse, can't put that text in the prompt. Three failures in a row turn the checker off for the session, with one warning.
 - **Cancelling** a turn while a checker runs is neither a result nor a failure. Nothing is reported, and nothing is turned off.
+- **Without the `safety` plugin** nothing is checked, and the first edit of a checked file says so in one warning.
 - **Probing.** On first use, `command -v` looks for the command's program, skipping leading `NAME=value` words. If it isn't found, the checker is off for the session, with one warning to the user and nothing to the model.
 - **What to configure.** Checks with no false positives that look at one file: parse errors, undefined names. Not formatters (they report style) and not project-wide builds (see "Limits").
 - **Events.** Each report emits `Custom { source: "diagnostics", name: "introduced" }` (or `"turn_end"`) with the number of findings, for telemetry and the Phase 9 comparison.
 - **Optional.** The plugin is its own cargo feature, enabled by default like `stuck`, `planning` and `spill`. With no checkers configured it adds no hook and needs nothing else; it doesn't require the `safety` plugin, and finds `PathGuard` and `Policy` among the session's services when it runs. `plugins.disable = ["diagnostics"]` turns it off.
-- **Settable by a project without trust:** `timeout_secs`, `max_report_chars` and `max_files_per_step`, within the ranges above, so a repository can't make a checker run for minutes. **Need trust:** `checkers` and `nudge_at_turn_end`.
+- **Settable by a project without trust:** `timeout_secs`, `max_report_chars` and `max_files_per_step`. A value outside the ranges above is brought into range with a warning, so a repository can't make a checker run for minutes, nor stop `ch` from starting. **Need trust:** `checkers` and `nudge_at_turn_end`.
 
 ### Who decides that a checker may run
 
-A checker runs only when the `safety` plugin's policy would run **the same command as a `bash` call without asking**, and only while the model has the `bash` tool. Before each run, the command, with the real path in place of `{path}`, goes through `Policy::decide("bash", …)`, and anything but `Allow` holds the checker back. So:
+A checker runs only when the `safety` plugin's policy would run **the same command as a `bash` call without asking**, and only while the model has the `bash` tool. Before each run, two forms of the command go through `Policy::decide("bash", …)`, and both must be `Allow`:
+- the command exactly as it runs, with `"$CH_PATH"`, which no file name can change;
+- the command as the model would write it, with the shell-quoted path, which path-specific rules match.
+
+Deciding only on the second form would let a file name with a quote character in it hide the rest of the command from the policy. So:
 - in `bypass` mode, configured checkers run;
 - in `ask` and `accept-edits` modes, a checker runs only if its command is on the read-only bash allowlist or covered by an allow rule, such as `bash:ruff check *`;
 - a `deny` rule that covers the command, including `deny = ["bash"]` or `["bash:*"]`, holds it back.
@@ -104,7 +115,9 @@ The first time a checker is held back, the user gets one warning that names the 
 
 **Limits of the rule.**
 - "Always allow" answers given during a session live in the approver, not the policy, so they don't count until they are saved as rules (answering "always" in the REPL saves one) and a new session starts.
-- An allow rule lets the model run the command too. That is the point, but allow narrowly: the rustfmt example needs `bash:awk *`, which lets the model run any awk program.
+- An allow rule lets the model run the command too. That is the point, but allow narrowly:
+  - `bash:awk *` lets the model run any awk program, and awk can run commands through `system()`.
+  - `bash:rustfmt *` also allows `RUSTUP_TOOLCHAIN=<a path in the workspace> rustfmt`, which runs the workspace's program. A rule that pins the whole command prefix is safer. For the example below that is `bash:RUSTUP_TOOLCHAIN=stable RUSTUP_AUTO_INSTALL=0 rustfmt --edition 2021 --emit stdout *`.
 - The policy judges the command's text. What the program then does, such as which config it loads, is outside it, as for any allowed bash command ([ADR 0001](0001-sandbox-and-agent-security-responsibilities.md): containment belongs to the sandbox).
 
 #### Example configurations
@@ -114,7 +127,7 @@ These are documentation, not defaults. Each was run by hand when this ADR was wr
 | Extension | Command | Allow rules | Finds |
 |---|---|---|---|
 | `.py` | `ruff check --isolated --no-fix --output-format concise --select F63,F7,F82 --stdin-filename={path} -` | `bash:ruff check *` | Syntax errors (always reported), undefined names, statements in the wrong place. `--isolated` ignores the repository's config, so it can't `extend` another file, and also ignores its `per-file-ignores`; `# noqa` comments still apply. Exit 2 means ruff itself failed. |
-| `.rs` | rustfmt with an awk wrapper (below) | `bash:rustfmt *`, `bash:awk *` | Parse errors only. Valid code exits 0 however it is formatted, and `mod x;` isn't followed on stdin. |
+| `.rs` | rustfmt with an awk wrapper (below) | the pinned rustfmt rule above, and `bash:awk -v p=*` | Parse errors only. Valid code exits 0 however it is formatted, and `mod x;` isn't followed on stdin. |
 
 rustfmt prints each error as `error: …`, with its location on a later ` --> <stdin>:L:C` line. The wrapper joins the two into one line per error. It exits 1 when there was an error, and 2 when rustfmt printed an error with no location (a missing toolchain, say), so that counts as a failure rather than as a clean file. Set the edition your code uses:
 
@@ -148,6 +161,7 @@ These are the findings the design rests on. The figures are as their authors rep
 
 - **Only `edit_file` and `write_file` changes are seen.** Changes made through bash (`sed -i`, a code generator) aren't checked.
 - **The cache doesn't see config changes.** A checker's config file edited in the middle of a session leaves earlier cached results in place until the content of the checked file changes.
+- **The turn's end checks every file the turn changed,** not just `max_files_per_step`, since its results are mostly cached; the per-turn list stops at 100 files.
 - **Two kernel issues this plugin exposes,** to fix in the kernel:
   - A turn-end note sent on the last allowed step leaves the turn ending as `StepLimit`, with the note unanswered in history.
   - A refused response is treated as `Done`, so the turn-end check runs, but its note never reaches the model.

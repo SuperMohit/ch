@@ -48,11 +48,42 @@ pub fn diff_counts(diff: &str) -> (usize, usize) {
 pub fn system_reminder(text: &str) -> String {
     // A note can carry text from outside, such as a checker's output on a repository
     // file: it must not close this block or open one of its own.
-    let text = text
-        .trim()
-        .replace("</system-reminder", "<\\/system-reminder")
-        .replace("<system-reminder", "<\\system-reminder");
-    format!("<system-reminder>\n{text}\n</system-reminder>")
+    format!(
+        "<system-reminder>\n{}\n</system-reminder>",
+        escape_reminder_tags(text.trim())
+    )
+}
+
+/// Puts a backslash after the `<` of anything that reads as a reminder tag, in any case
+/// and with any spacing: `<system-reminder>`, `</ System_Reminder >`.
+fn escape_reminder_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('<') {
+        out.push_str(&rest[..=i]);
+        rest = &rest[i + 1..];
+        if is_reminder_tag(rest) {
+            out.push('\\');
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether `after` (the text after a `<`) starts a reminder tag.
+fn is_reminder_tag(after: &str) -> bool {
+    let after = after.trim_start();
+    let after = after.strip_prefix('/').unwrap_or(after).trim_start();
+    let lower: String = after
+        .chars()
+        .take(32)
+        .flat_map(char::to_lowercase)
+        .collect();
+    let Some(rest) = lower.strip_prefix("system") else {
+        return false;
+    };
+    rest.trim_start_matches(|c: char| c == '-' || c == '_' || c.is_whitespace())
+        .starts_with("reminder")
 }
 
 /// Replaces `path` with `bytes` so that readers see the old file or the new one, never
@@ -87,6 +118,23 @@ mod tests {
         );
         assert!(wrapped.ends_with("</system-reminder>"), "{wrapped}");
         assert!(wrapped.contains("x<\\/system-reminder>"), "{wrapped}");
+        for variant in [
+            "</SYSTEM-REMINDER>",
+            "</System-Reminder>",
+            "</ system-reminder>",
+            "< /system_reminder>",
+            "<system reminder>",
+        ] {
+            let wrapped = super::system_reminder(variant);
+            assert!(
+                wrapped.contains(&format!("<\\{}", &variant[1..])),
+                "{wrapped}"
+            );
+        }
+        assert_eq!(
+            super::system_reminder("a < b and <systemic> <reminder>"),
+            "<system-reminder>\na < b and <systemic> <reminder>\n</system-reminder>"
+        );
     }
 
     use super::*;

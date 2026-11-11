@@ -57,6 +57,11 @@ impl Checker {
         self.template.replace("{path}", &shell_words::quote(rel))
     }
 
+    /// The command as it runs: `{path}` becomes `"$CH_PATH"`.
+    pub fn script(&self) -> String {
+        self.template.replace("{path}", &format!("\"${PATH_VAR}\""))
+    }
+
     /// Checks that the command's program can be found.
     pub async fn probe(&self, cx: &Cx) -> Result<(), Failure> {
         let program = &self.program;
@@ -74,7 +79,7 @@ impl Checker {
     /// Checks `content` as the file `rel`. Exit 0 means no findings; an exit code in
     /// `findings_exit` must come with findings to read; anything else is a failure.
     pub async fn run(&self, cx: &Cx, rel: &str, content: &str) -> Result<Vec<Finding>, Failure> {
-        let script = self.template.replace("{path}", &format!("\"${PATH_VAR}\""));
+        let script = self.script();
         let env = vec![
             (PATH_VAR.to_string(), rel.to_string()),
             ("NO_COLOR".to_string(), "1".to_string()),

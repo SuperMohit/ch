@@ -348,10 +348,14 @@ async fn nothing_runs_without_the_safety_services() {
     f.write("a.txt", "fine\n");
     f.edit("a.txt", "BAD\n").await;
     assert_eq!(f.next_step().await, None);
+    f.edit("a.txt", "BAD again\n").await;
+    assert_eq!(f.next_step().await, None);
     assert_eq!(f.runs(), 0);
+    let warned = warnings(&mut rx);
+    assert_eq!(warned.len(), 1, "{warned:?}");
     assert!(
-        warnings(&mut rx).is_empty(),
-        "no snapshot, nothing to check"
+        warned[0].contains("the `safety` plugin is off"),
+        "{warned:?}"
     );
 }
 
@@ -530,22 +534,103 @@ async fn a_problem_fixed_and_made_again_is_reported_again() {
 
 #[tokio::test]
 async fn cancelling_during_a_check_turns_nothing_off() {
-    let mut f = fixture();
+    // The checker is slow on `SLOW` content, so the cancel lands while it runs.
+    let extra = r#"[checkers.md]
+command = "grep -q SLOW && sleep 3; echo ran >> runs.md.log; exit 0""#;
+    let mut f = fixture_with(extra, vec![bash_spec()], BYPASS);
     let mut rx = f.cx.events.subscribe();
     f.prompt().await;
-    f.write("a.txt", "fine\n");
-    let cancel = CancellationToken::new();
-    cancel.cancel();
-    f.cx.cancel = cancel;
-    for _ in 0..3 {
-        f.edit("a.txt", "BAD\n").await;
+    for i in 0..3 {
+        f.write("a.md", "fine\n");
+        f.edit("a.md", &format!("SLOW {i}\n")).await;
+        let cancel = CancellationToken::new();
+        f.cx.cancel = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            cancel.cancel();
+        });
+        let started = std::time::Instant::now();
         assert_eq!(f.next_step().await, None);
-        f.write("a.txt", "fine\n");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the run was stopped"
+        );
     }
-    assert!(warnings(&mut rx).is_empty());
+    assert!(
+        warnings(&mut rx).is_empty(),
+        "a cancelled run is not a failure"
+    );
     f.cx.cancel = CancellationToken::new();
-    f.edit("a.txt", "BAD\n").await;
-    assert!(f.next_step().await.is_some(), "the checker is still on");
+    f.edit("a.md", "quick\n").await;
+    assert_eq!(f.next_step().await, None);
+    let log = std::fs::read_to_string(f.ws.join("runs.md.log")).unwrap_or_default();
+    assert!(!log.is_empty(), "the checker is still on");
+}
+
+#[tokio::test]
+async fn a_quote_in_a_file_name_cannot_change_what_the_policy_sees() {
+    // In `ask` mode `touch` would ask, so the checker must be held back for every name.
+    let extra = r#"[checkers.q]
+command = "cat >/dev/null; echo \"{path}\" '{path}' >/dev/null; touch PWNED_GATE""#;
+    let f = fixture_with(extra, vec![bash_spec()], "");
+    f.prompt().await;
+    for name in ["plain.q", "a\".q", "b'.q"] {
+        f.edit(name, "x\n").await;
+        assert_eq!(f.next_step().await, None, "{name}");
+    }
+    assert!(!f.ws.join("PWNED_GATE").exists(), "the policy was bypassed");
+}
+
+#[tokio::test]
+async fn a_problem_fixed_and_made_again_is_reported_again_beside_an_old_one() {
+    let f = fixture();
+    f.write("a.txt", "BAD legacy\n");
+    f.prompt().await;
+    f.edit("a.txt", "BAD legacy\nBAD x\n").await;
+    assert!(f.next_step().await.unwrap().contains("a.txt:2:1: BAD x"));
+    f.edit("a.txt", "BAD legacy\n").await;
+    assert_eq!(f.next_step().await, None);
+    f.edit("a.txt", "BAD legacy\nok\nBAD x\n").await;
+    let text = f.next_step().await.expect("made again");
+    assert!(text.contains("a.txt:3:1: BAD x"), "{text}");
+}
+
+#[tokio::test]
+async fn the_end_of_a_turn_looks_at_every_file_it_changed() {
+    let f = fixture_with("max_files_per_step = 2", vec![bash_spec()], BYPASS);
+    f.prompt().await;
+    for name in ["a", "b", "c", "d"] {
+        f.edit(&format!("{name}.txt"), "BAD\n").await;
+        assert!(f.next_step().await.is_some());
+    }
+    for name in ["a", "b"] {
+        f.edit(&format!("{name}.txt"), "fine\n").await;
+        assert_eq!(f.next_step().await, None);
+    }
+    let text = f.done().await.expect("a turn-end note");
+    assert!(
+        text.contains("c.txt:1:1: BAD") && text.contains("d.txt:1:1: BAD"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("a.txt") && !text.contains("not checked"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn paths_with_brackets_and_spaces_are_reported() {
+    let f = fixture();
+    f.prompt().await;
+    for rel in [
+        "app/[slug]/page.txt",
+        "app/(group)/page.txt",
+        "my notes.txt",
+    ] {
+        f.edit(rel, "BAD\n").await;
+        let text = f.next_step().await.unwrap_or_default();
+        assert!(text.contains(&format!("{rel}:1:1: BAD")), "{rel}: {text}");
+    }
 }
 
 #[tokio::test]

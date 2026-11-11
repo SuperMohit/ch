@@ -137,25 +137,26 @@ impl Default for CheckerConfig {
 }
 
 impl DiagnosticsConfig {
+    /// The settings a project may set without trust, brought into range with a warning
+    /// rather than an error, so a repository's config can't stop `ch` from starting.
+    pub fn clamped(mut self) -> Self {
+        fn clamp<T: Copy + Ord + std::fmt::Display>(name: &str, value: &mut T, min: T, max: T) {
+            let fixed = (*value).clamp(min, max);
+            if fixed != *value {
+                tracing::warn!(
+                    "plugins.diagnostics.{name} = {value} is outside {min}–{max}; using {fixed}"
+                );
+                *value = fixed;
+            }
+        }
+        clamp("timeout_secs", &mut self.timeout_secs, 1, 60);
+        clamp("max_report_chars", &mut self.max_report_chars, 200, 20_000);
+        clamp("max_files_per_step", &mut self.max_files_per_step, 1, 50);
+        self
+    }
+
     /// The configured checker for each extension.
     pub fn checkers(&self) -> anyhow::Result<BTreeMap<String, Checker>> {
-        let range = |name: &str, value: u64, min: u64, max: u64| {
-            if (min..=max).contains(&value) {
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!(
-                    "plugins.diagnostics.{name} must be between {min} and {max}, not {value}"
-                ))
-            }
-        };
-        range("timeout_secs", self.timeout_secs, 1, 60)?;
-        range(
-            "max_report_chars",
-            self.max_report_chars as u64,
-            200,
-            20_000,
-        )?;
-        range("max_files_per_step", self.max_files_per_step as u64, 1, 50)?;
         let timeout = Duration::from_secs(self.timeout_secs);
         let mut checkers = BTreeMap::new();
         for (ext, c) in &self.checkers {
@@ -272,7 +273,7 @@ impl Content {
 struct TurnFile {
     /// Its content before the turn's first change (`Absent` or `Text`).
     start: Content,
-    /// Findings reported this turn since the file was last clean.
+    /// Findings reported this turn and not fixed since.
     reported: Counts,
 }
 
@@ -320,6 +321,7 @@ pub struct DiagnosticsHook {
 
 impl DiagnosticsHook {
     pub fn new(config: &DiagnosticsConfig) -> anyhow::Result<Self> {
+        let config = config.clone().clamped();
         Ok(Self {
             checkers: config.checkers()?,
             max_report_chars: config.max_report_chars,
@@ -367,12 +369,22 @@ impl DiagnosticsHook {
 
     /// Whether the model could run the checker's command for `rel` itself, as a `bash`
     /// call that runs without asking. Tells the user once per checker when it couldn't.
+    ///
+    /// Both the command that runs (with `"$CH_PATH"`, which no file name can change) and
+    /// the command as the model would write it (with the path, which path rules match)
+    /// must be allowed.
     fn permitted(&self, ext: &str, rel: &str, policy: &Policy, cx: &Cx) -> bool {
-        let command = self.checkers[ext].command(rel);
+        let checker = &self.checkers[ext];
+        let command = checker.command(rel);
+        let decide = |command: &str| policy.decide("bash", &json!({ "command": command }), false);
         let why = if !cx.tools.iter().any(|t| t.name == "bash") {
             "the model has no `bash`".to_string()
         } else {
-            match policy.decide("bash", &json!({ "command": command }), false) {
+            let decision = match decide(&checker.script()) {
+                Decision::Allow => decide(&command),
+                held => held,
+            };
+            match decision {
                 Decision::Allow => return true,
                 Decision::Ask { .. } => format!(
                     "the permission policy would ask before running `{command}`; allow it \
@@ -486,16 +498,24 @@ impl DiagnosticsHook {
             None => before.clone(),
         };
         let after = self.findings(&ext, rel, now, cx).await?;
-        let start_found = self.findings(&ext, rel, &start, cx).await?;
         let new: Vec<Finding> = match mode {
-            Mode::TurnEnd => beyond(&[&counts(&start_found)], &after)
-                .into_iter()
-                .cloned()
-                .collect(),
+            Mode::TurnEnd => {
+                let start_found = self.findings(&ext, rel, &start, cx).await?;
+                beyond(&[&counts(&start_found)], &after)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            }
             Mode::Step => {
                 let before_found = self.findings(&ext, rel, before, cx).await?;
+                // Without the turn's start, the step's own "before" is the baseline.
+                let start_found = if start == *before {
+                    Some(before_found.clone())
+                } else {
+                    self.findings(&ext, rel, &start, cx).await
+                };
                 let mut state = self.state();
-                let mut turn = counts(&start_found);
+                let mut turn = start_found.map(|f| counts(&f)).unwrap_or_default();
                 if let Some(t) = state.turn.get(rel) {
                     for (key, n) in &t.reported {
                         *turn.entry(key.clone()).or_default() += n;
@@ -506,10 +526,14 @@ impl DiagnosticsHook {
                     .cloned()
                     .collect();
                 if let Some(t) = state.turn.get_mut(rel) {
-                    // A clean file had its problems fixed, not hidden: one that comes
-                    // back later is reported again.
-                    if after.is_empty() {
-                        t.reported.clear();
+                    // With nothing new, nothing can be hiding a reported problem that is
+                    // gone: it was fixed, and if it comes back it is reported again.
+                    if new.is_empty() {
+                        let now = counts(&after);
+                        t.reported.retain(|key, n| {
+                            *n = (*n).min(now.get(key).copied().unwrap_or(0));
+                            *n > 0
+                        });
                     }
                     add(&mut t.reported, new.iter());
                 }
@@ -540,7 +564,8 @@ impl DiagnosticsHook {
             if now.text().is_none() || now == before {
                 continue;
             }
-            if checked == self.max_files_per_step {
+            // The turn's end mostly reuses cached results, so it isn't capped.
+            if mode == Mode::Step && checked == self.max_files_per_step {
                 skipped += 1;
                 continue;
             }
@@ -673,6 +698,13 @@ impl Hook for DiagnosticsHook {
                     return HookDecision::Continue;
                 };
                 let Some(guard) = cx.services.get::<PathGuard>() else {
+                    let checked = Path::new(raw)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| self.checkers.contains_key(&e.to_ascii_lowercase()));
+                    if checked {
+                        self.safety(cx);
+                    }
                     return HookDecision::Continue;
                 };
                 // The same resolution the tool uses; a path it refuses is never changed.
@@ -754,16 +786,26 @@ mod tests {
                 "[checkers.ts]\ncommand = \"x\"\nfindings_exit = [127]",
                 "findings_exit",
             ),
-            ("timeout_secs = 0", "timeout_secs"),
-            ("timeout_secs = 61", "timeout_secs must be between 1 and 60"),
-            ("max_files_per_step = 0", "max_files_per_step"),
-            ("max_files_per_step = 51", "max_files_per_step"),
-            ("max_report_chars = 0", "max_report_chars"),
         ] {
             let config: DiagnosticsConfig = toml::from_str(toml_cfg).unwrap();
             let err = config.checkers().unwrap_err().to_string();
             assert!(err.contains(needle), "{toml_cfg}: {err}");
         }
+    }
+
+    #[test]
+    fn limits_a_project_may_set_are_clamped_not_refused() {
+        let config: DiagnosticsConfig =
+            toml::from_str("timeout_secs = 0\nmax_report_chars = 5\nmax_files_per_step = 999")
+                .unwrap();
+        let c = config.clamped();
+        assert_eq!(
+            (c.timeout_secs, c.max_report_chars, c.max_files_per_step),
+            (1, 200, 50)
+        );
+        let big: DiagnosticsConfig = toml::from_str("timeout_secs = 3600").unwrap();
+        assert_eq!(big.clamped().timeout_secs, 60);
+        assert!(DiagnosticsHook::new(&DiagnosticsConfig::default()).is_ok());
     }
 
     #[test]

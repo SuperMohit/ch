@@ -2,6 +2,7 @@
 //! edit even when the edit moved it to another line.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -60,10 +61,9 @@ pub fn beyond<'a>(baselines: &[&Counts], after: &'a [Finding]) -> Vec<&'a Findin
         .collect()
 }
 
-/// A finding line: a file name (no spaces, colons, brackets or parentheses) at the start,
-/// then `:L:`, `:L:C:` or `(L,C)`, then the message.
-static LINE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[^\s:()\[\]]+(?::(\d+)(?::(\d+))?:|\((\d+)(?:,\s*(\d+))?\)\s*:?)\s*(\S.*)$")
+/// The location and message after a file's name: `:L:`, `:L:C:` or `(L,C)`, then text.
+static LOCATION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?::(\d+)(?::(\d+))?:|\((\d+)(?:,\s*(\d+))?\)\s*:?)\s*(\S.*)$")
         .expect("valid regex")
 });
 
@@ -75,35 +75,71 @@ static LINE_REF: LazyLock<Regex> =
 static ANSI: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").expect("valid regex"));
 
-/// The findings in a checker's output, on stdout and stderr, shown with `rel` as the
-/// file's path. Lines that don't start with a location (summaries, stack traces, code
-/// frames) are skipped.
+/// A message longer than this is cut in the middle.
+const MAX_MESSAGE_CHARS: usize = 1000;
+
+/// The findings about the file `rel` in a checker's output, on stdout and stderr. A
+/// finding is a line that starts with the file's name and a location. Lines about other
+/// files, and lines that don't start that way (summaries, stack traces, code frames,
+/// timestamps), are skipped.
 pub fn parse(rel: &str, stdout: &str, stderr: &str) -> Vec<Finding> {
+    let shown: String = rel.chars().filter(|c| !c.is_control()).collect();
     stdout
         .lines()
         .chain(stderr.lines())
         .filter_map(|line| {
             let line = ANSI.replace_all(line, "");
-            let caps = LINE.captures(line.trim())?;
+            let caps = LOCATION.captures(after_name(line.trim(), rel)?)?;
             let row = caps.get(1).or(caps.get(3))?.as_str();
-            let col = caps.get(2).or(caps.get(4));
-            // Control characters could rewrite how the reminder reads.
+            let location = match caps.get(2).or(caps.get(4)) {
+                Some(col) => format!("{row}:{}", col.as_str()),
+                None => row.to_string(),
+            };
+            // Control characters could change how the reminder reads.
             let message: String = caps[5]
                 .trim_end()
                 .chars()
                 .filter(|c| !c.is_control())
                 .collect();
-            let message = message.as_str();
-            let location = match col {
-                Some(c) => format!("{row}:{}", c.as_str()),
-                None => row.to_string(),
-            };
+            let message = ch_kernel::util::truncate_middle(&message, MAX_MESSAGE_CHARS);
             Some(Finding {
-                key: LINE_REF.replace_all(message, "line N").into_owned(),
-                display: format!("{rel}:{location}: {message}"),
+                key: LINE_REF.replace_all(&message, "line N").into_owned(),
+                display: format!("{shown}:{location}: {message}"),
             })
         })
         .collect()
+}
+
+/// What follows the file's name at the start of `line`, if the line is about the file
+/// `rel`. The name may be the path as given, a longer path ending in it, the file name
+/// alone, or what a checker reading stdin calls it: `-`, `stdin` or `<stdin>`.
+fn after_name<'a>(line: &'a str, rel: &str) -> Option<&'a str> {
+    let located = |rest: &'a str| (rest.starts_with(':') || rest.starts_with('(')).then_some(rest);
+    if let Some(rest) = line.strip_prefix(rel).and_then(located) {
+        return Some(rest);
+    }
+    if line.starts_with('/') {
+        let suffix = format!("/{rel}");
+        let found = line
+            .match_indices(&suffix)
+            .find_map(|(i, _)| located(&line[i + suffix.len()..]));
+        if found.is_some() {
+            return found;
+        }
+    }
+    let base = Path::new(rel).file_name()?.to_str()?;
+    if let Some(rest) = line.strip_prefix(base).and_then(located) {
+        return Some(rest);
+    }
+    for stdin in ["-", "stdin"] {
+        if let Some(rest) = line.strip_prefix(stdin).and_then(located) {
+            return Some(rest);
+        }
+    }
+    let (name, rest) = line.strip_prefix('<')?.split_once('>')?;
+    let placeholder =
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    placeholder.then(|| located(rest))?
 }
 
 #[cfg(test)]
@@ -115,13 +151,19 @@ mod tests {
     }
 
     #[test]
-    fn only_lines_that_start_with_a_location_are_findings() {
+    fn only_lines_about_the_file_that_start_with_a_location_are_findings() {
         let stdout = "\
 src/a.ts(3,5): error TS2304: Cannot find name 'x'.
 <stdin>:7:1: no-undef 'y' is not defined
-lib.c:12: warning: unused
-\x1b[1ma.py\x1b[0m:2:12: F821 Undefined name `x`
+a.ts:4: warning: unused
+/home/u/my proj/src/a.ts:5:2: absolute path
+-:6:1: dash
+stdin:9:3: plain stdin
+\x1b[1msrc/a.ts\x1b[0m:8:1: coloured
+lib.c:12: warning: about another file
+src/b.ts:1:1: another file too
 Found 2 errors in 1 file (checked 3:00)
+2024-01-01T10:00:05Z warn: a timestamp
 [12:03:44] Linting...
 http://localhost:8080/docs
   4 |     let v = vec(3);
@@ -131,7 +173,7 @@ http://localhost:8080/docs
         let found = parse(
             "src/a.ts",
             stdout,
-            "a.py:9:1: redefinition of `f` from line 3\n",
+            "a.ts:9:1: redefinition of `f` from line 3\n",
         );
         assert_eq!(
             keys(&found),
@@ -139,7 +181,10 @@ http://localhost:8080/docs
                 "error TS2304: Cannot find name 'x'.",
                 "no-undef 'y' is not defined",
                 "warning: unused",
-                "F821 Undefined name `x`",
+                "absolute path",
+                "dash",
+                "plain stdin",
+                "coloured",
                 "redefinition of `f` from line N",
             ]
         );
@@ -148,7 +193,26 @@ http://localhost:8080/docs
             found[1].display,
             "src/a.ts:7:1: no-undef 'y' is not defined"
         );
-        assert_eq!(found[2].display, "src/a.ts:12: warning: unused");
+        assert_eq!(found[2].display, "src/a.ts:4: warning: unused");
+    }
+
+    #[test]
+    fn unusual_paths_parse_and_print_safely() {
+        for rel in ["app/[slug]/page.ts", "app/(group)/page.ts", "my notes.ts"] {
+            let found = parse(rel, &format!("{rel}:1:2: problem\n"), "");
+            assert_eq!(keys(&found), ["problem"], "{rel}");
+        }
+        let rel = "a\nSYSTEM: approved\x1b[2K.ts";
+        // A checker reading stdin names it `-`; the display still uses the path.
+        let found = parse(rel, "-:1:1: x\x07y\n", "");
+        assert_eq!(found[0].display, "aSYSTEM: approved[2K.ts:1:1: xy");
+        let long = "z".repeat(5000);
+        let found = parse("a.ts", &format!("a.ts:1:1: {long}\n"), "");
+        assert!(
+            found[0].display.chars().count() < 1100,
+            "{}",
+            found[0].display.len()
+        );
     }
 
     fn f(key: &str, line: u32) -> Finding {
