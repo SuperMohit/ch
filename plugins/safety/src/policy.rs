@@ -122,13 +122,6 @@ impl Policy {
         self.mode
     }
 
-    /// Whether a `deny` rule without a glob covers every call to `tool`.
-    pub fn denies_tool(&self, tool: &str) -> bool {
-        self.deny
-            .iter()
-            .any(|r| !r.has_pattern() && r.matches(tool, &[]))
-    }
-
     /// Decides one call. `read_only` is the tool's own flag.
     pub fn decide(&self, tool: &str, input: &Value, read_only: bool) -> Decision {
         self.decide_with(tool, input, read_only, None)
@@ -407,16 +400,6 @@ mod tests {
 
     fn edit(p: &Policy, path: &str) -> Decision {
         p.decide("edit_file", &json!({ "path": path }), false)
-    }
-
-    #[test]
-    fn only_a_rule_without_a_glob_denies_a_whole_tool() {
-        let f = fixture();
-        assert!(policy(&f, r#"deny = ["bash"]"#).denies_tool("bash"));
-        assert!(policy(&f, r#"deny = ["*"]"#).denies_tool("bash"));
-        assert!(!policy(&f, r#"deny = ["bash:rm *"]"#).denies_tool("bash"));
-        assert!(!policy(&f, r#"deny = ["web_fetch"]"#).denies_tool("bash"));
-        assert!(!policy(&f, "").denies_tool("bash"));
     }
 
     fn key(d: &Decision) -> Option<&str> {

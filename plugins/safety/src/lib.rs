@@ -5,8 +5,8 @@
 //! - [`PathGuard`] resolves model-supplied paths and rejects anything outside the
 //!   workspace (including `..` tricks and symlink escapes).
 //! - [`FileState`] tracks what the agent has read, so edits require a full, current read.
-//! - [`Policy`] is the compiled permission policy, for plugins that need to know what
-//!   the model may run (diagnostics runs only while bash is available).
+//! - [`Policy`] is the compiled permission policy, for plugins that run commands on
+//!   their own and must not run more than the model could (diagnostics).
 //!
 //! It also adds a `pre_tool` hook (priority -100) implementing the permission policy
 //! from `[plugins.safety]`:

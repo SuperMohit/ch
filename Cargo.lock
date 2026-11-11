@@ -273,6 +273,7 @@ dependencies = [
  "ch-safety",
  "ch-testkit",
  "ch-tools-fs",
+ "libc",
  "regex",
  "serde",
  "serde_json",
