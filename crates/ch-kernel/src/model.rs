@@ -27,12 +27,6 @@ pub struct ModelRequest {
     /// Free-form tag for telemetry, e.g. "agent" or "context.summarize".
     #[serde(default)]
     pub purpose: String,
-    /// How many content blocks at the end of the last message were added for this call
-    /// only (reminders, hook notes) and won't be in the next request. Providers that set
-    /// prompt-cache breakpoints should put them before these blocks, or the next call
-    /// can't reuse the cache.
-    #[serde(default)]
-    pub volatile_tail: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

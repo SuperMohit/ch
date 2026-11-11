@@ -40,7 +40,6 @@ fn request() -> ModelRequest {
         temperature: None,
         thinking_budget: None,
         purpose: "agent".into(),
-        volatile_tail: 0,
     }
 }
 

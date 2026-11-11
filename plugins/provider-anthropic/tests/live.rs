@@ -40,7 +40,6 @@ async fn streamed_tool_use_round_trip() {
         temperature: None,
         thinking_budget: None,
         purpose: "live-test".into(),
-        volatile_tail: 0,
     };
 
     let mut stream = provider

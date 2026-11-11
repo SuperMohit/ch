@@ -29,8 +29,8 @@
 //! | Point | Deny | Ask | Stop | Notes |
 //! |---|---|---|---|---|
 //! | user_prompt | turn ends (`PromptDenied`) | treated as Continue | turn ends | appended to the user message as `<system-reminder>` |
-//! | before_model | treated as Stop | – | turn ends | added as reminders to this request |
-//! | after_model | treated as Stop | – | turn ends | added as a reminder for the next call |
+//! | before_model | treated as Stop | – | turn ends | added as reminders to this request, and kept in history |
+//! | after_model | treated as Stop | – | turn ends | added as a reminder for the next call, and kept in history |
 //! | pre_tool | call not run; reason returned as an error | approver asked | call not run, turn ends after this step | appended to the tool result |
 //! | post_tool | – | – | turn ends after this step | appended to the tool result (after the `tool_result_max_chars` cut) |
 //! | turn_end (model finished) | – | – | turn ends | turn **continues**: notes are sent to the model as a user message |

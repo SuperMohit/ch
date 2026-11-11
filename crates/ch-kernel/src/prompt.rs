@@ -20,8 +20,11 @@ pub trait PromptContributor: Send + Sync {
         Vec::new()
     }
 
-    /// Reminders added to the end of the latest user message for this model call only.
-    /// They are never stored in history. The kernel wraps each in `<system-reminder>`.
+    /// Reminders for this model call. The kernel wraps each in `<system-reminder>` and
+    /// adds it to the end of the latest user message, in the history as well as the
+    /// request, so later requests repeat it unchanged (signed thinking and the prompt
+    /// cache both need the conversation to only grow). Return one only when it says
+    /// something new, such as once per turn.
     async fn turn_reminders(&self, _cx: &Cx) -> Vec<String> {
         Vec::new()
     }

@@ -218,7 +218,6 @@ mod tests {
             temperature: Some(0.5),
             thinking_budget: Some(1000),
             purpose: String::new(),
-            volatile_tail: 0,
         };
         let body = build_body(
             &req,

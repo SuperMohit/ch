@@ -34,10 +34,9 @@ impl Session {
         blocks
     }
 
-    pub(super) fn budget(&self, system: &[String], reminders: &[String]) -> Budget {
-        let fixed_chars: usize = system.iter().map(String::len).sum::<usize>()
-            + reminders.iter().map(String::len).sum::<usize>()
-            + specs_chars(&self.tool_specs);
+    pub(super) fn budget(&self, system: &[String]) -> Budget {
+        let fixed_chars: usize =
+            system.iter().map(String::len).sum::<usize>() + specs_chars(&self.tool_specs);
         Budget {
             window: self.context_window(),
             reserved_output: u64::from(self.kcfg.model.max_output_tokens),
@@ -64,8 +63,19 @@ impl Session {
             );
         }
         reminders.append(after_model_notes);
+        // Reminders and notes are stored, not sent once and dropped: on models with
+        // signed thinking, a block is valid only while everything before it stays the
+        // same, so text that is in one request and missing from the next invalidates
+        // the model's later reasoning (and the prompt cache).
+        if !reminders.is_empty() {
+            let blocks = reminders
+                .iter()
+                .map(|r| ContentBlock::text(system_reminder(r)))
+                .collect();
+            self.history.append_to_last_user(self.turn, blocks);
+        }
 
-        let budget = self.budget(&system, &reminders);
+        let budget = self.budget(&system);
         let ccx = self.context_cx(cx.clone());
         let view = self
             .context
@@ -75,25 +85,15 @@ impl Session {
             .map_err(|e| TerminationReason::Error {
                 message: format!("{e:#}"),
             })?;
-        let mut messages = view.messages;
-        let volatile_tail = reminders.len();
-        if !reminders.is_empty() {
-            let blocks = reminders
-                .iter()
-                .map(|r| ContentBlock::text(system_reminder(r)));
-            append_to_last_user(&mut messages, blocks.collect());
-        }
-
         let request = ModelRequest {
             model: self.model.clone(),
             system,
-            messages,
+            messages: view.messages,
             tools: self.tool_specs.to_vec(),
             max_tokens: self.kcfg.model.max_output_tokens,
             temperature: self.kcfg.model.temperature,
             thinking_budget: self.kcfg.model.thinking_budget,
             purpose: "agent".into(),
-            volatile_tail,
         };
 
         // before_model hooks
@@ -110,9 +110,10 @@ impl Session {
             });
         }
         if let Some(notes) = outcome.notes_text() {
+            // The view ends with the newest history message, so both get the note.
             let block = ContentBlock::text(system_reminder(&notes));
-            append_to_last_user(&mut request.messages, vec![block]);
-            request.volatile_tail += 1;
+            append_to_last_user(&mut request.messages, vec![block.clone()]);
+            self.history.append_to_last_user(self.turn, vec![block]);
         }
 
         let raw_est = estimate_request_tokens(&request);

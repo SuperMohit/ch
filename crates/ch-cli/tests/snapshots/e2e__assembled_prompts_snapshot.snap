@@ -156,19 +156,19 @@ You have an `update_plan` tool for a task plan the user can see. Use it for work
 User: text(fix the failing test) | text(<system-reminder>…)
 
 ===== request 1 messages =====
-User: text(fix the failing test)
+User: text(fix the failing test) | text(<system-reminder>…)
 Assistant: text(Let me look at the code.) | tool_use(read_file {"path":"calc.py"})
 User: tool_result(     1	"""Tiny calculator used by end-to-end tests."""…)
 
 ===== request 2 messages =====
-User: text(fix the failing test)
+User: text(fix the failing test) | text(<system-reminder>…)
 Assistant: text(Let me look at the code.) | tool_use(read_file {"path":"calc.py"})
 User: tool_result(     1	"""Tiny calculator used by end-to-end tests."""…)
 Assistant: tool_use(edit_file {"new_text":"    return a + b","old_text":"    return a - b","path":"calc.py"})
 User: tool_result(Edited `calc.py` (+1 -1).…)
 
 ===== request 3 messages =====
-User: text(fix the failing test)
+User: text(fix the failing test) | text(<system-reminder>…)
 Assistant: text(Let me look at the code.) | tool_use(read_file {"path":"calc.py"})
 User: tool_result(     1	"""Tiny calculator used by end-to-end tests."""…)
 Assistant: tool_use(edit_file {"new_text":"    return a + b","old_text":"    return a - b","path":"calc.py"})
