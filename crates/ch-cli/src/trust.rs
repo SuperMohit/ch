@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use ch_kernel::Plugin;
+use ch_kernel::util::printable;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use toml::{Table, Value};
@@ -175,19 +176,6 @@ fn describe_into(table: &Table, prefix: &str, out: &mut Vec<(String, String)>) {
             other => out.push((path, printable(&other.to_string()))),
         }
     }
-}
-
-fn printable(text: &str) -> String {
-    let bidi = |c: char| matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
-    text.chars()
-        .map(|c| {
-            if c.is_control() || bidi(c) {
-                c.escape_unicode().to_string()
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
 }
 
 /// Appends `values` to the list at `path` in `config`, skipping duplicates.

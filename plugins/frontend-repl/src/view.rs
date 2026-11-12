@@ -4,7 +4,7 @@
 //! [`Action`]s that the terminal layer carries out. That keeps the rendering rules
 //! testable.
 
-use ch_kernel::util::first_line;
+use ch_kernel::util::{first_line, printable, terminal_text};
 use ch_kernel::{AgentEvent, CompactionKind};
 
 use crate::format::{dim, red, tool_end_lines, tool_start_line, yellow};
@@ -137,14 +137,18 @@ impl TurnView {
                 self.end_text(&mut out);
                 out.push(Action::Write(format!(
                     "{}\n",
-                    red(&format!("  ⎿ blocked by {hook}: {}", first_line(reason)))
+                    red(&format!(
+                        "  ⎿ blocked by {}: {}",
+                        printable(hook),
+                        terminal_text(first_line(reason))
+                    ))
                 )));
             }
             AgentEvent::Warning { message } => {
                 self.end_text(&mut out);
                 out.push(Action::Write(format!(
                     "{}\n",
-                    yellow(&format!("⚠ {}", first_line(message)))
+                    yellow(&format!("⚠ {}", terminal_text(first_line(message))))
                 )));
                 self.last_started = None;
             }
@@ -218,9 +222,11 @@ impl TurnView {
             if i > 0 {
                 self.complete_line(out);
             }
+            // A cursor move or `\r` in the model's text could redraw lines above.
+            let piece = terminal_text(piece);
             if !piece.is_empty() {
-                self.line.push_str(piece);
-                out.push(Action::Write(piece.to_string()));
+                self.line.push_str(&piece);
+                out.push(Action::Write(piece));
             }
         }
     }
@@ -254,7 +260,11 @@ fn note_line(source: &str, text: &str) -> String {
     } else {
         String::new()
     };
-    dim(&format!("  · {source}: {first}{more}"))
+    dim(&format!(
+        "  · {}: {}{more}",
+        printable(source),
+        terminal_text(first)
+    ))
 }
 
 #[cfg(test)]
@@ -425,6 +435,43 @@ mod tests {
             screen(&actions),
             "  · diagnostics: 2 warnings (+2 lines)\n⚠ could not save\n"
         );
+    }
+
+    #[test]
+    fn model_tool_and_hook_text_cannot_move_the_cursor() {
+        let actions = run(&[
+            delta("safe\r\u{1b}[2Kfake\n\u{1b}[1A"),
+            assistant(),
+            start("1", "bash\u{1b}[2J", "ls\rrm -rf ~"),
+            end("1", "bash", "\u{1b}]0;title\u{7}out"),
+            AgentEvent::Warning {
+                message: "w\u{1b}[H".into(),
+            },
+            AgentEvent::Note {
+                source: "n".into(),
+                text: "\u{1b}[35mred".into(),
+            },
+            AgentEvent::HookDenied {
+                hook: "h".into(),
+                tool: None,
+                reason: "r\u{1b}[8m".into(),
+            },
+        ]);
+        for action in &actions {
+            let text = match action {
+                Action::Write(t) | Action::Restyle { styled: t, .. } => t,
+                Action::Spinner(_) => continue,
+            };
+            assert_eq!(&crate::terminal::guard(text), text);
+            // Colour codes from the text are removed too, not only cursor moves.
+            assert!(!text.contains("\u{1b}[35m") && !text.contains("\u{1b}[8m"));
+        }
+        let s = screen(&actions);
+        assert!(s.starts_with("safefake\n"), "{s}");
+        assert!(s.contains("● bash\\u{1b}[2J lsrm -rf ~"), "{s}");
+        assert!(s.contains("⚠ w\n"), "{s}");
+        assert!(s.contains("· n: red"), "{s}");
+        assert!(s.contains("blocked by h: r\n"), "{s}");
     }
 
     #[test]

@@ -211,6 +211,27 @@ async fn text_mode_separates_messages_and_verbose_prints_tools() {
 }
 
 #[tokio::test]
+async fn text_mode_cannot_move_the_cursor() {
+    let mut resp = call("1", "echo", json!({"text": "a\nb\u{1b}[1A"}));
+    resp.message.content.insert(
+        0,
+        ContentBlock::text("ok\r\u{1b}[2Kfake\n\u{1b}]0;title\u{7}done"),
+    );
+    let s = session(vec![resp, text("end")], false, "auto-deny", "");
+    let (r, out, err) = run(s, OutputFormat::Text, true).await;
+    assert_eq!(r.reason, "done");
+    for text in [&out, &err] {
+        assert!(
+            !text.chars().any(|c| c.is_control() && c != '\n'),
+            "{text:?}"
+        );
+    }
+    assert!(out.contains("fake\n"), "{out:?}");
+    assert!(out.contains("done"), "{out:?}");
+    assert!(err.contains("● echo a\n"), "{err:?}");
+}
+
+#[tokio::test]
 async fn json_mode_prints_one_result_object() {
     let s = session(vec![text("Hello there")], false, "auto-deny", "");
     let (r, out, _) = run(s, OutputFormat::Json, false).await;

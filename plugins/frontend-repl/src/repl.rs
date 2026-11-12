@@ -4,6 +4,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use ch_kernel::util::terminal_text;
 use ch_kernel::{AgentEvent, Outcome, Session, TerminationReason};
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
@@ -71,7 +72,10 @@ pub(crate) async fn run_repl(
         let input = match editor.read(typed.take()).await {
             Ok(i) => i,
             Err(e) => {
-                term.line(&red(&format!("error: {e:#}")));
+                term.line(&red(&format!(
+                    "error: {}",
+                    terminal_text(&format!("{e:#}"))
+                )));
                 code = 1;
                 break;
             }
@@ -106,7 +110,7 @@ pub(crate) async fn run_repl(
         if let Some(result) = command {
             match result {
                 Ok(Outcome::Done) => {}
-                Ok(Outcome::Message(text)) => term.write(&render_message(&text)),
+                Ok(Outcome::Message(text)) => term.write(&render_message(&terminal_text(&text))),
                 Ok(Outcome::Prompt(prompt)) => {
                     run_turn(
                         &mut session,
@@ -120,7 +124,10 @@ pub(crate) async fn run_repl(
                     .await;
                 }
                 Ok(Outcome::Exit) => break,
-                Err(e) => term.line(&red(&format!("error: {e:#}"))),
+                Err(e) => term.line(&red(&format!(
+                    "error: {}",
+                    terminal_text(&format!("{e:#}"))
+                ))),
             }
             continue;
         }

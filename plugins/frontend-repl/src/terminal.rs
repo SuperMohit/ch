@@ -17,6 +17,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 
+use ch_kernel::util::printable;
+
 use crate::view::Action;
 
 /// Restores the terminal before the default panic message is printed.
@@ -73,6 +75,7 @@ impl Term {
     /// Writes `text`, stopping the spinner first. In raw mode (while a [`KeyPoller`]
     /// runs) `\n` alone doesn't return to column 0, so it is written as `\r\n`.
     pub fn write(&mut self, text: &str) {
+        let text = &guard(text);
         self.stop_spinner();
         let out = &mut self.out;
         let _ = if terminal::is_raw_mode_enabled().unwrap_or(false) {
@@ -81,6 +84,12 @@ impl Term {
             out.write_all(text.as_bytes())
         };
         let _ = out.flush();
+    }
+
+    /// Erases the character before the cursor, for line editing.
+    pub fn backspace(&mut self) {
+        let _ = self.out.write_all(b"\x08 \x08");
+        let _ = self.out.flush();
     }
 
     /// Writes `text` followed by a newline.
@@ -129,6 +138,7 @@ impl Term {
         if !self.spinner_allowed || !std::io::stderr().is_terminal() {
             return;
         }
+        let msg = printable(&msg);
         if let Some(sp) = &self.spinner {
             if self.spinner_message.as_deref() != Some(msg.as_str()) {
                 sp.set_message(msg.clone());
@@ -152,6 +162,39 @@ impl Term {
         }
         self.spinner_message = None;
     }
+}
+
+/// `text` with every control character escaped except newline, tab and colour codes
+/// (SGR: `ESC [`, digits and `;`, then `m`), the only escape sequences the REPL's own
+/// output uses. Text from the model, tools and hooks is made printable before it is
+/// formatted; this catches any that wasn't, so nothing written can move the cursor or
+/// redraw the screen. Colour codes from such text still pass, so they are removed
+/// where the text is formatted.
+pub fn guard(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        let len = match c {
+            '\u{1b}' => sgr_len(&rest[1..]).map_or(0, |n| 1 + n),
+            '\n' | '\t' => c.len_utf8(),
+            _ => 0,
+        };
+        if len > 0 {
+            out.push_str(&rest[..len]);
+            rest = &rest[len..];
+        } else {
+            out.push_str(&printable(&rest[..c.len_utf8()]));
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
+}
+
+/// The length of an SGR sequence after an `ESC`, if `seq` starts with one.
+fn sgr_len(seq: &str) -> Option<usize> {
+    let body = seq.strip_prefix('[')?;
+    let end = body.find(|c: char| !(c.is_ascii_digit() || c == ';'))?;
+    body[end..].starts_with('m').then_some(end + 2)
 }
 
 /// How many terminal rows `text` takes when printed from column 0 at width `cols`.
@@ -253,6 +296,53 @@ pub async fn next_key(keys: &mut Option<KeyPoller>) -> Option<KeyEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::{dim, red};
+    use crate::markdown::{MarkdownLines, render_message};
+
+    #[test]
+    fn the_guard_passes_styles_and_escapes_everything_else() {
+        let styled = format!("{} {}\n\t", red("x"), dim("y"));
+        assert_eq!(guard(&styled), styled);
+        assert_eq!(guard("\u{1b}[2Kx\r\u{8}"), "\\u{1b}[2Kx\\u{d}\\u{8}");
+        assert_eq!(guard("\u{1b}]0;title\u{7}"), "\\u{1b}]0;title\\u{7}");
+        assert_eq!(guard("\u{1b}[1;31"), "\\u{1b}[1;31");
+        assert_eq!(guard("\u{1b}[?25l"), "\\u{1b}[?25l");
+        assert_eq!(guard("ab\u{202e}c"), "ab\\u{202e}c");
+    }
+
+    #[test]
+    fn the_repls_own_output_passes_the_guard() {
+        let md = "# Title\n\n- **bold** and `code`\n\n```rust\nfn main() {}\n```\n\n\
+                  | a | b |\n|---|---|\n| 1 | 2 |\n\n> quoted *text*\n";
+        let message = render_message(md);
+        assert_eq!(guard(&message), message);
+        let mut lines = MarkdownLines::default();
+        for line in md.lines() {
+            if let Some(styled) = lines.render(line) {
+                assert_eq!(guard(&styled), styled);
+            }
+        }
+    }
+
+    #[test]
+    fn writes_go_through_the_guard() {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Shared {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut term = Term::capture(Shared(buf.clone()), || None);
+        term.line("ok\r\u{1b}[2Kfake");
+        term.backspace();
+        let written = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert_eq!(written, "ok\\u{d}\\u{1b}[2Kfake\n\u{8} \u{8}");
+    }
 
     #[test]
     fn rows_for_wrapped_text() {
