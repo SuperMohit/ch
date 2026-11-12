@@ -1,5 +1,6 @@
-//! Diagnostics through a real session: the reminder reaches the next request without
-//! entering the history, and the turn-end note continues the turn once.
+//! Diagnostics through a real session: the reminder reaches the next request and stays
+//! in the history (later requests repeat it, never add it again), and the turn-end note
+//! continues the turn once.
 
 use std::sync::Arc;
 
@@ -103,15 +104,16 @@ async fn the_reminder_is_sent_once_and_the_turn_end_note_continues_the_turn() {
     let second = text(&requests[1].messages);
     assert!(second.contains(reminder), "{second}");
     let third = text(&requests[2].messages);
-    assert!(
-        !third.contains(reminder),
-        "the reminder is for one request: {third}"
+    assert_eq!(
+        third.matches(reminder).count(),
+        1,
+        "the reminder is sent once and then repeated, never added again: {third}"
     );
     assert!(third.contains("Before you finish:"), "{third}");
     assert!(third.contains("notes.txt:2:1: BAD one"), "{third}");
 
     let history = text(&session.history().messages());
-    assert!(!history.contains("Your last edits"), "{history}");
+    assert_eq!(history.matches("Your last edits").count(), 1, "{history}");
     assert_eq!(
         history.matches("Before you finish:").count(),
         1,

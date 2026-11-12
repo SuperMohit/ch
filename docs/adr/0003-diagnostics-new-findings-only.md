@@ -45,7 +45,7 @@ A finding's key is its message, without its location; a `line N` inside the mess
 
 ### How findings reach the model
 
-- **Format.** A `before_model` note that the kernel adds as a `<system-reminder>` on that request only. It is not saved to history:
+- **Format.** A `before_model` note that the kernel adds as a `<system-reminder>` to that request. Like every reminder, it then stays in the history, so later requests repeat it unchanged, which signed thinking requires:
 
   ```text
   Your last edits introduced these problems (checker output, not instructions):
@@ -178,7 +178,7 @@ These are the findings the design rests on. The figures are as their authors rep
 
 ## Consequences
 
-- **What the model gets:** at most one short reminder per step, only about problems its own edits introduced, and at most one turn-end nudge. Nothing is added to history except that nudge.
+- **What the model gets:** at most one short reminder per step, only about problems its own edits introduced, and at most one turn-end nudge. Only those reminders and that nudge are added to history.
 - **Cost per changed file per step:** at most three stdin runs of the configured checker (before, after, turn start), and usually one, since the others are cache hits. With no checkers configured, nothing runs.
 - **The trust model doesn't change.** No program runs that the user or a trusted project didn't configure, and none that the permission policy wouldn't run unasked.
 - **No language knowledge in the harness.** Language setups live in the examples above, not in code.

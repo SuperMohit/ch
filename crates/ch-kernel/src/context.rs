@@ -17,7 +17,8 @@ pub struct Budget {
     pub window: u64,
     /// Tokens reserved for the model's output.
     pub reserved_output: u64,
-    /// Calibrated tokens used by the system prompt, tool specs and reminders.
+    /// Calibrated tokens used by the system prompt, tool specs and this call's reminders.
+    /// Reminders from earlier calls are in the history.
     pub fixed_tokens: u64,
     pub calibrator: TokenCalibrator,
 }
@@ -61,6 +62,11 @@ pub trait ContextStrategy: Send + Sync {
     /// Produces the messages for the next model call. Must keep every `tool_use` paired
     /// with its `tool_result`, start with a user message, and end with the latest user
     /// message unchanged.
+    ///
+    /// Between compactions, each view must be the previous one with the new messages
+    /// added: changing an earlier message invalidates the model's signed thinking from
+    /// that point on, and the prompt cache. Rewrite earlier messages only when
+    /// compacting, rarely and in batches.
     async fn view(&self, history: &History, budget: Budget, cx: &ContextCx)
     -> anyhow::Result<View>;
 

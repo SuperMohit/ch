@@ -905,23 +905,71 @@ async fn context_overflow_and_provider_errors_end_turn() {
     assert!(matches!(r.reason, TerminationReason::Error { .. }));
 }
 
+/// Signed thinking stays valid only while everything before it is unchanged, so each
+/// request must repeat the one before it exactly and only add to it.
+fn assert_each_request_extends_the_last(reqs: &[ModelRequest]) {
+    for (i, pair) in reqs.windows(2).enumerate() {
+        let (before, after) = (&pair[0].messages, &pair[1].messages);
+        assert!(after.len() > before.len(), "request {} shrank", i + 1);
+        assert_eq!(
+            after[..before.len()],
+            before[..],
+            "request {} changed",
+            i + 1
+        );
+    }
+}
+
 #[tokio::test]
-async fn reminders_go_to_request_not_history() {
-    let plugins = vec![plugin("prompt", |cx| {
-        cx.add_prompt(Reminder);
-        Ok(())
-    })];
-    let mut h = harness(vec![Ok(text_reply("ok"))], plugins, config());
+async fn reminders_and_notes_are_stored_so_each_request_extends_the_last() {
+    let plugins = vec![
+        plugin("prompt", |cx| {
+            cx.add_prompt(Reminder);
+            Ok(())
+        }),
+        plugin("noter", |cx| {
+            cx.add_hook(ScriptedHook {
+                id: "noter",
+                priority: 0,
+                points: vec![HookPoint::BeforeModel],
+                log: Default::default(),
+                decide: Box::new(|_| HookDecision::note("check the build")),
+            });
+            Ok(())
+        }),
+    ];
+    let mut h = harness(
+        vec![
+            Ok(tool_reply(&[("a", "echo", json!({"text": "1"}))])),
+            Ok(text_reply("done")),
+            Ok(text_reply("again")),
+        ],
+        plugins,
+        config(),
+    );
     h.session.run_turn("task").await;
+    h.session.run_turn("more").await;
     let reqs = h.script.requests.lock().unwrap();
+    assert_eq!(reqs.len(), 3);
     assert_eq!(reqs[0].system, vec!["You are a test agent."]);
-    let last = reqs[0].messages.last().unwrap();
-    assert!(last.content.iter().any(|b| matches!(b,
-        ContentBlock::Text { text } if text.contains("<system-reminder>") && text.contains("remember the plan"))));
-    let stored = &h.session.history().events()[0].message;
-    assert_eq!(stored.content.len(), 1, "reminder must not be stored");
-    // Providers are told which trailing blocks are per call, for cache breakpoints.
-    assert_eq!(reqs[0].volatile_tail, 1);
+    let texts = |m: &Message| -> Vec<String> {
+        m.content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let first = texts(reqs[0].messages.last().unwrap());
+    assert_eq!(first.len(), 3, "{first:?}");
+    assert!(first[1].contains("<system-reminder>") && first[1].contains("remember the plan"));
+    assert!(first[2].contains("check the build"));
+    // Within a turn and across turns.
+    assert_each_request_extends_the_last(&reqs);
+    // The history holds exactly what was sent, so a resumed session sends it again.
+    let sent = &reqs[2].messages;
+    assert_eq!(h.session.history().messages()[..sent.len()], sent[..]);
 }
 
 #[tokio::test]
@@ -937,6 +985,50 @@ async fn tool_calls_cut_off_by_the_output_limit_are_not_run() {
     assert!(results[0].2);
     assert!(results[0].1.contains("output limit"), "{}", results[0].1);
     assert!(!results[0].1.contains("partial"), "the tool must not run");
+    assert_each_request_extends_the_last(&h.script.requests.lock().unwrap());
+}
+
+#[tokio::test]
+async fn a_call_a_hook_stops_stores_nothing() {
+    let plugins = vec![
+        plugin("prompt", |cx| {
+            cx.add_prompt(Reminder);
+            Ok(())
+        }),
+        plugin("gate", |cx| {
+            let calls = Mutex::new(0);
+            cx.add_hook(ScriptedHook {
+                id: "gate",
+                priority: 0,
+                points: vec![HookPoint::BeforeModel],
+                log: Default::default(),
+                decide: Box::new(move |_| {
+                    let mut n = calls.lock().unwrap();
+                    *n += 1;
+                    if *n == 1 {
+                        HookDecision::stop("not now")
+                    } else {
+                        HookDecision::Continue
+                    }
+                }),
+            });
+            Ok(())
+        }),
+    ];
+    let mut h = harness(vec![Ok(text_reply("ok"))], plugins, config());
+    let r = h.session.run_turn("first").await;
+    assert!(matches!(r.reason, TerminationReason::HookStop { .. }));
+    // The stopped call's reminder was never sent, so it isn't in the history.
+    assert_eq!(h.session.history().events()[0].message.content.len(), 1);
+    h.session.run_turn("second").await;
+    let reqs = h.script.requests.lock().unwrap();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(
+        format!("{:?}", reqs[0].messages)
+            .matches("remember the plan")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1010,6 +1102,7 @@ async fn turn_end_note_continues_the_turn_and_stop_ends_it() {
             .text()
             .contains("you forgot the tests")
     );
+    assert_each_request_extends_the_last(&h.script.requests.lock().unwrap());
 }
 
 #[tokio::test]
@@ -1316,7 +1409,7 @@ async fn a_pre_tool_stop_skips_the_rest_of_a_read_only_batch() {
 }
 
 #[tokio::test]
-async fn hook_notes_reach_the_bus_and_after_model_notes_stay_in_their_turn() {
+async fn hook_notes_reach_the_bus_and_after_model_notes_go_with_the_next_call_only() {
     let plugins = vec![plugin("noter", |cx| {
         cx.add_hook(ScriptedHook {
             id: "noter",
@@ -1350,8 +1443,16 @@ async fn hook_notes_reach_the_bus_and_after_model_notes_stay_in_their_turn() {
     assert!(notes.contains(&"pre-tool note".to_string()), "{notes:?}");
     h.session.run_turn("next").await;
     let reqs = h.script.requests.lock().unwrap();
-    assert!(format!("{:?}", reqs[1].messages).contains("after-model note"));
-    assert!(!format!("{:?}", reqs[2].messages).contains("after-model note"));
+    let count = |i: usize| {
+        format!("{:?}", reqs[i].messages)
+            .matches("after-model note")
+            .count()
+    };
+    // The note from the first response goes with the next call and stays in history;
+    // the one from the turn's last response is dropped, not carried into the next turn.
+    assert_eq!(count(1), 1);
+    assert_eq!(count(2), 1);
+    assert_each_request_extends_the_last(&reqs);
 }
 
 // ---------- registry validation ----------

@@ -76,13 +76,11 @@ impl Session {
                 message: format!("{e:#}"),
             })?;
         let mut messages = view.messages;
-        let volatile_tail = reminders.len();
-        if !reminders.is_empty() {
-            let blocks = reminders
-                .iter()
-                .map(|r| ContentBlock::text(system_reminder(r)));
-            append_to_last_user(&mut messages, blocks.collect());
-        }
+        let mut added: Vec<ContentBlock> = reminders
+            .iter()
+            .map(|r| ContentBlock::text(system_reminder(r)))
+            .collect();
+        append_to_last_user(&mut messages, added.clone());
 
         let request = ModelRequest {
             model: self.model.clone(),
@@ -93,7 +91,6 @@ impl Session {
             temperature: self.kcfg.model.temperature,
             thinking_budget: self.kcfg.model.thinking_budget,
             purpose: "agent".into(),
-            volatile_tail,
         };
 
         // before_model hooks
@@ -111,9 +108,22 @@ impl Session {
         }
         if let Some(notes) = outcome.notes_text() {
             let block = ContentBlock::text(system_reminder(&notes));
-            append_to_last_user(&mut request.messages, vec![block]);
-            request.volatile_tail += 1;
+            append_to_last_user(&mut request.messages, vec![block.clone()]);
+            added.push(block);
         }
+        // What this call added is stored, not sent once and dropped: with signed
+        // thinking, a block is valid only while everything before it stays the same, so
+        // text that is in one request and missing from the next invalidates the model's
+        // later reasoning. The view ends with the newest history message, so after this
+        // the request's last message is the history's.
+        if !added.is_empty() {
+            self.history.append_to_last_user(self.turn, added);
+        }
+        debug_assert_eq!(
+            request.messages.last(),
+            self.history.last().map(|e| &e.message),
+            "the request must end with the newest history message"
+        );
 
         let raw_est = estimate_request_tokens(&request);
         self.events.emit(AgentEvent::ModelRequest {
