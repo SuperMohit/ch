@@ -325,28 +325,28 @@ Nothing changes in `View`, `Budget` or `History`. Spill's safe file-creation hel
 
 Each one holds for every view, checked over scripted sessions:
 
-- [ ] Every `tool_use` has exactly one `tool_result` in the next message with the same id, and the reverse. No trim removes a block.
-- [ ] No compaction is decided while a `tool_use` lacks its `tool_result`: `view` runs only after every result of the step is in history.
-- [ ] The view starts with a user message, roles alternate, and the last message is the latest history message, unchanged.
-- [ ] The first history message's blocks are a byte-identical prefix of the view's first message.
-- [ ] The recent window is byte-identical to the history, except for thinking blocks dropped by the rule.
-- [ ] Between two compactions, each request is a prefix of the next (`next[..prev.len()] == prev`). *Changed in the implementation:* this was stated for views, but the session adds a call's reminders to the latest message after the view, so the latest message of one view is a prefix of that message in the next, and the requests are what extend each other.
-- [ ] Rendering from a reloaded history and log, as `--continue` builds them, gives the same bytes.
-- [ ] Thresholds:
+- [x] Every `tool_use` has exactly one `tool_result` in the next message with the same id, and the reverse. No trim removes a block.
+- [x] No compaction is decided while a `tool_use` lacks its `tool_result`: `view` runs only after every result of the step is in history.
+- [x] The view starts with a user message, roles alternate, and the last message is the latest history message, unchanged.
+- [x] The first history message's blocks are a byte-identical prefix of the view's first message.
+- [x] The recent window is byte-identical to the history, except for thinking blocks dropped by the rule.
+- [x] Between two compactions, each request is a prefix of the next (`next[..prev.len()] == prev`). *Changed in the implementation:* this was stated for views, but the session adds a call's reminders to the latest message after the view, so the latest message of one view is a prefix of that message in the next, and the requests are what extend each other.
+- [x] Rendering from a reloaded history and log, as `--continue` builds them, gives the same bytes.
+- [x] Thresholds:
   - no trim at or below `soft`;
   - no trim that frees less than `min_free`;
   - after a trim, the view is at or below `trim_to`, or the middle has no candidates left;
   - no summary at or below `hard`, except on overflow or `/compact`.
-- [ ] User text stays byte-identical, in place or in a `<user-messages>` block, after any number of compactions.
-- [ ] Outside the recent window, each tool in `superseded_tools` has at most one un-shortened call, the latest. The latest plan survives a summary verbatim.
-- [ ] No thinking block appears after the first edit of a compaction that it predates. Blocks written after the last compaction are all present.
-- [ ] Every stub's path exists and can be read with `read_file`, and the file holds the original text (or, for a spill file, the full output).
-- [ ] A summary's text never changes once written, and summaries appear in the order they were written.
-- [ ] A long scripted session never overflows under `staged`. Under `none` it ends with `ContextOverflow`, and `ch -p` exits 3.
-- [ ] An overflow compacts and retries at most once per step; a second overflow ends the turn.
-- [ ] An overflow retry adds no block to history: each reminder and note of the step is stored exactly once.
-- [ ] A log record with a missing event or a wrong hash is never applied, and neither is any record after it. A record the model answered after that no longer matches leads to a reset record.
-- [ ] A call with an input string that is an elision marker is refused; one whose input only mentions the marker runs.
+- [x] User text stays byte-identical, in place or in a `<user-messages>` block, after any number of compactions.
+- [x] Outside the recent window, each tool in `superseded_tools` has at most one un-shortened call, the latest. The latest plan survives a summary verbatim.
+- [x] No thinking block appears after the first edit of a compaction that it predates. Blocks written after the last compaction are all present.
+- [x] Every stub's path exists and can be read with `read_file`, and the file holds the original text (or, for a spill file, the full output).
+- [x] A summary's text never changes once written, and summaries appear in the order they were written.
+- [x] A long scripted session never overflows under `staged`. Under `none` it ends with `ContextOverflow`, and `ch -p` exits 3.
+- [x] An overflow compacts and retries at most once per step; a second overflow ends the turn.
+- [x] An overflow retry adds no block to history: each reminder and note of the step is stored exactly once.
+- [x] A log record with a missing event or a wrong hash is never applied, and neither is any record after it. A record the model answered after that no longer matches leads to a reset record.
+- [x] A call with an input string that is an elision marker is refused; one whose input only mentions the marker runs.
 
 ## Consequences
 
@@ -372,7 +372,7 @@ Each one holds for every view, checked over scripted sessions:
 
 ## Implementation notes
 
-Where the `context` plugin differs from the decision above, and why. Trimming is implemented; summaries are not yet.
+Where the `context` plugin differs from the decision above, and why. Trimming and summaries are both implemented.
 
 - **The record doesn't store the thinking range.** It is the span after the first edit (the first of the record's sorted edits) through `at_event`, both of which are stored.
 - **Records are bound to their history.** Event ids are reused after a crash, so a record also stores `at_blocks`, how many blocks `at_event` had when it was decided, and a hash of those blocks. Only those count, because the session adds the call's reminders to that message after the view. A record whose `at_event` doesn't match is not applied.
@@ -387,5 +387,13 @@ Where the `context` plugin differs from the decision above, and why. Trimming is
 - **The trim's projection counts the thinking it drops**, so a trim above `soft` stops near `trim_to`. Once there, it also takes every other candidate between its first and last edit: they cost no further cache rewrite, and later trims then rarely reach back before earlier ones.
 - **The `pre_tool` hook** also refuses an input string that contains a result stub or an input marker this session's trims wrote. A stub carries its path, so only a copy of it matches. An input marker carries only a size: a string that happens to contain the exact marker text this session wrote is refused too. That is a deliberate trade-off: a false refusal says why and the model can send the text again, while a copied marker would silently replace a file's contents. Text that only describes the markers, such as this ADR, isn't refused.
 - **`none` still renders the log**, so a session trimmed before keeps sending the same bytes; it makes no new trims. Disabling the plugin instead sends the raw history, which new accounts reject for such a session.
+- **The span a summary covers is left out of the view.** Summaries cover the history from the first reply after the task, each one starting where the previous one ended and ending just before a reply. The view is the first message, with the task's blocks and then one text block per summary, followed by everything after the last span. Roles alternate, because the first message is a user message and the next one is a reply, and every call keeps its result, because a span starts at a reply and ends with the message that answers it. Trims on the span stop mattering, and later trims only edit what comes after it.
+- **A summary record holds its span (first and last event), its number, what it covers, the model's text, the copied user text and latest calls, and the model.** The block is rendered from these, so it is the same after a restart. Like a trim, it is bound to `at_event`; its span is not hashed, since its contents aren't sent, but it must follow the earlier summaries and end before a reply, or the record isn't applied.
+- **Each summary is one text block** with the three parts in the order the decision shows. Closing tags in copied or generated text become `<\/context-summary>`, `<\/user-messages>` and `<\/latest-call>`. A step is a model reply, counted within its turn: a span "covers" `turn 1, steps 41–163`, or `turn 1 step 41 to turn 2 step 3` across turns, and a user message is labelled `[turn T, step S]`, with S the replies before it in its turn (0 for the turn's prompt).
+- **The prompt is used as written.** When the agent's own model replays its request, it also sees the recent window, which the summary doesn't replace; the prompt still asks for the messages since the last summary, which is close enough, and changing it would change what the cache holds.
+- **A separate summarizer's request** has no system prompt, no tools and no thinking budget: one user message with the first message (the task and earlier summaries) and the span as a transcript, then the prompt.
+- **`/compact` and an overflow summarize all but the last `min_recent_steps` steps**, without the recent window's token minimum. Above `hard`, the usual recent window applies.
+- **A merge** sends the two oldest summaries' blocks and the same prompt, with an instruction to merge them, to the agent's model (without replaying its request: the input is small) or to `[model.summarizer]`. The merged summary keeps the older one's number, covers both spans, and keeps both summaries' copied user text and the newer latest call of each tool; its record says it `merges` two. A merge is at most one per summary, and failing one only warns.
+- **A failed summary** (an error, a refusal, or no text) warns and leaves the view as it was, trimmed or not; a cancelled one writes nothing and doesn't warn. Any `tool_use` in the reply is ignored.
 - **`/compact` under `elide`** trims the middle with the recent window cut to `min_recent_steps`, as for a summary, and ignores the instructions, which are for summaries.
-- **Until summaries are written**, `elide` is the default, and `summarize` and `staged` act as `elide`, with a warning at startup. `hard`, `summary_max_words` and `max_summary_share` are checked now and take effect then.
+- **`staged` is the default.** On overflow it trims every candidate and then summarizes, and the kernel retries if either changed something; `summarize` only summarizes.

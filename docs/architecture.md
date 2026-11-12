@@ -25,7 +25,7 @@ flowchart TB
 
     subgraph PL["Built-in plugins, called by the turn loop in this order"]
         direction LR
-        prompts["Prompt contributors<br/>prompt-base<br/>project-instructions"] --> ctx["Context strategy<br/>context (elide)"] --> prov["Model providers<br/>anthropic · openai<br/>scripted"] --> hooks["Hooks<br/>safety"] --> appr["Approvers<br/>repl · auto-deny<br/>auto-allow"] --> tools["Tools<br/>tools-fs · bash<br/>web_fetch"]
+        prompts["Prompt contributors<br/>prompt-base<br/>project-instructions"] --> ctx["Context strategy<br/>context (staged)"] --> prov["Model providers<br/>anthropic · openai<br/>scripted"] --> hooks["Hooks<br/>safety"] --> appr["Approvers<br/>repl · auto-deny<br/>auto-allow"] --> tools["Tools<br/>tools-fs · bash<br/>web_fetch"]
     end
 
     subgraph OTHER["Also built in"]
@@ -160,7 +160,7 @@ enable  = ["tools-fs", "tool-bash", "tool-web-fetch", "planning", "context", "st
 disable = []
 
 [plugins.context]
-strategy = "elide"              # none | elide (summarize and staged act as elide for now)
+strategy = "staged"             # none | elide | summarize | staged
 soft = 0.60
 hard = 0.85
 recent = 0.30
@@ -259,14 +259,14 @@ These are starting values. Every one is a config setting, and the eval runner ([
 | `none` | – | – |
 | `elide` | ✓ | – |
 | `summarize` | – | ✓ |
-| `staged` (the default once summaries land) | ✓ first | ✓ if still over the hard threshold |
+| `staged` (default) | ✓ first | ✓ if still over the hard threshold |
 
-The design is in [ADR 0004](adr/0004-context-management.md). Summaries aren't written yet: until they are, `elide` is the default, and `summarize` and `staged` act as `elide`, with a warning. For a session that was trimmed, turn this off with `strategy = "none"`, which keeps rendering the earlier trims; disabling the plugin sends the raw history, which new accounts reject.
+The design is in [ADR 0004](adr/0004-context-management.md), with notes on where the implementation differs. For a session that was trimmed or summarized, turn this off with `strategy = "none"`, which keeps rendering the earlier compactions; disabling the plugin sends the raw history, which new accounts reject.
 
 - The history is never changed. The view is computed from it and a small, append-only compaction log, so between compactions each request extends the last one and the prompt cache and signed thinking stay valid.
 - The view is split into a **preamble** (the first user message, whose blocks are never edited), a **recent window** (verbatim) and the **middle**.
 - Above `soft`, the middle is trimmed in one large batch: superseded `update_plan` inputs first, then long tool results, long tool inputs and old reminders. A trim rewrites the cache from its first edit, so it is rare and large, not a little on every step. A result's stub names a file the model can read back with `read_file` or `grep_text`: spill's file, or a copy in `<session dir>/context/elided/`.
-- Above `hard`, the middle is summarized by the agent's own model, replaying its cached prefix; a separate `[model.summarizer]` gets it as a transcript instead. `/compact [instructions]` and an overflow trim under `elide` and summarize under `summarize` and `staged`. Each summary is **appended** to the first user message as a new `<context-summary>` block, never rewritten. Headings: `Goal / Files touched / Done / Pending / Errors & fixes / Current state / Next step`, keeping exact paths, function names and error strings. The user's messages and the latest plan are copied next to it word for word.
+- Above `hard`, the middle is summarized by the agent's own model, replaying its cached prefix; a separate `[model.summarizer]` gets it as a transcript instead. `/compact [instructions]` and an overflow trim under `elide` and summarize under `summarize` and `staged`. Each summary is **appended** to the first user message as a new `<context-summary>` block, never rewritten, and the steps it covers are left out of the view; the two oldest are merged past `max_summary_share`. Headings: `Goal / Files touched / Done / Pending / Errors & fixes / Current state / Next step`, keeping exact paths, function names and error strings. The user's messages and the latest plan are copied next to it word for word.
 - A compaction drops the signed thinking blocks it invalidates, the same way every time.
 - On overflow before any output, the session compacts once and sends the step again with only the view recomputed. A second overflow, or a compaction that changes nothing, ends the turn.
 - No recall tool: the existing file tools read the elided output.
