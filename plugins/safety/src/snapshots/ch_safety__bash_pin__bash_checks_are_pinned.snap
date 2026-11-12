@@ -786,17 +786,17 @@ EOF` is on the built-in deny list (sudo). Running commands as another user (sudo
   too_deep=false denied=None
   policy: allow
 "cargo check"
-  top raw="cargo check" words=["cargo", "check"] op=None sub=false writes=false program="cargo" assignments=[] normalized="cargo check" read_only=true key="bash:cargo check *"
+  top raw="cargo check" words=["cargo", "check"] op=None sub=false writes=false program="cargo" assignments=[] normalized="cargo check" read_only=false key="bash:cargo check *"
   too_deep=false denied=None
-  policy: allow
+  policy: ask Some("bash:cargo check *"): `cargo check` is not on the read-only allowlist
 "cargo build"
   top raw="cargo build" words=["cargo", "build"] op=None sub=false writes=false program="cargo" assignments=[] normalized="cargo build" read_only=false key="bash:cargo build *"
   too_deep=false denied=None
   policy: ask Some("bash:cargo build *"): `cargo build` is not on the read-only allowlist
 "cargo --version"
-  top raw="cargo --version" words=["cargo", "--version"] op=None sub=false writes=false program="cargo" assignments=[] normalized="cargo --version" read_only=true key="bash:cargo *"
+  top raw="cargo --version" words=["cargo", "--version"] op=None sub=false writes=false program="cargo" assignments=[] normalized="cargo --version" read_only=false key="bash:cargo *"
   too_deep=false denied=None
-  policy: allow
+  policy: ask Some("bash:cargo *"): `cargo --version` is not on the read-only allowlist
 "cat a.txt | grep x | wc -l"
   top raw="cat a.txt" words=["cat", "a.txt"] op=None sub=false writes=false program="cat" assignments=[] normalized="cat a.txt" read_only=true key="bash:cat a.txt *"
   top raw="grep x" words=["grep", "x"] op=Some(Pipe) sub=false writes=false program="grep" assignments=[] normalized="grep x" read_only=true key="bash:grep x *"
