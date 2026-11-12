@@ -7,7 +7,7 @@ use ch_kernel::{Cx, Hook, HookDecision, HookEvent, HookPoint};
 use serde_json::Value;
 
 use crate::strategy::Shared;
-use crate::stub::is_marker;
+use crate::stub::{INPUT_MARKER_START, RESULT_PREFIX, is_marker};
 
 /// Why such a call is refused.
 pub const REFUSED: &str = "This call's input holds a placeholder for text that was removed from an \
@@ -18,6 +18,12 @@ pub const REFUSED: &str = "This call's input holds a placeholder for text that w
 /// or marker this session's trims wrote: the model copied a shortened input or output
 /// instead of the text it stands for. A string that only mentions the marker's wording,
 /// such as this source file, is not refused.
+///
+/// A result stub carries its path, so only a real copy matches it. An input marker
+/// carries only a size: a string that happens to contain the exact marker text this
+/// session wrote (the same wording and the same number of characters) is refused too.
+/// That is a deliberate trade-off: a false refusal tells the model why, and it can send
+/// the text again, while a copied marker would silently replace a file's contents.
 pub struct MarkerHook {
     shared: Arc<Shared>,
 }
@@ -44,8 +50,12 @@ impl Hook for MarkerHook {
         };
         let guard = self.shared.lock();
         let written = Shared::of(&guard, &cx.session_id).map(|s| &s.written);
+        // Every written text starts with one of the prefixes, so most strings are
+        // cleared without scanning the set.
         let copied = |s: &str| {
-            is_marker(s) || written.is_some_and(|w| w.iter().any(|t| s.contains(t.as_str())))
+            is_marker(s)
+                || ((s.contains(RESULT_PREFIX) || s.contains(INPUT_MARKER_START))
+                    && written.is_some_and(|w| w.iter().any(|t| s.contains(t.as_str()))))
         };
         if any_string(&call.input, &copied) {
             HookDecision::deny(REFUSED)

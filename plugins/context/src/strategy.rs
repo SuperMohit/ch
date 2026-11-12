@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -16,7 +17,7 @@ use serde_json::json;
 
 use crate::config::{ContextConfig, Strategy};
 use crate::hook::MarkerHook;
-use crate::log::{self, Edit, EditKind, Kind, Pos, Record, Replacement, Trigger};
+use crate::log::{self, Edit, EditKind, Kind, Lines, Pos, Record, Replacement, Trigger};
 use crate::plan::{self, Files, Original};
 use crate::render::{is_thinking, render};
 use crate::stub::{self, Saved};
@@ -42,6 +43,8 @@ pub(crate) struct SessionLog {
     records: Vec<Record>,
     /// Result stubs and input markers in the records, which a tool call must not copy.
     pub(crate) written: HashSet<String>,
+    /// Why no more trims are made in this session: its log may hold what wasn't sent.
+    frozen: Option<String>,
 }
 
 impl Shared {
@@ -69,7 +72,7 @@ impl SessionLog {
 }
 
 /// The texts `record` put in the view that only it writes: result stubs (with their
-/// paths and sizes) and input markers.
+/// paths and sizes) and input markers (with their sizes).
 fn written_by(record: &Record) -> Vec<String> {
     record
         .edits
@@ -80,6 +83,12 @@ fn written_by(record: &Record) -> Vec<String> {
             _ => Vec::new(),
         })
         .collect()
+}
+
+/// A session's records as loaded, and whether trims must stop.
+struct Loaded {
+    records: Vec<Record>,
+    frozen: Option<String>,
 }
 
 /// A trim that has been decided but not saved.
@@ -99,6 +108,17 @@ struct Trimmed {
     after: u64,
 }
 
+/// What came of trying to trim.
+enum Trim {
+    Made(Trimmed),
+    /// Nothing to trim, or not enough.
+    Nothing,
+    /// Decided, but it couldn't be saved, so it wasn't made.
+    NotSaved(String),
+    /// Trims are off for this session.
+    Frozen(String),
+}
+
 impl Context {
     pub fn new(config: ContextConfig) -> Self {
         Self {
@@ -112,25 +132,42 @@ impl Context {
         MarkerHook::new(self.shared.clone())
     }
 
-    /// The records of `ccx`'s session. They are read from its directory, and checked
-    /// against `history`, when the session changes (`/clear`, `/resume`, a new process).
-    fn records(&self, history: &History, ccx: &ContextCx) -> Vec<Record> {
-        let mut slot = self.shared.lock();
+    /// The records of `ccx`'s session, and why trims are off if they are. They are read
+    /// from its directory, and checked against `history`, when the session changes
+    /// (`/clear`, `/resume`, a new process); the lock isn't held while reading.
+    async fn records(&self, history: &History, ccx: &ContextCx) -> Loaded {
         let id = &*ccx.cx.session_id;
+        let loaded = |slot: &MutexGuard<'_, Option<SessionLog>>| {
+            Shared::of(slot, id).map(|s| Loaded {
+                records: s.records.clone(),
+                frozen: s.frozen.clone(),
+            })
+        };
+        if let Some(l) = loaded(&self.shared.lock()) {
+            return l;
+        }
+        let fresh = load(history, ccx).await;
+        let mut slot = self.shared.lock();
         if Shared::of(&slot, id).is_none() {
             let mut session = SessionLog {
                 id: id.to_string(),
                 records: Vec::new(),
                 written: HashSet::new(),
+                frozen: fresh.frozen,
             };
-            for record in load(history, ccx) {
+            for record in fresh.records {
                 session.add(record);
             }
             *slot = Some(session);
         }
-        Shared::of(&slot, id)
-            .map(|s| s.records.clone())
-            .unwrap_or_default()
+        loaded(&slot).expect("just loaded")
+    }
+
+    fn freeze(&self, ccx: &ContextCx, why: String) {
+        warn(ccx, format!("no more trims in this session: {why}"));
+        if let Some(s) = (self.shared.lock().as_mut()).filter(|s| s.id == *ccx.cx.session_id) {
+            s.frozen = Some(why);
+        }
     }
 
     /// Plans a trim of `current`; `None` when there is nothing to trim or, above `soft`,
@@ -160,7 +197,7 @@ impl Context {
         if plan.edits.is_empty() {
             return None;
         }
-        let record = Record::new(Kind::Elided, trigger, history, plan.edits)?;
+        let record = Record::elided(trigger, history, plan.edits)?;
         let before = budget.measure(current);
         let mut all = records.to_vec();
         all.push(record.clone());
@@ -173,8 +210,8 @@ impl Context {
         Some(Decision {
             record,
             originals: plan.originals,
-            tools: files.tools,
             before,
+            tools: files.tools,
         })
     }
 
@@ -189,7 +226,7 @@ impl Context {
         current: &[Message],
         budget: &Budget,
         ccx: &ContextCx,
-    ) -> Option<Trimmed> {
+    ) -> Trim {
         let Decision {
             mut record,
             originals,
@@ -213,28 +250,34 @@ impl Context {
         }
         if let Some(dir) = session_dir {
             let (dir, line) = (dir.to_path_buf(), record.clone());
-            let appended = tokio::task::spawn_blocking(move || log::append(&dir, &line)).await;
-            if let Err(e) = appended.map_err(std::io::Error::other).and_then(|r| r) {
-                warn(
-                    ccx,
-                    format!("couldn't save a trim to the compaction log, so it wasn't made: {e}"),
-                );
-                return None;
+            let appended = tokio::task::spawn_blocking(move || log::append(&dir, &line))
+                .await
+                .unwrap_or_else(|e| {
+                    Err(log::AppendFailed {
+                        error: io::Error::other(e),
+                        intact: false,
+                    })
+                });
+            if let Err(failed) = appended {
+                let why = format!("couldn't save it to the compaction log: {}", failed.error);
+                warn(ccx, format!("a trim wasn't made: {why}"));
+                if !failed.intact {
+                    self.freeze(
+                        ccx,
+                        "the compaction log may keep part of a trim that wasn't sent".into(),
+                    );
+                }
+                return Trim::NotSaved(why);
             }
         }
-        if let Some(s) = self
-            .shared
-            .lock()
-            .as_mut()
-            .filter(|s| s.id == *ccx.cx.session_id)
-        {
+        if let Some(s) = (self.shared.lock().as_mut()).filter(|s| s.id == *ccx.cx.session_id) {
             s.add(record.clone());
         }
         records.push(record.clone());
         let view = render(history, &records);
         let after = budget.measure(&view);
         report(ccx, &record, current, &view, before, after);
-        Some(Trimmed {
+        Trim::Made(Trimmed {
             view,
             record,
             before,
@@ -245,19 +288,27 @@ impl Context {
     async fn trim(
         &self,
         history: &History,
-        records: Vec<Record>,
+        loaded: Loaded,
         current: &[Message],
         budget: &Budget,
         ccx: &ContextCx,
         trigger: Trigger,
-    ) -> Option<Trimmed> {
+    ) -> Trim {
+        if let Some(why) = loaded.frozen {
+            return Trim::Frozen(why);
+        }
         let files = Files {
             base: ccx.cx.session_dir.as_deref().and_then(|d| anchor(d)),
             tools: ReadTools::of(&ccx.cx),
         };
-        let decision = self.decide(history, &records, current, budget, trigger, &files)?;
-        self.commit(history, records, decision, current, budget, ccx)
-            .await
+        let records = loaded.records;
+        match self.decide(history, &records, current, budget, trigger, &files) {
+            Some(decision) => {
+                self.commit(history, records, decision, current, budget, ccx)
+                    .await
+            }
+            None => Trim::Nothing,
+        }
     }
 }
 
@@ -274,13 +325,13 @@ impl ContextStrategy for Context {
         cx: &ContextCx,
     ) -> anyhow::Result<View> {
         // Under `none` too: a session trimmed earlier must keep rendering the same bytes.
-        let records = self.records(history, cx);
-        let current = render(history, &records);
+        let loaded = self.records(history, cx).await;
+        let current = render(history, &loaded.records);
         let over = budget.measure(&current) as f64 > self.config.soft * budget.usable() as f64;
         if self.config.strategy == Strategy::Elide
             && over
-            && let Some(trimmed) = self
-                .trim(history, records, &current, &budget, cx, Trigger::Soft)
+            && let Trim::Made(trimmed) = self
+                .trim(history, loaded, &current, &budget, cx, Trigger::Soft)
                 .await
         {
             return Ok(View {
@@ -303,29 +354,32 @@ impl ContextStrategy for Context {
                 message: "context management is off (plugins.context.strategy = \"none\")".into(),
             });
         }
-        let records = self.records(history, cx);
-        let current = render(history, &records);
+        let loaded = self.records(history, cx).await;
+        let current = render(history, &loaded.records);
         let trigger = match request.reason {
             CompactReason::Manual => Trigger::Manual,
             CompactReason::Overflow => Trigger::Overflow,
         };
-        Ok(
-            match self
-                .trim(history, records, &current, &budget, cx, trigger)
-                .await
-            {
-                Some(t) => CompactOutcome {
+        let message = match self
+            .trim(history, loaded, &current, &budget, cx, trigger)
+            .await
+        {
+            Trim::Made(t) => {
+                return Ok(CompactOutcome {
                     changed: true,
                     message: describe(&t),
-                },
-                None => CompactOutcome {
-                    changed: false,
-                    message: "nothing to trim: no tool result, tool input or reminder before \
+                });
+            }
+            Trim::Nothing => "nothing to trim: no tool result, tool input or reminder before \
                               the last steps is long enough"
-                        .into(),
-                },
-            },
-        )
+                .into(),
+            Trim::NotSaved(why) => format!("the trim couldn't be saved, so it wasn't made: {why}"),
+            Trim::Frozen(why) => format!("trims are off for this session: {why}"),
+        };
+        Ok(CompactOutcome {
+            changed: false,
+            message,
+        })
     }
 }
 
@@ -340,47 +394,76 @@ fn anchor(dir: &Path) -> Option<PathBuf> {
 
 /// The session's records, applied up to the first one that doesn't match `history`.
 ///
-/// - A record decided on events that the history doesn't have (it was saved before a
-///   crash, after the log), or on events the model never answered after, affects no
-///   reply in the history: it and the records after it are dropped from the log.
-/// - Any other record that doesn't match means a view that was sent can't be rendered
-///   again. The records from it on are dropped and a reset record takes their place:
-///   every thinking block so far is left out, which the API accepts, and the log keeps
-///   that so later requests repeat it.
-fn load(history: &History, ccx: &ContextCx) -> Vec<Record> {
-    let Some(dir) = ccx.cx.session_dir.as_deref() else {
-        return Vec::new();
+/// - A line an append left unfinished, or a trim decided on events the history doesn't
+///   have or that the model never answered after (the log is ahead of a save that a
+///   crash prevented), affects no reply in the history: it and the records after it are
+///   dropped from the log.
+/// - Any other record that doesn't match, or a reset that doesn't, means a view that was
+///   sent can't be rendered again. The records from it on are dropped and a fresh reset
+///   takes their place: every thinking block so far is left out, which the API accepts,
+///   and the log keeps that so later requests repeat it.
+///
+/// When the log can't be rewritten, trims stop for the session: it may still hold
+/// records that weren't applied.
+async fn load(history: &History, ccx: &ContextCx) -> Loaded {
+    let mut loaded = Loaded {
+        records: Vec::new(),
+        frozen: None,
     };
-    let (lines, unreadable) = match log::load(dir) {
+    let Some(dir) = ccx.cx.session_dir.as_deref().cloned() else {
+        return loaded;
+    };
+    let read = {
+        let dir = dir.clone();
+        tokio::task::spawn_blocking(move || log::load(&dir))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+    };
+    let (Lines { entries, torn }, unreadable) = match read {
         Ok(lines) => (lines, false),
-        Err(why) => (vec![Err(why)], true),
+        Err(why) => (
+            Lines {
+                entries: vec![Err(why)],
+                torn: false,
+            },
+            true,
+        ),
     };
-    let count = lines.len();
+    let count = entries.len();
+    let later_reset = |from: usize| {
+        entries[from..]
+            .iter()
+            .any(|e| e.as_ref().is_ok_and(|r| r.kind == Kind::Reset))
+    };
     let mut taken = HashSet::new();
-    let mut records = Vec::new();
     let mut cut = None;
-    for (i, line) in lines.into_iter().enumerate() {
-        let (record, why) = match line {
-            Err(why) => (None, why),
+    for (i, entry) in entries.iter().enumerate() {
+        if torn && i + 1 == count {
+            cut = Some((i, true, "its last line is unfinished".to_string()));
+            break;
+        }
+        let why = match entry {
+            Err(why) => why.clone(),
             Ok(record) => match record.check(history, &taken) {
                 Ok(()) => {
                     taken.extend(record.edits.iter().map(Edit::pos));
-                    records.push(record);
+                    loaded.records.push(record.clone());
                     continue;
                 }
-                Err(why) => (Some(record), why),
+                Err(why) => {
+                    let harmless = record.kind != Kind::Reset
+                        && !later_reset(i + 1)
+                        && !log::answered_after(history, record.at_event);
+                    cut = Some((i, harmless && !unreadable, why));
+                    break;
+                }
             },
         };
-        cut = Some((i, record, why));
+        cut = Some((i, false, why));
         break;
     }
-    let Some((i, record, why)) = cut else {
-        return records;
-    };
-    // A line that doesn't parse is harmless only as the torn end of the log.
-    let harmless = match &record {
-        Some(record) => !log::answered_after(history, record.at_event),
-        None => i + 1 == count && !unreadable,
+    let Some((i, harmless, why)) = cut else {
+        return loaded;
     };
     if harmless {
         warn(
@@ -391,7 +474,7 @@ fn load(history: &History, ccx: &ContextCx) -> Vec<Record> {
                 i + 1
             ),
         );
-    } else if let Some(reset) = Record::new(Kind::Reset, Trigger::Recovery, history, Vec::new()) {
+    } else {
         warn(
             ccx,
             format!(
@@ -400,16 +483,23 @@ fn load(history: &History, ccx: &ContextCx) -> Vec<Record> {
                 i + 1
             ),
         );
-        records.push(reset);
+        loaded.records.extend(Record::reset(history));
     }
-    if let Err(e) = log::rewrite(dir, &records) {
-        warn(ccx, format!("couldn't rewrite the compaction log: {e}"));
+    let records = loaded.records.clone();
+    let rewritten = tokio::task::spawn_blocking(move || log::rewrite(&dir, &records))
+        .await
+        .unwrap_or_else(|e| Err(io::Error::other(e)));
+    if let Err(e) = rewritten {
+        let why = format!("couldn't rewrite the compaction log: {e}");
+        warn(ccx, format!("no more trims in this session: {why}"));
+        loaded.frozen = Some(why);
     }
-    records
+    loaded
 }
 
 /// Saves the originals of trimmed results off the async runtime: they can be large.
-/// Returns those that couldn't be saved, and why.
+/// The copies and their directories are made durable before the record that names them
+/// is written. Returns those that couldn't be saved, and why.
 async fn save_originals(session_dir: PathBuf, originals: Vec<Original>) -> Vec<(Original, String)> {
     if originals.is_empty() {
         return Vec::new();
@@ -423,15 +513,27 @@ async fn save_originals(session_dir: PathBuf, originals: Vec<Original>) -> Vec<(
                 return originals.into_iter().map(|o| (o, why.clone())).collect();
             }
         };
-        originals
-            .into_iter()
-            .filter_map(|o| {
-                let path = dir.join(o.path.file_name()?);
-                save_original(&path, &o.content)
-                    .err()
-                    .map(|e| (o, e.to_string()))
-            })
-            .collect()
+        let mut failed: Vec<(Original, String)> = Vec::new();
+        for o in originals {
+            let Some(name) = o.path.file_name() else {
+                continue;
+            };
+            if let Err(e) = save_original(&dir.join(name), &o.content, &|f, b| f.write_all(b)) {
+                failed.push((o, e.to_string()));
+            }
+        }
+        // `elided/`, `context/` and the session directory may all be new.
+        let synced = log::sync_dir(&dir)
+            .and_then(|()| dir.parent().map_or(Ok(()), log::sync_dir))
+            .and_then(|()| {
+                dir.parent()
+                    .and_then(Path::parent)
+                    .map_or(Ok(()), log::sync_dir)
+            });
+        if let Err(e) = synced {
+            tracing::warn!("syncing {}: {e}", dir.display());
+        }
+        failed
     });
     match task.await {
         Ok(failed) => failed,
@@ -439,16 +541,22 @@ async fn save_originals(session_dir: PathBuf, originals: Vec<Original>) -> Vec<(
     }
 }
 
-/// Writes a new file readable only by the user. One already there (from a trim that
-/// crashed before its record) is kept if it is private and holds the same text.
-fn save_original(path: &Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
+/// Writes a new file readable only by the user, made durable; a failed write leaves no
+/// file. One already there (from a trim that crashed before its record) is kept if it
+/// is private and holds the same text.
+fn save_original(
+    path: &Path,
+    content: &str,
+    write: &dyn Fn(&mut fs::File, &[u8]) -> io::Result<()>,
+) -> io::Result<()> {
     match create_private(path) {
-        Ok(mut file) => file.write_all(content.as_bytes()).inspect_err(|_| {
-            drop(file);
-            let _ = fs::remove_file(path);
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+        Ok(mut file) => write(&mut file, content.as_bytes())
+            .and_then(|()| file.sync_all())
+            .inspect_err(|_| {
+                drop(file);
+                let _ = fs::remove_file(path);
+            }),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
             let meta = fs::symlink_metadata(path)?;
             #[cfg(unix)]
             let private = {
@@ -460,7 +568,7 @@ fn save_original(path: &Path, content: &str) -> std::io::Result<()> {
             if meta.is_file() && private && fs::read(path)? == content.as_bytes() {
                 Ok(())
             } else {
-                Err(std::io::Error::other("a different file is already there"))
+                Err(io::Error::other("a different file is already there"))
             }
         }
         Err(e) => Err(e),
@@ -537,4 +645,37 @@ fn describe(t: &Trimmed) -> String {
 fn warn(ccx: &ContextCx, message: String) {
     tracing::warn!("{message}");
     ccx.cx.emit(AgentEvent::Warning { message });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_copy_that_fails_part_way_leaves_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("3-0.txt");
+        let half = |f: &mut fs::File, bytes: &[u8]| {
+            f.write_all(&bytes[..bytes.len() / 2])?;
+            Err(io::Error::other("disk full"))
+        };
+        assert!(save_original(&path, "a long result", &half).is_err());
+        assert!(!path.exists());
+        save_original(&path, "a long result", &|f, b| f.write_all(b)).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a long result");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_left_behind_is_reused_only_if_it_is_private_and_the_same() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("3-0.txt");
+        let write = |f: &mut fs::File, b: &[u8]| f.write_all(b);
+        save_original(&path, "text", &write).unwrap();
+        assert!(save_original(&path, "text", &write).is_ok());
+        assert!(save_original(&path, "other", &write).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(save_original(&path, "text", &write).is_err());
+    }
 }

@@ -942,7 +942,10 @@ async fn a_trim_whose_record_can_t_be_saved_isn_t_made() {
     let v = view(&ctx, &c.history, 25_000, &ccx).await;
     assert_eq!(v, c.history.messages(), "the view goes out unchanged");
     let w = warnings(&mut rx);
-    assert!(w[0].contains("so it wasn't made"), "{w:#?}");
+    assert!(w[0].contains("a trim wasn't made"), "{w:#?}");
+    let out = compact(&ctx, &c.history, 25_000, &ccx, CompactReason::Manual).await;
+    assert!(!out.changed);
+    assert!(out.message.contains("couldn't be saved"), "{}", out.message);
     // Nothing is half-applied: the next view decides again.
     std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
     let v = view(&ctx, &c.history, 25_000, &ccx).await;
@@ -1029,4 +1032,134 @@ async fn a_call_that_copies_a_stub_written_in_this_session_is_refused() {
     assert_eq!(hook.on(&copied, &other.cx).await, HookDecision::Continue);
     let prose = call("A stub looks like `[Output elided to save context: 3 lines, …]`.".into());
     assert_eq!(hook.on(&prose, &ccx.cx).await, HookDecision::Continue);
+}
+
+#[tokio::test]
+async fn a_reset_survives_a_crash_before_the_session_is_saved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (c, _, log) = trimmed_twice(tmp.path()).await;
+    let path = tmp.path().join("s1/context/log.jsonl");
+    let ccx = ccx(Some(tmp.path()), FILE_TOOLS);
+    let mut lines: Vec<Value> = log
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    lines[0]["edits"][0]["hash"] = json!("0000");
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    std::fs::write(&path, text).unwrap();
+
+    // A new process starts a turn: the damaged log is replaced by a reset.
+    let mut first = c.history.clone();
+    first.push(2, Message::user("go on"));
+    let v = view(&elide(), &first, 1_000_000, &ccx).await;
+    assert_eq!(thinking_left(&v), 0);
+    assert_eq!(records(&tmp.path().join("s1"))[0]["kind"], "reset");
+
+    // It stops before the turn ends, so that prompt is never saved, and the next
+    // process reuses its event id for another one. The reset still applies.
+    let mut second = c.history.clone();
+    second.push(2, Message::user("something else"));
+    let mut rx = ccx.cx.events.subscribe();
+    let v = view(&elide(), &second, 1_000_000, &ccx).await;
+    assert_eq!(thinking_left(&v), 0);
+    assert!(warnings(&mut rx).is_empty());
+
+    // A reset that doesn't match is never dropped as harmless: a fresh one replaces it.
+    let last = second.last().unwrap().id;
+    let stale = json!({"kind": "reset", "trigger": "recovery", "at_event": last,
+                       "at_blocks": 1, "at_hash": "0000"});
+    std::fs::write(&path, format!("{stale}\n")).unwrap();
+    let v = view(&elide(), &second, 1_000_000, &ccx).await;
+    assert_eq!(thinking_left(&v), 0);
+    let after = records(&tmp.path().join("s1"));
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0]["kind"], "reset");
+    assert_ne!(after[0]["at_hash"], "0000");
+
+    // Nor is a record that a reset follows, though the model never answered after it.
+    let mut ahead = lines[1].clone();
+    ahead["at_event"] = json!(last);
+    ahead["at_hash"] = json!("0000");
+    std::fs::write(&path, format!("{ahead}\n{}\n", after[0])).unwrap();
+    let v = view(&elide(), &second, 1_000_000, &ccx).await;
+    assert_eq!(thinking_left(&v), 0);
+}
+
+#[tokio::test]
+async fn a_trim_still_matches_after_the_call_s_reminders_are_added() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut c = long_session();
+    let ccx = ccx(Some(tmp.path()), FILE_TOOLS);
+    let trimmed = view(&elide(), &c.history, 25_000, &ccx).await;
+    // The session adds the call's reminders to the newest message after the view, and
+    // the model answers.
+    c.history
+        .append_to_last_user(1, vec![reminder("remember the plan")]);
+    c.bash(100);
+    let mut rx = ccx.cx.events.subscribe();
+    let v = view(&elide(), &c.history, 1_000_000, &ccx).await;
+    assert!(warnings(&mut rx).is_empty());
+    let n = trimmed.len() - 1;
+    assert_eq!(v[..n], trimmed[..n]);
+    assert_eq!(records(&tmp.path().join("s1"))[0]["kind"], "elided");
+    assert!(v[v.len() - 2].content.iter().any(is_thinking));
+}
+
+#[tokio::test]
+async fn once_down_to_trim_to_a_trim_takes_what_lies_between_its_edits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let c = long_session();
+    let ccx = ccx(Some(tmp.path()), FILE_TOOLS);
+    let v = view(&elide(), &c.history, 25_000, &ccx).await;
+    let log = records(&tmp.path().join("s1"));
+    let edits = log[0]["edits"].as_array().unwrap();
+    let pos = |e: &Value| {
+        (
+            e["event"].as_u64().unwrap(),
+            e["block"].as_u64().unwrap() as usize,
+        )
+    };
+    let (first, last) = (pos(&edits[0]), pos(edits.last().unwrap()));
+    // Reminders come after results in priority, so the results alone reached `trim_to`;
+    // the reminders between the first and last result went too.
+    let mut between = 0;
+    for (event, message) in c.history.events().iter().zip(&v) {
+        for (b, block) in event.message.content.iter().enumerate() {
+            let at = (event.id, b);
+            if let ContentBlock::Text { text } = block
+                && text.starts_with("<system-reminder>")
+                && first < at
+                && at < last
+            {
+                assert_eq!(message.content[b], ContentBlock::text("[reminder elided]"));
+                between += 1;
+            }
+        }
+    }
+    assert!(between > 3, "{between}");
+}
+
+#[tokio::test]
+async fn when_the_log_can_t_be_rewritten_no_more_trims_are_made() {
+    let tmp = tempfile::tempdir().unwrap();
+    let c = long_session();
+    let ccx = ccx(Some(tmp.path()), FILE_TOOLS);
+    let context = tmp.path().join("s1/context");
+    std::fs::create_dir_all(&context).unwrap();
+    // A torn line to drop, and something in the way of the new file.
+    std::fs::write(context.join("log.jsonl"), "{\"kind\":\"eli").unwrap();
+    std::fs::create_dir(context.join("log.jsonl.tmp")).unwrap();
+    let ctx = elide();
+    let mut rx = ccx.cx.events.subscribe();
+    let v = view(&ctx, &c.history, 25_000, &ccx).await;
+    assert_eq!(v, c.history.messages(), "no trim, though over `soft`");
+    let w = warnings(&mut rx);
+    assert!(
+        w.iter()
+            .any(|m| m.contains("no more trims in this session")),
+        "{w:#?}"
+    );
+    let out = compact(&ctx, &c.history, 25_000, &ccx, CompactReason::Manual).await;
+    assert!(!out.changed);
+    assert!(out.message.contains("trims are off"), "{}", out.message);
 }

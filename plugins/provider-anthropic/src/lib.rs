@@ -220,8 +220,8 @@ impl ModelProvider for AnthropicProvider {
     ) -> Result<ModelStream, ModelError> {
         let key = self.api_key()?;
         let opts = self.cfg.body_options();
-        let betas = opts.betas(&request.model);
         let body = build_body(&request, &opts);
+        let betas = opts.betas(&request.model, &body);
         let base = Duration::from_millis(self.cfg.retry_base_ms);
         let mut retries = 0;
         loop {

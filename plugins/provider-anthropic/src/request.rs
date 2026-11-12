@@ -31,12 +31,13 @@ impl BodyOptions {
     }
 
     /// The betas a request for `model` needs.
-    pub fn betas(&self, model: &str) -> Vec<&'static str> {
+    /// The betas `body`, a request for `model`, needs.
+    pub fn betas(&self, model: &str, body: &Value) -> Vec<&'static str> {
         let mut betas = Vec::new();
         if self.uses_fallbacks(model) {
             betas.push(crate::FALLBACK_BETA);
         }
-        if !self.prefix_mismatch_behavior.is_empty() {
+        if body.pointer("/thinking/block_binding").is_some() {
             betas.push(crate::BINDING_BETA);
         }
         betas
@@ -65,7 +66,12 @@ pub fn build_body(req: &ModelRequest, opts: &BodyOptions) -> Value {
         body.insert("tools".into(), Value::Array(tools));
     }
 
-    let thinking = thinking(req, &caps, opts);
+    let mut thinking = thinking(req, &caps, opts);
+    // The binding control goes on the thinking config; a model that always thinks gets
+    // its default one to carry it.
+    if thinking.is_none() && caps.always_thinks && !opts.prefix_mismatch_behavior.is_empty() {
+        thinking = Some(json!({ "type": "adaptive" }));
+    }
     let thinking_on = thinking.is_some() || caps.always_thinks;
     if let Some(mut t) = thinking {
         if !opts.prefix_mismatch_behavior.is_empty() {
@@ -284,21 +290,22 @@ mod tests {
 
     #[test]
     fn block_binding_goes_on_the_thinking_config_with_its_beta() {
+        let binding = |model: &str, o: &BodyOptions| {
+            let mut r = req(model);
+            r.thinking_budget = None;
+            let body = build_body(&r, o);
+            let sent = body["thinking"]["block_binding"]["prefix_mismatch_behavior"].clone();
+            (sent, o.betas(model, &body).contains(&crate::BINDING_BETA))
+        };
         let mut o = opts();
-        let model = "claude-opus-5-5";
-        assert!(
-            build_body(&req(model), &o)["thinking"]
-                .get("block_binding")
-                .is_none()
-        );
-        assert!(!o.betas(model).contains(&crate::BINDING_BETA));
+        assert_eq!(binding("claude-opus-5-5", &o), (Value::Null, false));
         o.prefix_mismatch_behavior = "error".into();
-        let body = build_body(&req(model), &o);
-        assert_eq!(
-            body["thinking"]["block_binding"]["prefix_mismatch_behavior"],
-            "error"
-        );
-        assert!(o.betas(model).contains(&crate::BINDING_BETA));
+        assert_eq!(binding("claude-opus-5-5", &o), (json!("error"), true));
+        // With no display setting the model's default thinking config carries it.
+        o.thinking_display = String::new();
+        assert_eq!(binding("claude-opus-5-5", &o), (json!("error"), true));
+        // A model that isn't thinking has nothing to bind: no field and no beta.
+        assert_eq!(binding("claude-sonnet-4-5", &o), (Value::Null, false));
     }
 
     #[test]

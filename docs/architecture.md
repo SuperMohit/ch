@@ -25,7 +25,7 @@ flowchart TB
 
     subgraph PL["Built-in plugins, called by the turn loop in this order"]
         direction LR
-        prompts["Prompt contributors<br/>prompt-base<br/>project-instructions"] --> ctx["Context strategy<br/>passthrough"] --> prov["Model providers<br/>anthropic · openai<br/>scripted"] --> hooks["Hooks<br/>safety"] --> appr["Approvers<br/>repl · auto-deny<br/>auto-allow"] --> tools["Tools<br/>tools-fs · bash<br/>web_fetch"]
+        prompts["Prompt contributors<br/>prompt-base<br/>project-instructions"] --> ctx["Context strategy<br/>context (elide)"] --> prov["Model providers<br/>anthropic · openai<br/>scripted"] --> hooks["Hooks<br/>safety"] --> appr["Approvers<br/>repl · auto-deny<br/>auto-allow"] --> tools["Tools<br/>tools-fs · bash<br/>web_fetch"]
     end
 
     subgraph OTHER["Also built in"]

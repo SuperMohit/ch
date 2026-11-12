@@ -213,7 +213,7 @@ flowchart TB
 
     subgraph PL["Built-in plugins, called by the turn loop in this order"]
         direction LR
-        prompts["Prompt contributors<br/>prompt-base<br/>project-instructions"] --> ctx["Context strategy<br/>passthrough"] --> prov["Model providers<br/>anthropic · openai<br/>scripted"] --> hooks["Hooks<br/>safety"] --> appr["Approvers<br/>repl · auto-deny<br/>auto-allow"] --> tools["Tools<br/>tools-fs · bash<br/>web_fetch"]
+        prompts["Prompt contributors<br/>prompt-base<br/>project-instructions"] --> ctx["Context strategy<br/>context (elide)"] --> prov["Model providers<br/>anthropic · openai<br/>scripted"] --> hooks["Hooks<br/>safety"] --> appr["Approvers<br/>repl · auto-deny<br/>auto-allow"] --> tools["Tools<br/>tools-fs · bash<br/>web_fetch"]
     end
 
     subgraph OTHER["Also built in"]
@@ -248,13 +248,14 @@ The kernel has no concrete providers, tools, prompts or UI. [docs/architecture.m
 | `plugins/tools-fs` | `read_file`, `edit_file`, `write_file`, `list_files`, `glob_files`, `grep_text` |
 | `plugins/tool-bash` | The `bash` tool (with a bash-only variant when the file tools are off) |
 | `plugins/tool-web-fetch` | The `web_fetch` tool: fetches pages and converts HTML to markdown |
+| `plugins/context` | Context management: trims old, bulky content in rare batches so long sessions fit the window ([ADR 0004](docs/adr/0004-context-management.md)) |
 | `plugins/executor-local` | Runs commands in their own process group, with timeout and cancellation |
 | `plugins/prompt-base` | System prompt and a tool-usage block that matches the enabled tools |
 | `plugins/project-instructions` | `CH.md` / `AGENTS.md` and an environment block |
 | `plugins/commands-core`, `commands-markdown` | Built-in and markdown slash commands |
 | `plugins/frontend-repl`, `frontend-print` | The interactive REPL and the headless `-p` frontend |
 
-The other crates under `plugins/` are placeholders for upcoming phases: context management, MCP, external plugins, shell hooks, telemetry and a Docker executor.
+The other crates under `plugins/` are placeholders for upcoming phases: MCP, external plugins, shell hooks, telemetry and a Docker executor. Summaries in context management come later too.
 
 ### Writing a plugin
 

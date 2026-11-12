@@ -277,6 +277,7 @@ mod tests {
     #[test]
     fn safe_names() {
         assert_eq!(safe_name("toolu_01/../x"), "toolu_01____x");
+        assert_eq!(safe_name("mcp__gh__search"), "mcp__gh__search");
         assert_eq!(safe_name(""), "result");
         assert_eq!(safe_name(&"a".repeat(100)).len(), 64);
     }

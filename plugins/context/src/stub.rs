@@ -13,7 +13,7 @@ pub const REMINDER: &str = "[reminder elided]";
 /// How every result stub starts.
 pub const RESULT_PREFIX: &str = "[Output elided to save context: ";
 
-const INPUT_MARKER_START: &str = "[elided from an earlier call to save context: ";
+pub const INPUT_MARKER_START: &str = "[elided from an earlier call to save context: ";
 const INPUT_MARKER_END: &str = " characters]";
 
 /// Where a trimmed result can be read again.
