@@ -1,6 +1,6 @@
 [package]
 name = "ch-context"
-description = "Context management: trims old, bulky content in rare batches to fit the window"
+description = "Context management: trims old, bulky content and summarizes older steps to fit the window"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
