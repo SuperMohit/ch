@@ -146,6 +146,151 @@ pub fn restrict(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// `<session dir>/<parts…>` (`parts` separated by `/`), each directory created `0700`
+/// if needed, with the session directory anchored as the file tools check it. Fails if
+/// any of them is a symlink, so nothing placed there can redirect where files go.
+pub fn private_dir(session_dir: &Path, parts: &str) -> io::Result<PathBuf> {
+    fs::create_dir_all(session_dir)?;
+    let mut dir = anchored(session_dir)?;
+    for part in parts.split('/') {
+        dir = dir.join(part);
+        match fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        if !fs::symlink_metadata(&dir)?.is_dir() {
+            return Err(io::Error::other(format!(
+                "{} is not a directory (a symlink?)",
+                dir.display()
+            )));
+        }
+        restrict(&dir)?;
+    }
+    Ok(dir)
+}
+
+/// `s` with everything but ASCII letters, digits, `-` and `_` replaced, at most 64
+/// characters, so ids and tool names are safe in a file name.
+pub fn safe_name(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .take(64)
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
+            _ => '_',
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "result".into()
+    } else {
+        cleaned
+    }
+}
+
+/// Lines in `s`, counting a last line without a newline.
+pub fn line_count(s: &str) -> usize {
+    let breaks = s.matches('\n').count();
+    if s.is_empty() || s.ends_with('\n') {
+        breaks
+    } else {
+        breaks + 1
+    }
+}
+
+/// `n` with a comma between each group of three digits.
+pub fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// How much of one line `read_file` shows (tools-fs `MAX_LINE_CHARS`). Longer lines need
+/// another way to read their middle.
+pub const READ_FILE_LINE_CHARS: usize = 2000;
+
+/// The tools a model has to read a file the session saved for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadTools {
+    /// `read_file` and `grep_text`, and whether `bash` is there for long lines.
+    FileTools { bash: bool },
+    /// Only `bash`.
+    Bash,
+    /// Nothing that can read a file.
+    None,
+}
+
+impl ReadTools {
+    pub fn of(cx: &crate::cx::Cx) -> Self {
+        if cx.has_tool("read_file") && cx.has_tool("grep_text") {
+            Self::FileTools {
+                bash: cx.has_tool("bash"),
+            }
+        } else if cx.has_tool("bash") {
+            Self::Bash
+        } else {
+            Self::None
+        }
+    }
+}
+
+/// What in a saved text the file tools can't read as it is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadQuirks {
+    /// Some line is longer than `read_file` shows.
+    pub long_lines: bool,
+    /// A NUL byte, which makes `read_file` and `grep_text` treat the file as binary.
+    pub nul: bool,
+}
+
+impl ReadQuirks {
+    pub fn of(text: &str) -> Self {
+        Self {
+            long_lines: text
+                .split('\n')
+                .any(|l| l.chars().count() > READ_FILE_LINE_CHARS),
+            nul: text.contains('\0'),
+        }
+    }
+
+    /// Sentences, each starting with a space, on how to read around the quirks with
+    /// `tools`; empty when there are none or no tool can read the file.
+    pub fn notes(self, tools: ReadTools) -> String {
+        if tools == ReadTools::None {
+            return String::new();
+        }
+        let bash = matches!(tools, ReadTools::Bash | ReadTools::FileTools { bash: true });
+        let mut out = String::new();
+        if self.long_lines {
+            out.push_str(&format!(
+                " Some lines are longer than read_file shows ({READ_FILE_LINE_CHARS} \
+                 characters)"
+            ));
+            out.push_str(if bash {
+                "; read part of line N with `head -n N <path> | tail -n 1 | cut -c A-B` in \
+                 bash."
+            } else {
+                "."
+            });
+        }
+        if self.nul {
+            out.push_str(" It contains NUL bytes, which read_file and grep_text treat as binary");
+            out.push_str(if bash {
+                "; in bash, `cat -v <path> | tail -n +N | head -n 200` shows them as ^@."
+            } else {
+                "."
+            });
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -180,6 +325,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn thousands_separators() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1000), "1,000");
+        assert_eq!(thousands(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn line_counting() {
+        assert_eq!(line_count(""), 0);
+        assert_eq!(line_count("a"), 1);
+        assert_eq!(line_count("a\n"), 1);
+        assert_eq!(line_count("a\nb"), 2);
+    }
+
+    #[test]
+    fn safe_names() {
+        assert_eq!(safe_name("toolu_01/../x"), "toolu_01____x");
+        assert_eq!(safe_name("mcp__gh__search"), "mcp__gh__search");
+        assert_eq!(safe_name(""), "result");
+        assert_eq!(safe_name(&"a".repeat(100)).len(), 64);
+    }
 
     #[test]
     fn short_strings_unchanged() {

@@ -192,6 +192,7 @@ dependencies = [
  "async-trait",
  "ch-commands-core",
  "ch-commands-markdown",
+ "ch-context",
  "ch-diagnostics",
  "ch-executor-local",
  "ch-frontend-print",
@@ -259,7 +260,19 @@ dependencies = [
 name = "ch-context"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "ch-kernel",
+ "ch-planning",
+ "ch-provider-scripted",
+ "ch-safety",
+ "ch-tools-fs",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -1,32 +1,14 @@
 //! The head, tail and notice that replace a spilled result.
 
-/// How much of one line `read_file` shows (tools-fs `MAX_LINE_CHARS`). Longer lines need
-/// another way to read their middle.
-const READ_FILE_LINE_CHARS: usize = 2000;
-
-/// The tools the notice may point at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Hint {
-    /// `read_file` and `grep_text`, and whether `bash` is there for long lines.
-    FileTools { bash: bool },
-    /// Only `bash`.
-    Bash,
-    /// Nothing that can read a file.
-    None,
-}
+use ch_kernel::util::{ReadQuirks, ReadTools, line_count};
 
 /// `content`'s head and tail around a notice naming `path`, at most `max` characters
 /// in all. Cuts fall on line breaks when one is near. `None` when the notice alone
 /// leaves too little room.
-pub fn preview(content: &str, path: &str, hint: Hint, max: usize) -> Option<String> {
+pub fn preview(content: &str, path: &str, hint: ReadTools, max: usize) -> Option<String> {
     let total = content.chars().count();
     let lines = line_count(content);
-    let quirks = Quirks {
-        long_lines: content
-            .split('\n')
-            .any(|l| l.chars().count() > READ_FILE_LINE_CHARS),
-        nul: content.contains('\0'),
-    };
+    let quirks = ReadQuirks::of(content);
     // Sized with the longest range text and the largest numbers it can hold, so the
     // real notice is never longer.
     let widest_range = format!("lines {lines}–{lines}");
@@ -77,71 +59,31 @@ pub fn preview(content: &str, path: &str, hint: Hint, max: usize) -> Option<Stri
     Some(format!("{head}{gap}{notice}\n\n{tail}"))
 }
 
-/// What the file tools can't read in the saved output.
-#[derive(Clone, Copy)]
-struct Quirks {
-    /// Some line is longer than `read_file` shows.
-    long_lines: bool,
-    /// A NUL byte, which makes `read_file` and `grep_text` treat the file as binary.
-    nul: bool,
-}
-
 fn notice(
     range: &str,
     first: usize,
     lines: usize,
     omitted: usize,
     path: &str,
-    hint: Hint,
-    quirks: Quirks,
+    hint: ReadTools,
+    quirks: ReadQuirks,
 ) -> String {
     let how = match hint {
-        Hint::FileTools { .. } => format!(
+        ReadTools::FileTools { .. } => format!(
             "Read the rest with read_file with offset={first} (and a limit), or search it \
              with grep_text on that path."
         ),
-        Hint::Bash => format!(
+        ReadTools::Bash => format!(
             "Read the rest with `tail -n +{first} <path> | head -n 200`, or search it with \
              `grep -n` in bash."
         ),
-        Hint::None => "It is kept for the user.".to_string(),
+        ReadTools::None => "It is kept for the user.".to_string(),
     };
-    let bash = matches!(hint, Hint::Bash | Hint::FileTools { bash: true });
-    let mut extra = String::new();
-    if quirks.long_lines && hint != Hint::None {
-        extra.push_str(&format!(
-            " Some lines are longer than read_file shows ({READ_FILE_LINE_CHARS} \
-             characters)"
-        ));
-        extra.push_str(if bash {
-            "; read part of line N with `head -n N <path> | tail -n 1 | cut -c A-B` in \
-             bash."
-        } else {
-            "."
-        });
-    }
-    if quirks.nul && hint != Hint::None {
-        extra.push_str(" It contains NUL bytes, which read_file and grep_text treat as binary");
-        extra.push_str(if bash {
-            "; in bash, `cat -v <path> | tail -n +N | head -n 200` shows them as ^@."
-        } else {
-            "."
-        });
-    }
+    let extra = quirks.notes(hint);
     format!(
         "[… {range} of {lines} omitted ({omitted} characters). The full output is saved \
          at {path}.\n{how}{extra}]"
     )
-}
-
-/// Lines in `s`, counting a last line without a newline.
-fn line_count(s: &str) -> usize {
-    let breaks = s.matches('\n').count();
-    if s.is_empty() || s.ends_with('\n') {
-        breaks
-    } else {
-        breaks + 1
-    }
 }
 
 /// The byte offset of the `n`th character (or the end).
@@ -153,7 +95,7 @@ fn byte_at(s: &str, n: usize) -> usize {
 mod tests {
     use super::*;
 
-    const FILES: Hint = Hint::FileTools { bash: true };
+    const FILES: ReadTools = ReadTools::FileTools { bash: true };
 
     fn log(lines: usize) -> String {
         (1..=lines).map(|i| format!("log line {i:05}\n")).collect()
@@ -228,7 +170,13 @@ mod tests {
             text.contains("`head -n N <path> | tail -n 1 | cut -c A-B`"),
             "{text}"
         );
-        let no_bash = preview(&content, "/p.txt", Hint::FileTools { bash: false }, 2000).unwrap();
+        let no_bash = preview(
+            &content,
+            "/p.txt",
+            ReadTools::FileTools { bash: false },
+            2000,
+        )
+        .unwrap();
         assert!(no_bash.contains("longer than read_file shows (2000 characters).]"));
         assert!(!no_bash.contains("cut -c"));
     }
@@ -249,10 +197,10 @@ mod tests {
     #[test]
     fn the_hint_follows_the_tools() {
         let content = log(5000);
-        let bash = preview(&content, "/p.txt", Hint::Bash, 2000).unwrap();
+        let bash = preview(&content, "/p.txt", ReadTools::Bash, 2000).unwrap();
         assert!(bash.contains("`tail -n +"), "{bash}");
         assert!(!bash.contains("read_file with"));
-        let none = preview(&content, "/p.txt", Hint::None, 2000).unwrap();
+        let none = preview(&content, "/p.txt", ReadTools::None, 2000).unwrap();
         assert!(none.contains("It is kept for the user.]"), "{none}");
     }
 
@@ -262,13 +210,5 @@ mod tests {
         assert_eq!(preview(&log(5000), &path, FILES, 1000), None);
         // Content shorter than what would be kept is not previewed.
         assert_eq!(preview(&log(10), "/p.txt", FILES, 100_000), None);
-    }
-
-    #[test]
-    fn line_counting() {
-        assert_eq!(line_count(""), 0);
-        assert_eq!(line_count("a"), 1);
-        assert_eq!(line_count("a\n"), 1);
-        assert_eq!(line_count("a\nb"), 2);
     }
 }

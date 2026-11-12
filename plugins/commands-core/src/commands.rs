@@ -3,9 +3,10 @@
 use std::fmt::Write as _;
 
 use async_trait::async_trait;
+use ch_kernel::util::thousands;
 use ch_kernel::{CmdCx, Command, Outcome, SessionMeta};
 
-use crate::format::{first_line, mask_table, thousands};
+use crate::format::{first_line, mask_table};
 
 /// How many sessions `/resume` lists.
 const RESUME_LIST_LIMIT: usize = 15;

@@ -46,8 +46,8 @@ pub fn builtin_plugins() -> Vec<Arc<dyn Plugin>> {
     plugins.push(ch_planning::plugin());
     #[cfg(feature = "spill")]
     plugins.push(ch_spill::plugin());
-    // #[cfg(feature = "context")]
-    // plugins.push(ch_context::plugin());
+    #[cfg(feature = "context")]
+    plugins.push(ch_context::plugin());
 
     // Prompts and commands.
     #[cfg(feature = "prompt-base")]

@@ -267,7 +267,7 @@ max_summary_share = 0.15       # 0.05–0.30
   - the range of thinking blocks to drop;
   - for a summary: its span, text, copied user text and model.
 - **The view is recomputed on every step** from the history and the valid records. The rendering uses no clock, randomness or estimate. Because the replacement text is stored, a stub renders the same after resume even if the tools or settings changed.
-- **On load,** a record whose events are missing or whose hashes don't match is ignored, with a warning. That covers a crash between writing the log and the turn-end save (`mod.rs:563`).
+- **On load,** a record whose events are missing or whose hashes don't match is ignored, with a warning. That covers a crash between writing the log and the turn-end save (`mod.rs:563`). *Changed in the implementation:* the log is applied up to its first record that doesn't match, and what happens next depends on whether the model answered after that record (see Implementation notes).
 - **One session at a time.** The plugin keeps one session's state, keyed by `cx.cx.session_id`, and reloads when the id changes, as `PlanStore` does (`plugins/planning/src/store.rs:36-42`).
   - `/clear` starts an empty log; `/resume` and `--continue` load the session's log.
   - Without a session directory, records live in memory only.
@@ -286,7 +286,7 @@ max_summary_share = 0.15       # 0.05–0.30
   - So no `tool_use` is ever waiting when a compaction happens. `/compact` runs between turns.
 - **The newest step loses its reasoning too.** Mid-turn, the newest assistant message's thinking was signed against the old prefix, so a compaction drops it with the rest. Keeping it would get the request rejected.
   - This is the API's documented handling for compaction that keeps recent turns: strip their thinking, keep their text and tool calls.
-  - A live `#[ignore]` test in 6.5 confirms that the default model accepts it.
+  - A live `#[ignore]` test (`plugins/provider-anthropic/tests/live.rs`) checks that the API accepts it with enforcement on (`prefix_mismatch_behavior = "error"`). It uses `CH_LIVE_ANTHROPIC_MODEL`, which defaults to `claude-haiku-5-5`; point it at the default `claude-opus-5-5` to check that model.
 - **Providers.** The rule applies everywhere. The OpenAI provider drops thinking anyway, and older Claude models keep little thinking across turns.
 
 **Decided: the plugin drops thinking consistently at each compaction (the rule above).** It is generic, deterministic, testable with the scripted provider, and the loss happens once per compaction. Rejected: leaving the blocks in and having the Anthropic provider send `prefix_mismatch_behavior: "drop_block"` (an Anthropic beta that has to go on every later request, and `ch`'s view would no longer say what the model saw). **Later work:** Anthropic's server-side context editing or compaction, which keep thinking valid, as a provider-specific strategy. It is Anthropic-only and beta, invisible to the view and telemetry, and not testable offline.
@@ -330,7 +330,7 @@ Each one holds for every view, checked over scripted sessions:
 - [ ] The view starts with a user message, roles alternate, and the last message is the latest history message, unchanged.
 - [ ] The first history message's blocks are a byte-identical prefix of the view's first message.
 - [ ] The recent window is byte-identical to the history, except for thinking blocks dropped by the rule.
-- [ ] Between two compactions, each view is a prefix of the next (`next[..prev.len()] == prev`).
+- [ ] Between two compactions, each request is a prefix of the next (`next[..prev.len()] == prev`). *Changed in the implementation:* this was stated for views, but the session adds a call's reminders to the latest message after the view, so the latest message of one view is a prefix of that message in the next, and the requests are what extend each other.
 - [ ] Rendering from a reloaded history and log, as `--continue` builds them, gives the same bytes.
 - [ ] Thresholds:
   - no trim at or below `soft`;
@@ -345,7 +345,7 @@ Each one holds for every view, checked over scripted sessions:
 - [ ] A long scripted session never overflows under `staged`. Under `none` it ends with `ContextOverflow`, and `ch -p` exits 3.
 - [ ] An overflow compacts and retries at most once per step; a second overflow ends the turn.
 - [ ] An overflow retry adds no block to history: each reminder and note of the step is stored exactly once.
-- [ ] A log record with a missing event or a wrong hash is ignored.
+- [ ] A log record with a missing event or a wrong hash is never applied, and neither is any record after it. A record the model answered after that no longer matches leads to a reset record.
 - [ ] A call with an input string that is an elision marker is refused; one whose input only mentions the marker runs.
 
 ## Consequences
@@ -369,3 +369,23 @@ Each one holds for every view, checked over scripted sessions:
 - **Dropping old steps without a summary.** The cheapest option, but the model loses track of what it did. It survives here only as elision of bulky content.
 - **A cheap summarizer model by default.** Rejected as the default: it can't use the agent's cache, and a weak summary drops instructions and constraints.
 - **Anthropic's server-side context management now.** Deferred to later work (see Signed thinking blocks): this ADR keeps one generic, testable path.
+
+## Implementation notes
+
+Where the `context` plugin differs from the decision above, and why. Trimming is implemented; summaries are not yet.
+
+- **The record doesn't store the thinking range.** It is the span after the first edit (the first of the record's sorted edits) through `at_event`, both of which are stored.
+- **Records are bound to their history.** Event ids are reused after a crash, so a record also stores `at_blocks`, how many blocks `at_event` had when it was decided, and a hash of those blocks. Only those count, because the session adds the call's reminders to that message after the view. A record whose `at_event` doesn't match is not applied.
+- **The log is applied up to its first record that doesn't match**, and never past it:
+  - A last line without its newline is an append that never finished, so its trim was never sent. A trim record whose events the model never answered after (the log is ahead of the saved history after a crash) affects no reply either. In both cases it and every later record are dropped, and the log is rewritten without them (a new file, made durable, renamed over the old one), so they can't come back once event ids are reused. This never applies to a reset, or to a record that a reset follows.
+  - Otherwise a view that was sent can't be rendered again: the history was edited, or the log was damaged. The records from that one on are dropped, and a fresh **reset record** takes their place. It drops every thinking block through the newest assistant message, which is the API's documented recovery. It is bound to that message, which is in the saved history whenever the log is read (a new prompt is saved only when its turn ends), so the log keeps it across a crash and later requests send the same stripped history.
+  - When the log can't be rewritten, no more trims are made in that session.
+- **A trim takes effect only once its record is durable.** With a session directory, the copies of the trimmed results are written and synced, and so are the directories that hold them, then the record is appended and synced. If the append fails, the log is cut back to its old length and the view goes out unchanged, with a warning; if even that fails, no more trims are made in that session, since the log may hold a record that was never sent.
+- **A record's edits are checked against the planner's own rules on load**, with one shared predicate: never in the first message, before `at_event`, a superseded call's input is exactly its marker, an input keeps its shape with only long strings replaced by markers for their length, a result's replacement is a stub, and a reminder is a `<system-reminder>` text block of a user message that isn't a turn's prompt, replaced by `[reminder elided]`.
+- **A spilled result's stub** says it shows "a preview of N lines, M characters" and gives the size of the spill file, read when the trim is made, and it keeps spill's notes on long lines and NUL bytes. A spill file is used only if its name starts with the result's call id, as spill names them, and it starts with the result's head.
+- **A result whose stub would be longer than the result is left as it is.** That happens just above `elide_min_chars` when the session path is long. Superseded calls are always replaced, so their invariant holds.
+- **The trim's projection counts the thinking it drops**, so a trim above `soft` stops near `trim_to`. Once there, it also takes every other candidate between its first and last edit: they cost no further cache rewrite, and later trims then rarely reach back before earlier ones.
+- **The `pre_tool` hook** also refuses an input string that contains a result stub or an input marker this session's trims wrote. A stub carries its path, so only a copy of it matches. An input marker carries only a size: a string that happens to contain the exact marker text this session wrote is refused too. That is a deliberate trade-off: a false refusal says why and the model can send the text again, while a copied marker would silently replace a file's contents. Text that only describes the markers, such as this ADR, isn't refused.
+- **`none` still renders the log**, so a session trimmed before keeps sending the same bytes; it makes no new trims. Disabling the plugin instead sends the raw history, which new accounts reject for such a session.
+- **`/compact` under `elide`** trims the middle with the recent window cut to `min_recent_steps`, as for a summary, and ignores the instructions, which are for summaries.
+- **Until summaries are written**, `elide` is the default, and `summarize` and `staged` act as `elide`, with a warning at startup. `hard`, `summary_max_words` and `max_summary_share` are checked now and take effect then.
