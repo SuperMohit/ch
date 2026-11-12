@@ -1,14 +1,14 @@
 //! Context strategies decide what part of the history the model sees.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
 use crate::cx::Cx;
 use crate::history::History;
-use crate::model::ModelProvider;
+use crate::model::{ModelProvider, ModelRequest};
 use crate::tokens::TokenCalibrator;
-use crate::types::Message;
+use crate::types::{Message, Usage};
 
 /// The token budget for one model call.
 #[derive(Debug, Clone, Copy)]
@@ -47,12 +47,67 @@ pub struct View {
     pub messages: Vec<Message>,
 }
 
-/// Extra inputs a strategy may need: the summarizer model.
+/// Extra inputs a strategy may need: the agent's request and the summarizer model.
 #[derive(Clone)]
 pub struct ContextCx {
     pub cx: Cx,
+    /// The agent's request for this step without its messages: model, system blocks,
+    /// tools and settings. A summary sent with the same ones, after the last view, reads
+    /// that view from the prompt cache.
+    pub agent_request: ModelRequest,
+    /// `[model.summarizer]`, or else the agent's provider and current model.
     pub summarizer: Arc<dyn ModelProvider>,
     pub summarizer_model: String,
+    /// Where the strategy records the model calls it makes itself.
+    pub usage: UsageLog,
+}
+
+/// The model calls a strategy makes itself, such as summaries. When the strategy
+/// returns, the session adds them to its totals (`/cost` and the saved session) and
+/// emits `Usage` for each.
+#[derive(Clone, Default)]
+pub struct UsageLog(Arc<Mutex<Vec<(String, String, Usage)>>>);
+
+impl UsageLog {
+    /// Records one call to `model`. `purpose` tags its `Usage` event, e.g.
+    /// "context.summarize".
+    pub fn record(&self, model: &str, purpose: &str, usage: Usage) {
+        self.0
+            .lock()
+            .expect("usage lock")
+            .push((model.to_string(), purpose.to_string(), usage));
+    }
+
+    /// Removes the calls recorded so far and returns them, oldest first, as
+    /// `(model, purpose, usage)`.
+    pub fn take(&self) -> Vec<(String, String, Usage)> {
+        std::mem::take(&mut *self.0.lock().expect("usage lock"))
+    }
+}
+
+/// Why a strategy is asked to compact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactReason {
+    /// The user ran `/compact`.
+    Manual,
+    /// The provider rejected the request as too long. The session sends it again, with
+    /// a new view, only if the compaction changed something.
+    Overflow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactRequest {
+    pub reason: CompactReason,
+    /// What the user asked the summary to focus on (`/compact <instructions>`).
+    pub instructions: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactOutcome {
+    /// The next view differs from the last one.
+    pub changed: bool,
+    /// A short description for the user.
+    pub message: String,
 }
 
 #[async_trait]
@@ -70,14 +125,19 @@ pub trait ContextStrategy: Send + Sync {
     async fn view(&self, history: &History, budget: Budget, cx: &ContextCx)
     -> anyhow::Result<View>;
 
-    /// Manual compaction (`/compact`). Returns a short description of what happened.
+    /// Compacts now, on `/compact` or after an overflow, so that the next view is
+    /// smaller. Says whether anything changed, and what.
     async fn compact(
         &self,
         _history: &History,
         _budget: Budget,
+        _request: &CompactRequest,
         _cx: &ContextCx,
-    ) -> anyhow::Result<String> {
-        Ok("this context strategy does not support manual compaction".into())
+    ) -> anyhow::Result<CompactOutcome> {
+        Ok(CompactOutcome {
+            changed: false,
+            message: "this context strategy does not support manual compaction".into(),
+        })
     }
 }
 

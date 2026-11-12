@@ -17,13 +17,15 @@ use tokio_util::sync::CancellationToken;
 use crate::approver::Approver;
 use crate::command::{CmdCx, Outcome};
 use crate::config::{Config, KernelConfig};
-use crate::context::{ContextCx, ContextStrategy};
+use crate::context::{
+    CompactOutcome, CompactReason, CompactRequest, ContextCx, ContextStrategy, UsageLog,
+};
 use crate::cx::Cx;
 use crate::events::{AgentEvent, EventBus};
 use crate::executor::Executor;
 use crate::history::History;
 use crate::hook::{Hook, HookEvent, HookOutcome, Verdict, run_hooks};
-use crate::model::ModelProvider;
+use crate::model::{ModelProvider, ModelRequest};
 use crate::registry::Registry;
 use crate::store::{SessionLock, SessionMeta, SessionSnapshot, SessionStore};
 use crate::tokens::TokenCalibrator;
@@ -64,8 +66,11 @@ pub struct Session {
     /// `model.id`, or the provider's default model when it is unset.
     configured_model: String,
     summarizer: Arc<dyn ModelProvider>,
-    summarizer_model: String,
+    /// `model.summarizer.id`; summaries use the agent's current model when it is unset.
+    summarizer_model: Option<String>,
     context: Arc<dyn ContextStrategy>,
+    /// Model calls the context strategy made itself, not yet in `usage`.
+    context_usage: UsageLog,
     executor: Option<Arc<dyn Executor>>,
     approver: Option<Arc<dyn Approver>>,
     tools: HashMap<String, Arc<dyn Tool>>,
@@ -231,11 +236,16 @@ impl Session {
         }
     }
 
-    fn context_cx(&self, cx: Cx) -> ContextCx {
+    fn context_cx(&self, cx: Cx, agent_request: ModelRequest) -> ContextCx {
         ContextCx {
             cx,
+            agent_request,
             summarizer: self.summarizer.clone(),
-            summarizer_model: self.summarizer_model.clone(),
+            summarizer_model: self
+                .summarizer_model
+                .clone()
+                .unwrap_or_else(|| self.model.clone()),
+            usage: self.context_usage.clone(),
         }
     }
 
@@ -317,14 +327,26 @@ impl Session {
         Some(cmd.run(args.trim(), &mut cx).await)
     }
 
-    /// Manual compaction through the active context strategy.
-    pub async fn compact(&mut self) -> anyhow::Result<String> {
+    /// Manual compaction (`/compact`) through the active context strategy. `instructions`
+    /// say what a summary should focus on.
+    pub async fn compact(
+        &mut self,
+        instructions: Option<String>,
+    ) -> anyhow::Result<CompactOutcome> {
         let cancel = self.cancel.begin();
         let cx = self.cx(0, cancel);
         let system = self.system_blocks(&cx).await;
         let budget = self.budget(&system, &[]);
-        let ccx = self.context_cx(cx);
-        let result = self.context.compact(&self.history, budget, &ccx).await;
+        let ccx = self.context_cx(cx, self.agent_request(system));
+        let request = CompactRequest {
+            reason: CompactReason::Manual,
+            instructions,
+        };
+        let result = self
+            .context
+            .compact(&self.history, budget, &request, &ccx)
+            .await;
+        self.record_context_usage();
         self.cancel.finish();
         result
     }

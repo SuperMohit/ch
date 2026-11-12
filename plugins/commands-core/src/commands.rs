@@ -94,14 +94,18 @@ impl Command for Compact {
         "compact"
     }
     fn description(&self) -> &str {
-        "Compact the conversation history now"
+        "Compact the conversation history now, with optional instructions for the summary"
     }
-    async fn run(&self, _args: &str, cx: &mut CmdCx<'_>) -> anyhow::Result<Outcome> {
+    fn usage(&self) -> &str {
+        "[instructions]"
+    }
+    async fn run(&self, args: &str, cx: &mut CmdCx<'_>) -> anyhow::Result<Outcome> {
         if cx.session.history().is_empty() {
             return Ok(Outcome::Message("Nothing to compact yet.".into()));
         }
-        match cx.session.compact().await {
-            Ok(summary) => Ok(Outcome::Message(format!("Compaction: {summary}"))),
+        let instructions = (!args.is_empty()).then(|| args.to_string());
+        match cx.session.compact(instructions).await {
+            Ok(outcome) => Ok(Outcome::Message(format!("Compaction: {}", outcome.message))),
             Err(e) => Ok(Outcome::Message(format!(
                 "Compaction failed: {e:#}. The conversation is unchanged; you can keep going \
                  or use /clear to start over."

@@ -894,15 +894,295 @@ async fn step_limit_ends_turn() {
 
 #[tokio::test]
 async fn context_overflow_and_provider_errors_end_turn() {
-    let mut h = harness(vec![Err("overflow".into())], vec![], config());
+    // The passthrough strategy can't compact, so nothing is sent again.
+    let mut h = harness(
+        vec![Err("overflow".into()), Ok(text_reply("never"))],
+        vec![],
+        config(),
+    );
     let r = h.session.run_turn("go").await;
     assert!(matches!(
         r.reason,
         TerminationReason::ContextOverflow { .. }
     ));
+    assert_eq!(h.script.requests.lock().unwrap().len(), 1);
     let mut h = harness(vec![Err("down".into())], vec![], config());
     let r = h.session.run_turn("go").await;
     assert!(matches!(r.reason, TerminationReason::Error { .. }));
+}
+
+/// What `TestContext::compact` was asked, with the summarizer model it was given.
+type Compactions = Arc<Mutex<Vec<(CompactRequest, String)>>>;
+
+/// Sends the whole history. A compaction is recorded, reports `changes`, and with
+/// `summarizes` sends a summary request the way a real strategy would.
+struct TestContext {
+    changes: bool,
+    summarizes: bool,
+    compactions: Compactions,
+}
+
+#[async_trait::async_trait]
+impl ContextStrategy for TestContext {
+    fn id(&self) -> &str {
+        "test-context"
+    }
+    async fn view(&self, h: &History, _b: Budget, _cx: &ContextCx) -> anyhow::Result<View> {
+        Ok(View {
+            messages: h.messages(),
+        })
+    }
+    async fn compact(
+        &self,
+        h: &History,
+        _b: Budget,
+        request: &CompactRequest,
+        cx: &ContextCx,
+    ) -> anyhow::Result<CompactOutcome> {
+        self.compactions
+            .lock()
+            .unwrap()
+            .push((request.clone(), cx.summarizer_model.clone()));
+        if self.summarizes {
+            let mut messages = h.messages();
+            messages.push(Message::user("Summarize the conversation."));
+            let summary = ModelRequest {
+                model: cx.summarizer_model.clone(),
+                messages,
+                purpose: "context.summarize".into(),
+                ..cx.agent_request.clone()
+            };
+            let response = complete(&*cx.summarizer, summary, cx.cx.cancel.clone()).await?;
+            cx.usage
+                .record(&cx.summarizer_model, "context.summarize", response.usage);
+        }
+        Ok(CompactOutcome {
+            changed: self.changes,
+            message: "compacted".into(),
+        })
+    }
+}
+
+fn test_context(changes: bool, summarizes: bool) -> (Arc<dyn Plugin>, Compactions) {
+    let compactions = Compactions::default();
+    let c = compactions.clone();
+    let p = plugin("test-context", move |cx| {
+        cx.add_context(TestContext {
+            changes,
+            summarizes,
+            compactions: c.clone(),
+        });
+        Ok(())
+    });
+    (p, compactions)
+}
+
+fn reasons(compactions: &Compactions) -> Vec<CompactReason> {
+    let c = compactions.lock().unwrap();
+    c.iter().map(|(r, _)| r.reason).collect()
+}
+
+#[tokio::test]
+async fn an_overflow_compacts_and_sends_the_step_again_once() {
+    // Each step may compact once.
+    let (ctx, compactions) = test_context(true, false);
+    let mut h = harness(
+        vec![
+            Err("overflow".into()),
+            Ok(tool_reply(&[("a", "echo", json!({"text": "1"}))])),
+            Err("overflow".into()),
+            Ok(text_reply("done")),
+        ],
+        vec![ctx],
+        config(),
+    );
+    let r = h.session.run_turn("go").await;
+    assert_eq!((r.reason, r.steps), (TerminationReason::Done, 2));
+    assert_eq!(reasons(&compactions), [CompactReason::Overflow; 2]);
+    {
+        // The retry sends the same request with the view computed again; this
+        // strategy's view didn't change.
+        let reqs = h.script.requests.lock().unwrap();
+        assert_eq!(reqs.len(), 4);
+        assert_eq!(reqs[1], reqs[0]);
+        assert_eq!(reqs[3], reqs[2]);
+    }
+
+    // A second overflow in the same step ends the turn.
+    let (ctx, compactions) = test_context(true, false);
+    let mut h = harness(
+        vec![
+            Err("overflow".into()),
+            Err("overflow".into()),
+            Ok(text_reply("never")),
+        ],
+        vec![ctx],
+        config(),
+    );
+    let r = h.session.run_turn("go").await;
+    assert!(
+        matches!(r.reason, TerminationReason::ContextOverflow { .. }),
+        "{r:?}"
+    );
+    assert_eq!(h.script.requests.lock().unwrap().len(), 2);
+    assert_eq!(reasons(&compactions), [CompactReason::Overflow]);
+}
+
+#[tokio::test]
+async fn an_overflow_ends_the_turn_when_compacting_changes_nothing() {
+    let (ctx, compactions) = test_context(false, false);
+    let mut h = harness(
+        vec![Err("overflow".into()), Ok(text_reply("never"))],
+        vec![ctx],
+        config(),
+    );
+    let r = h.session.run_turn("go").await;
+    assert!(
+        matches!(r.reason, TerminationReason::ContextOverflow { .. }),
+        "{r:?}"
+    );
+    assert_eq!(reasons(&compactions), [CompactReason::Overflow]);
+    assert_eq!(h.script.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn an_overflow_retry_stores_no_reminder_or_note_twice() {
+    let log: Log = Default::default();
+    let l = log.clone();
+    let (ctx, _) = test_context(true, false);
+    let plugins = vec![
+        plugin("prompt", |cx| {
+            cx.add_prompt(Reminder);
+            Ok(())
+        }),
+        plugin("noter", move |cx| {
+            cx.add_hook(ScriptedHook {
+                id: "noter",
+                priority: 0,
+                points: vec![HookPoint::BeforeModel],
+                log: l.clone(),
+                decide: Box::new(|_| HookDecision::note("check the build")),
+            });
+            Ok(())
+        }),
+        ctx,
+    ];
+    let mut h = harness(
+        vec![Err("overflow".into()), Ok(text_reply("done"))],
+        plugins,
+        config(),
+    );
+    let r = h.session.run_turn("task").await;
+    assert_eq!(r.reason, TerminationReason::Done);
+    // The hooks ran for the first request only, and the retry sent the history.
+    assert_eq!(*log.lock().unwrap(), ["noter:before_model"]);
+    let task = &h.session.history().events()[0].message;
+    assert_eq!(task.content.len(), 3, "{task:?}");
+    let reqs = h.script.requests.lock().unwrap();
+    assert_eq!(reqs[1].messages, std::slice::from_ref(task));
+    let sent = format!("{:?}", reqs[1].messages);
+    assert_eq!(sent.matches("remember the plan").count(), 1);
+    assert_eq!(sent.matches("check the build").count(), 1);
+}
+
+#[tokio::test]
+async fn a_strategy_s_own_model_calls_count_in_the_totals() {
+    let cfg = Config::parse(
+        r#"
+        [model]
+        provider = "scripted"
+        id = "test-model"
+        [model.pricing]
+        input = 10000.0
+        output = 10000.0
+        "#,
+    )
+    .unwrap();
+    let (ctx, _) = test_context(true, true);
+    let prompt = plugin("prompt", |cx| {
+        cx.add_prompt(Reminder);
+        Ok(())
+    });
+    let mut h = harness(
+        vec![
+            Ok(text_reply("hi")),
+            Ok(text_reply("a summary")),
+            Ok(text_reply("another summary")),
+        ],
+        vec![prompt, ctx],
+        cfg,
+    );
+    let mut events = h.session.events().subscribe();
+    h.session.run_turn("task").await;
+    assert!(h.session.compact(None).await.unwrap().changed);
+    {
+        // The summary replays the agent's request: the same model, system and tools.
+        let reqs = h.script.requests.lock().unwrap();
+        let (agent, summary) = (&reqs[0], &reqs[1]);
+        assert_eq!(summary.purpose, "context.summarize");
+        assert_eq!(
+            (&summary.model, &summary.system, &summary.tools),
+            (&agent.model, &agent.system, &agent.tools)
+        );
+    }
+    // Each call uses 100 input and 10 output tokens, at $0.01 a token.
+    assert_eq!(h.session.usage().input_tokens, 200);
+    assert!(
+        (h.session.cost() - 2.2).abs() < 1e-9,
+        "{}",
+        h.session.cost()
+    );
+    let saved = h.session.snapshot();
+    assert_eq!(
+        (saved.usage, saved.cost),
+        (h.session.usage(), h.session.cost())
+    );
+
+    // The pricing is the configured model's: another model's tokens count, at no cost.
+    h.session.set_model("picked-model");
+    h.session.compact(None).await.unwrap();
+    assert_eq!(h.session.usage().input_tokens, 300);
+    assert!(
+        (h.session.cost() - 2.2).abs() < 1e-9,
+        "{}",
+        h.session.cost()
+    );
+
+    let mut purposes = Vec::new();
+    while let Ok(ev) = events.try_recv() {
+        if let AgentEvent::Usage { purpose, .. } = ev {
+            purposes.push(purpose);
+        }
+    }
+    assert_eq!(
+        purposes,
+        ["agent", "context.summarize", "context.summarize"]
+    );
+}
+
+#[tokio::test]
+async fn the_summarizer_follows_model_unless_one_is_configured() {
+    let cases = [
+        ("", ["test-model", "picked-model"]),
+        (
+            "[model.summarizer]\nid = \"small-model\"",
+            ["small-model", "small-model"],
+        ),
+    ];
+    for (summarizer, expected) in cases {
+        let cfg = Config::parse(&format!(
+            "[model]\nprovider = \"scripted\"\nid = \"test-model\"\n{summarizer}"
+        ))
+        .unwrap();
+        let (ctx, compactions) = test_context(false, false);
+        let mut h = harness(vec![], vec![ctx], cfg);
+        h.session.compact(None).await.unwrap();
+        h.session.set_model("picked-model");
+        h.session.compact(None).await.unwrap();
+        let c = compactions.lock().unwrap();
+        let models: Vec<&str> = c.iter().map(|(_, m)| m.as_str()).collect();
+        assert_eq!(models, expected, "{summarizer}");
+    }
 }
 
 /// Signed thinking stays valid only while everything before it is unchanged, so each

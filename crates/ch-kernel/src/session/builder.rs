@@ -5,6 +5,7 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use crate::config::Config;
+use crate::context::UsageLog;
 use crate::events::EventBus;
 use crate::history::History;
 use crate::registry::Registry;
@@ -99,7 +100,7 @@ impl SessionBuilder {
             Some(id) => registry.provider(Some(id))?,
             None => provider.clone(),
         };
-        let summarizer_model = summ.id.unwrap_or_else(|| configured_model.clone());
+        let summarizer_model = summ.id;
         let context = registry.context(kcfg.select.context.as_deref())?;
         let executor = registry.executor(kcfg.select.executor.as_deref())?;
         let approver_id = self.approver.or(kcfg.select.approver.clone());
@@ -151,6 +152,7 @@ impl SessionBuilder {
             summarizer,
             summarizer_model,
             context,
+            context_usage: UsageLog::default(),
             executor,
             approver,
             tools,

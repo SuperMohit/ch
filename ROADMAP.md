@@ -95,17 +95,16 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
   - Also a `pre_tool` check: the third identical call that already failed twice is refused before it runs, with the earlier error repeated so the model changes approach. Measure against the 5/8 thresholds in `ch-eval` before settling the numbers *(still to do, once 9.3 exists; the limits are in `[plugins.stuck]`)*.
   - Three steps in a row whose tool calls all have malformed input (unparseable JSON, schema mismatch) end the turn. Check that a malformed call stored in history is still accepted by the provider on the next request.
 - [ ] **6.3** `diagnostics`: `post_tool` hook on successful edits and writes. A per-extension command from config (`.py` → ruff, `.ts` → configurable, `.rs` → `rustfmt --check` by default) with a short timeout; findings are appended as a note.
-- [ ] **6.4** `context`: `ContextStrategy` with region split (preamble | middle | recent ≥ 0.30 × window, at least 2 turns), per [architecture §8](docs/architecture.md#8-design-defaults).
-  - Elision stubs above `soft`.
-  - Summaries above `hard`, using the summarizer model and `prompts/summary.md`, inserted as `<context-summary>` and updated incrementally.
+- [ ] **6.4** `context`: a `ContextStrategy` designed in [ADR 0004](docs/adr/0004-context-management.md), with the regions preamble | middle | recent (≥ 0.30 × usable window, at least 2 steps). The history is never changed: the view is computed from it and an append-only compaction log, so between compactions each request extends the last one.
   - Strategies `none`, `elide`, `summarize` and `staged` selected by config.
-  - Elided originals written to the session directory.
-  - `/compact` triggers a summary manually.
+  - Trims above `soft`, rare and large: superseded `update_plan` calls first, then long tool results, long tool inputs and old reminders. A trim runs only if it frees at least `min_free` of the usable window.
+  - A trimmed result's stub names a file to read back with `read_file` or `grep_text`: spill's file, or a copy in `<session dir>/context/elided/`.
+  - Summaries above `hard`, on `/compact [instructions]` and on overflow, written with `prompts/summary.md` by the agent's own model, replaying its cached prefix.
+  - Decided: summaries are appended to the first user message as new `<context-summary>` blocks, never updated in place. Every user message and the latest plan are copied next to them unchanged.
+  - Decided: `hard` is the only summary trigger. `compact_at_percent` is dropped.
+  - A compaction drops the signed thinking blocks it invalidates, the same way every time.
   - When the provider rejects a request as too long (`ContextOverflow`), compact once and retry the step before ending the turn with exit code 3.
-  - The compaction trigger is configurable as a share of the window (`plugins.context.compact_at_percent`, 10–80) on top of the token thresholds.
-  - Messages the user sent during the turn (6.7) and the current plan survive compaction unchanged.
-  - Superseded `update_plan` calls are elided first: only the latest one carries the current plan, and every call holds the full list.
-  - Newer Claude models reject history edits that come before a signed thinking block ("invalid signature … bound to a different conversation"). Elision and summaries must leave everything up to the last signed thinking block untouched, or strip those blocks consistently.
+  - *(Kernel part done: the overflow retry recomputes only the view; `compact` takes a reason and the user's instructions and says whether anything changed; `ContextCx` carries the agent's request and counts the strategy's own model calls in `/cost`; the summarizer follows `/model` when `[model.summarizer]` is unset. The plugin is still to do.)*
 - [ ] **6.5** Tests: thresholds trigger correctly, the preamble and recent window stay byte-identical, tool_use/tool_result pairs stay valid, a long scripted session never overflows under `staged`, `none` ends with `ContextOverflow`, planning never appears twice in a prompt, stuck thresholds behave as specified.
 - [x] **6.6** Keep truncated tool output. Done as the `spill` plugin ([ADR 0002](docs/adr/0002-spill-oversized-tool-output.md)): a result over the inline budget is saved to `<session dir>/spill/` and replaced by its head and tail, the omitted line range and the file's path. The model reads the rest with `read_file` (offset) or `grep_text`, which may read the current session's directory but never write it, so there is no `read_tool_result` tool. The paths keep working after resume. Without a session directory the kernel's cut applies. 6.4 should point the stubs of trimmed results at these files.
 - [ ] **6.7** Mid-turn messages. A `SteerHandle` beside `CancelHandle` queues user text while a turn runs; the session adds it as a user message at the next model call (after pending tool results), emits it as an event and saves it to history. In the REPL, Enter during a turn sends a message instead of being ignored. A message queued when the turn ends starts the next turn. Cancelling keeps messages already added.
