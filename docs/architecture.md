@@ -160,7 +160,7 @@ enable  = ["tools-fs", "tool-bash", "tool-web-fetch", "planning", "context", "st
 disable = []
 
 [plugins.context]
-strategy = "staged"             # none | elide | summarize | staged
+strategy = "elide"              # none | elide (summarize and staged once summaries land)
 soft = 0.60
 hard = 0.85
 recent = 0.30
@@ -261,7 +261,7 @@ These are starting values. Every one is a config setting, and the eval runner ([
 | `summarize` | – | ✓ |
 | `staged` (default) | ✓ first | ✓ if still over the hard threshold |
 
-The design is in [ADR 0004](adr/0004-context-management.md).
+The design is in [ADR 0004](adr/0004-context-management.md). Summaries aren't written yet: until they are, `elide` is the default, and `summarize` and `staged` are refused as config errors.
 
 - The history is never changed. The view is computed from it and a small, append-only compaction log, so between compactions each request extends the last one and the prompt cache and signed thinking stay valid.
 - The view is split into a **preamble** (the first user message, whose blocks are never edited), a **recent window** (verbatim) and the **middle**.

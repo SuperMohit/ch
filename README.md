@@ -159,6 +159,25 @@ Each plugin reads its own `[plugins.<id>]` section. Two useful commands:
 
 Set `CH_HOME` to use a directory other than `~/.ch`, and `CH_LOG=debug` for verbose logs in `~/.ch/logs/`.
 
+### Context management
+
+The `context` plugin keeps long sessions inside the model's window ([ADR 0004](docs/adr/0004-context-management.md)). Shares are of the usable window: the context window minus the reserved output, the system prompt and the tools. When the conversation passes `soft`, older bulky content between the task and the newest steps is trimmed in one batch: superseded plan updates, long tool results, long strings in earlier tool inputs, and old reminders. What you wrote is never changed. A trimmed result names a file in the session's directory that the model can read back. Trims are rare and large, so the prompt cache keeps working between them. `/compact` trims now, and a request the provider rejects as too long is trimmed and sent again.
+
+```toml
+[plugins.context]
+strategy = "elide"                # or "none"; summaries ("summarize", "staged") come later
+soft = 0.60                       # trim above this share
+trim_to = 0.40                    # down to this share
+min_free = 0.10                   # only if that frees at least this share
+recent = 0.30                     # never trim the newest steps holding this share,
+min_recent_steps = 2              # and at least this many steps
+elide_min_chars = 500             # trim tool results longer than this
+input_min_chars = 1000            # and tool-input strings longer than this
+superseded_tools = ["update_plan"]  # every call but the latest is trimmed first
+```
+
+A value out of range is moved into it, with a warning. A project may set any of these without your trust.
+
 ### Project instructions and custom commands
 
 - **Instructions:** `CH.md` and `AGENTS.md` files from the git root down to the workspace, plus `~/.ch/CH.md`, are added to the system prompt. Use them for build and test commands, conventions and things to avoid.

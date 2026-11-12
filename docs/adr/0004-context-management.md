@@ -330,7 +330,7 @@ Each one holds for every view, checked over scripted sessions:
 - [ ] The view starts with a user message, roles alternate, and the last message is the latest history message, unchanged.
 - [ ] The first history message's blocks are a byte-identical prefix of the view's first message.
 - [ ] The recent window is byte-identical to the history, except for thinking blocks dropped by the rule.
-- [ ] Between two compactions, each view is a prefix of the next (`next[..prev.len()] == prev`).
+- [ ] Between two compactions, each request is a prefix of the next (`next[..prev.len()] == prev`). *Changed in the implementation:* this was stated for views, but the session adds a call's reminders to the latest message after the view, so the latest message of one view is a prefix of that message in the next, and the requests are what extend each other.
 - [ ] Rendering from a reloaded history and log, as `--continue` builds them, gives the same bytes.
 - [ ] Thresholds:
   - no trim at or below `soft`;
