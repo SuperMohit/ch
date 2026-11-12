@@ -235,7 +235,7 @@ max_summary_share = 0.15       # 0.05–0.30
 - **The retry adds nothing to history.**
   - By the time the rejected request was sent, its reminders and notes were stored in history.
   - Running `call_model` again would compute the reminders again and run `before_model` again, which would store the same text twice.
-  - So the retry computes only the view again, and the `before_model` hooks don't run. It sends the request as the hooks left it, with the same system blocks and tools, and the new view already holds the reminders and notes, because they are in history.
+  - So the retry computes only the view again, and the `before_model` hooks don't run. Those hooks can't change the request, so the retry resends the same system blocks, tools and settings with a new view, which already holds the reminders and notes because they are in history.
   - The compaction and the new view get the same `ContextCx` as the step's first view.
 - **The plugin's overflow compaction** ignores `min_free` and `trim_to`.
   - It trims every candidate in the middle, then summarizes (except under `elide`).

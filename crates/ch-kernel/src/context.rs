@@ -57,10 +57,10 @@ pub struct ContextCx {
     pub cx: Cx,
     /// The agent's provider: the one `agent_request` goes to.
     pub provider: Arc<dyn ModelProvider>,
-    /// The agent's request for this step without its messages (model, system blocks,
-    /// tools and settings), as the session builds it before the `before_model` hooks.
-    /// Its model is the current one, so it follows `/model`. A summary sent with these
-    /// after the last view reads that view from the prompt cache.
+    /// The agent's request for this step without its messages: the model, system blocks,
+    /// tools and settings it is sent with (`before_model` hooks can't change them). Its
+    /// model is the current one, so it follows `/model`. A summary sent with these after
+    /// the last view reads that view from the prompt cache.
     pub agent_request: ModelRequest,
     /// A separate provider and model for summaries, set only by `[model.summarizer]` (a
     /// `provider` without an `id` means that provider's default model). It can't read
@@ -76,6 +76,8 @@ impl ContextCx {
     /// `ModelRequest`, and records the call's usage under `request.model` and
     /// `request.purpose`, so it counts in `/cost` and the saved session. `budget` gives
     /// the window and the calibration for the event. Cancelling the turn cancels the call.
+    /// A call made by `/compact`, outside a turn, carries the last turn's number and
+    /// step 0.
     pub async fn complete(
         &self,
         provider: &dyn ModelProvider,

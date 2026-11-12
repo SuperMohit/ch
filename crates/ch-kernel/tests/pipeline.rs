@@ -39,11 +39,19 @@ impl ModelProvider for ScriptedProvider {
                 cancel.cancel();
                 Err(overflow())
             }
-            // The rejection comes after some of the answer.
-            Some(Err(e)) if e == "overflow mid-stream" => Ok(Box::pin(stream::iter(vec![
-                Ok(ModelEvent::TextDelta("partial".into())),
-                Err(overflow()),
-            ]))),
+            // The rejection comes after some text, thinking or a tool call.
+            Some(Err(e)) if e.starts_with("overflow after ") => {
+                let first = match e.as_str() {
+                    "overflow after text" => ModelEvent::TextDelta("partial".into()),
+                    "overflow after thinking" => ModelEvent::ThinkingDelta("hmm".into()),
+                    "overflow after a tool call" => ModelEvent::ToolUseStart {
+                        id: "t1".into(),
+                        name: "echo".into(),
+                    },
+                    other => panic!("unknown script entry `{other}`"),
+                };
+                Ok(Box::pin(stream::iter(vec![Ok(first), Err(overflow())])))
+            }
             Some(Ok(resp)) => {
                 let mut evs = Vec::new();
                 let text = resp.message.text();
@@ -1175,28 +1183,45 @@ async fn an_overflow_retry_sends_the_compacted_view_and_stores_nothing_twice() {
 #[tokio::test]
 async fn an_overflow_after_output_streamed_ends_the_turn() {
     // The partial answer was shown already, so it isn't sent again.
-    let ctx = changes();
-    let mut h = harness(
-        vec![Err("overflow mid-stream".into()), Ok(text_reply("never"))],
-        vec![ctx.plugin()],
-        config(),
-    );
-    let r = h.session.run_turn("go").await;
-    assert!(is_overflow(&r), "{r:?}");
-    assert!(ctx.reasons().is_empty());
-    assert_eq!(h.script.requests.lock().unwrap().len(), 1);
+    for script in [
+        "overflow after text",
+        "overflow after thinking",
+        "overflow after a tool call",
+    ] {
+        let ctx = changes();
+        let mut h = harness(
+            vec![Err(script.into()), Ok(text_reply("never"))],
+            vec![ctx.plugin()],
+            config(),
+        );
+        let r = h.session.run_turn("go").await;
+        assert!(is_overflow(&r), "{script}: {r:?}");
+        assert!(ctx.reasons().is_empty(), "{script}");
+        assert_eq!(h.script.requests.lock().unwrap().len(), 1, "{script}");
+    }
 }
 
 #[tokio::test]
 async fn a_cancel_before_or_during_the_overflow_compaction_ends_the_turn() {
-    let during = TestContext {
+    let cancels = |ctx: TestContext| TestContext {
         cancels: true,
-        ..changes()
+        ..ctx
     };
-    let before = changes();
-    for (ctx, script, reasons) in [
-        (during, "overflow", vec![CompactReason::Overflow]),
-        (before, "overflow after cancel", vec![]),
+    let failing = TestContext {
+        fails: true,
+        ..Default::default()
+    };
+    let overflow = vec![CompactReason::Overflow];
+    for (name, ctx, script, reasons) in [
+        ("changed", cancels(changes()), "overflow", overflow.clone()),
+        (
+            "unchanged",
+            cancels(Default::default()),
+            "overflow",
+            overflow.clone(),
+        ),
+        ("failed", cancels(failing), "overflow", overflow),
+        ("before", changes(), "overflow after cancel", vec![]),
     ] {
         let mut h = harness(
             vec![Err(script.into()), Ok(text_reply("never"))],
@@ -1204,9 +1229,9 @@ async fn a_cancel_before_or_during_the_overflow_compaction_ends_the_turn() {
             config(),
         );
         let r = h.session.run_turn("go").await;
-        assert_eq!(r.reason, TerminationReason::Cancelled, "{script}");
-        assert_eq!(ctx.reasons(), reasons, "{script}");
-        assert_eq!(h.script.requests.lock().unwrap().len(), 1, "{script}");
+        assert_eq!(r.reason, TerminationReason::Cancelled, "{name}");
+        assert_eq!(ctx.reasons(), reasons, "{name}");
+        assert_eq!(h.script.requests.lock().unwrap().len(), 1, "{name}");
     }
 }
 
@@ -1308,6 +1333,70 @@ async fn a_strategy_s_model_calls_count_however_the_compaction_ends() {
     assert_eq!(h.session.usage().input_tokens, 200);
     let purposes = usage_purposes(&received(&mut rx));
     assert_eq!(purposes, ["context.summarize", "agent"]);
+
+    // Also when the turn is cancelled while the view is built.
+    let ctx = TestContext {
+        view_summarizes: true,
+        view_cancels: true,
+        ..Default::default()
+    };
+    let mut h = harness(
+        vec![Ok(text_reply("a summary")), Ok(text_reply("never"))],
+        vec![ctx.plugin()],
+        config(),
+    );
+    let mut rx = h.session.events().subscribe();
+    let r = h.session.run_turn("go").await;
+    assert_eq!(r.reason, TerminationReason::Cancelled);
+    assert_eq!(h.session.usage().input_tokens, 100);
+    let purposes = usage_purposes(&received(&mut rx));
+    assert_eq!(purposes, ["context.summarize"]);
+}
+
+#[tokio::test]
+async fn a_strategy_s_model_calls_carry_the_turn_and_step() {
+    let ctx = TestContext {
+        view_summarizes: true,
+        ..Default::default()
+    };
+    let mut h = harness(
+        vec![
+            Ok(text_reply("a summary")),
+            Ok(text_reply("first")),
+            Ok(text_reply("a summary")),
+            Ok(tool_reply(&[("a", "echo", json!({"text": "1"}))])),
+            Ok(text_reply("a summary")),
+            Ok(text_reply("done")),
+        ],
+        vec![ctx.plugin()],
+        config(),
+    );
+    h.session.run_turn("one").await;
+    let mut rx = h.session.events().subscribe();
+    h.session.run_turn("two").await;
+    let requests: Vec<_> = received(&mut rx)
+        .into_iter()
+        .filter_map(|e| match e {
+            AgentEvent::ModelRequest {
+                purpose,
+                turn,
+                step,
+                ..
+            } => Some((purpose, turn, step)),
+            _ => None,
+        })
+        .collect();
+    let summary = || "context.summarize".to_string();
+    let agent = || "agent".to_string();
+    assert_eq!(
+        requests,
+        [
+            (summary(), 2, 0),
+            (agent(), 2, 0),
+            (summary(), 2, 1),
+            (agent(), 2, 1)
+        ]
+    );
 }
 
 #[tokio::test]
@@ -1427,9 +1516,15 @@ async fn a_compaction_s_cost_is_saved_even_without_a_turn_after_it() {
         summarizes: true,
         ..changes()
     };
+    let purposes: Arc<Mutex<Vec<String>>> = Default::default();
+    let p = purposes.clone();
+    let sink = plugin("usage-sink", move |cx| {
+        cx.add_sink(UsageSink(p.clone()));
+        Ok(())
+    });
     let h = harness(
         vec![Ok(text_reply("hi")), Ok(text_reply("a summary"))],
-        vec![ctx.plugin()],
+        vec![ctx.plugin(), sink],
         config(),
     );
     let (registry, cfg) = (h.session.registry().clone(), h.session.config().clone());
@@ -1443,18 +1538,32 @@ async fn a_compaction_s_cost_is_saved_even_without_a_turn_after_it() {
     };
     let mut s = open(None);
     s.run_turn("task").await;
+    s.end().await;
     let id = s.id().to_string();
     drop(s);
+    purposes.lock().unwrap().clear();
 
     // As after `ch --continue`: the first thing in the session is `/compact`.
     let mut s = open(Some(store.load(&id).unwrap()));
-    let mut rx = s.events().subscribe();
     s.compact(None).await.unwrap();
     assert_eq!(store.load(&id).unwrap().usage.input_tokens, 200);
-    let started = received(&mut rx)
-        .into_iter()
-        .any(|e| matches!(e, AgentEvent::SessionStart { .. }));
-    assert!(started, "sinks see the compaction");
+    s.end().await;
+    assert_eq!(*purposes.lock().unwrap(), ["context.summarize"]);
+}
+
+/// Records the purpose of each `Usage` event.
+struct UsageSink(Arc<Mutex<Vec<String>>>);
+
+#[async_trait::async_trait]
+impl EventSink for UsageSink {
+    fn id(&self) -> &str {
+        "usage"
+    }
+    async fn handle(&self, event: &AgentEvent) {
+        if let AgentEvent::Usage { purpose, .. } = event {
+            self.0.lock().unwrap().push(purpose.clone());
+        }
+    }
 }
 
 /// Two more providers, one with a default model and one without.

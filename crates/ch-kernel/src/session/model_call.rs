@@ -120,31 +120,26 @@ impl Session {
             self.history.append_to_last_user(self.turn, added);
         }
 
-        // The request as the hooks left it, to send again if the provider rejects it as
-        // too long.
-        let messages = std::mem::take(&mut request.messages);
-        let resend = request.clone();
-        request.messages = messages;
         match self.send(request, step, cx).await {
             // Only before any output: what streamed has been shown already.
             Err(Failed {
                 error: ModelError::ContextOverflow(message),
                 streamed: false,
-            }) => self.retry_after_overflow(&ccx, resend, message, step).await,
+            }) => self.retry_after_overflow(&ccx, message, step).await,
             sent => sent.map_err(|f| termination(f.error)),
         }
     }
 
     /// The provider rejected the request as too long: compacts once and, if that changed
-    /// anything, sends `resend` again with a new view. The compaction and the new view
-    /// get the same `ccx` as the first view. Only the view is recomputed: the call's
+    /// anything, sends the request again with a new view. The compaction and the new
+    /// view get the same `ccx` as the first view. Only the view is recomputed: the call's
     /// reminders and notes are in the history by now, so the new view holds them, and
-    /// asking the prompts and `before_model` hooks again would store them twice. A
-    /// second overflow ends the turn.
+    /// asking the prompts and `before_model` hooks again would store them twice. Those
+    /// hooks can't change the request, so the retry sends the same system blocks, tools
+    /// and settings. A second overflow ends the turn.
     async fn retry_after_overflow(
         &mut self,
         ccx: &ContextCx,
-        resend: ModelRequest,
         message: String,
         step: u32,
     ) -> Result<ModelResponse, TerminationReason> {
@@ -180,7 +175,10 @@ impl Session {
             }
         }
         let messages = self.view(budget, ccx).await?.messages;
-        let request = ModelRequest { messages, ..resend };
+        let request = ModelRequest {
+            messages,
+            ..ccx.agent_request.clone()
+        };
         self.send(request, step, &ccx.cx)
             .await
             .map_err(|f| termination(f.error))

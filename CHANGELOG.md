@@ -7,6 +7,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 ### Breaking
 
 - An unknown key under `[model]`, `[agent]` or `[select]` (including `[model.pricing]` and `[model.summarizer]`) stops `ch` with an error that lists the valid keys. Before, a misspelled setting such as `agent.max_step` was silently ignored. Top-level keys and `[plugins.*]` tables are unchanged.
+- A `[model.summarizer]` that names a provider with no default model, such as `openai`, now needs `model.summarizer.id`, or `ch` stops at startup.
 
 ### New
 
