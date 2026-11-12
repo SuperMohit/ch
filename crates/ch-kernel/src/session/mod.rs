@@ -44,7 +44,8 @@ pub struct TurnResult {
     pub reason: TerminationReason,
     /// Text of the last assistant message.
     pub final_text: String,
-    /// Model calls made in this turn.
+    /// Model responses in this turn. A step sent again after an overflow is one step and
+    /// two model calls.
     pub steps: u32,
 }
 
@@ -65,9 +66,8 @@ pub struct Session {
     model: String,
     /// `model.id`, or the provider's default model when it is unset.
     configured_model: String,
-    summarizer: Arc<dyn ModelProvider>,
-    /// `model.summarizer.id`; summaries use the agent's current model when it is unset.
-    summarizer_model: Option<String>,
+    /// `[model.summarizer]`, if set.
+    summarizer: Option<(Arc<dyn ModelProvider>, String)>,
     context: Arc<dyn ContextStrategy>,
     /// Model calls the context strategy made itself, not yet in `usage`.
     context_usage: UsageLog,
@@ -148,13 +148,15 @@ impl Session {
     }
 
     pub fn context_window(&self) -> u64 {
-        self.for_configured_model(self.kcfg.model.context_window)
+        self.for_configured_model(&self.model, self.kcfg.model.context_window)
             .or_else(|| self.provider.context_window(&self.model))
             .unwrap_or(self.kcfg.agent.default_context_window)
     }
 
-    fn for_configured_model<T>(&self, setting: Option<T>) -> Option<T> {
-        setting.filter(|_| self.model == self.configured_model)
+    /// A `[model]` setting such as the window or pricing, which applies only when
+    /// `model` is the configured model.
+    fn for_configured_model<T>(&self, model: &str, setting: Option<T>) -> Option<T> {
+        setting.filter(|_| model == self.configured_model)
     }
 
     /// Starts a new conversation under a new id (`/clear`), leaving the old one saved as
@@ -240,11 +242,8 @@ impl Session {
         ContextCx {
             cx,
             agent_request,
+            provider: self.provider.clone(),
             summarizer: self.summarizer.clone(),
-            summarizer_model: self
-                .summarizer_model
-                .clone()
-                .unwrap_or_else(|| self.model.clone()),
             usage: self.context_usage.clone(),
         }
     }
@@ -328,11 +327,13 @@ impl Session {
     }
 
     /// Manual compaction (`/compact`) through the active context strategy. `instructions`
-    /// say what a summary should focus on.
+    /// say what a summary should focus on. Saves the session after, so the cost of a
+    /// summary is kept even if no turn follows.
     pub async fn compact(
         &mut self,
         instructions: Option<String>,
     ) -> anyhow::Result<CompactOutcome> {
+        self.start().await;
         let cancel = self.cancel.begin();
         let cx = self.cx(0, cancel);
         let system = self.system_blocks(&cx).await;
@@ -348,6 +349,11 @@ impl Session {
             .await;
         self.record_context_usage();
         self.cancel.finish();
+        if let Err(e) = self.save() {
+            self.events.emit(AgentEvent::Warning {
+                message: format!("could not save session: {e:#}"),
+            });
+        }
         result
     }
 

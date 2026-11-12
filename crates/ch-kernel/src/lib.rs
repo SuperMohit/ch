@@ -30,7 +30,7 @@ pub use approver::{Approval, ApprovalRequest, Approver};
 pub use command::{CmdCx, Command, Outcome};
 pub use config::{Config, KernelConfig, ModelConfig, Pricing};
 pub use context::{
-    Budget, CompactOutcome, CompactReason, CompactRequest, ContextCx, ContextStrategy,
+    Budget, CallUsage, CompactOutcome, CompactReason, CompactRequest, ContextCx, ContextStrategy,
     PassthroughContext, UsageLog, View,
 };
 pub use cx::Cx;

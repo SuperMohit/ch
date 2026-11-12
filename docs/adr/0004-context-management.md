@@ -121,7 +121,7 @@ A trim changes only the **contents** of blocks in the middle. It never removes a
 3. **Tool inputs.**
    - Any string in a `tool_use` input longer than `input_min_chars` (default 1,000) becomes `"[elided from an earlier call to save context: 81,220 characters]"`.
    - This covers `write_file` content and long `edit_file` texts without naming tools. The input stays a JSON object; the Anthropic provider would send `{}` for anything else (`request.rs:177-184`).
-   - **Risk:** the model may copy a shortened input. The plugin adds a `pre_tool` hook that refuses any call whose input contains the marker, and says the full text is needed.
+   - **Risk:** the model may copy a shortened input. The plugin adds a `pre_tool` hook that refuses a call when one of its input strings *is* a marker: equal to one the plugin wrote, or matching the whole pattern `[elided from an earlier call to save context: N characters]`. It says the full text is needed. A string that only contains the marker is allowed, or edits to this ADR and to the plugin's own source would be refused.
 4. **Old reminders.** Text blocks in the middle that start with the kernel's `<system-reminder>` wrapper (`util.rs:47-49`) become `[reminder elided]`. That covers the plan reminder, hook notes and `turn_end` notes.
 
 **User text is never changed.** Text the user wrote stays byte for byte, either in place in the middle or copied into the summary area when its step is summarized. Thinking blocks follow their own rule (below).
@@ -191,7 +191,7 @@ An unknown case errs toward keeping text, and no format change is needed. Reject
 
 **Decided: summaries are text blocks appended to the first user message.** Roles keep alternating, which some chat templates behind OpenAI-compatible servers require, and the first message's existing blocks stay a byte-identical prefix. Rejected: a separate user message after the first (two user messages in a row, which not every server accepts); and a system block (changing the system prompt invalidates the system and messages caches and, on Opus 5.5, every thinking block).
 
-**Decided: the agent's own current model writes summaries, replaying the cached prefix.** A summary then costs about one step, and the model that will continue the work decides what to keep; a weak summarizer drops what the agent needs. When `[model.summarizer]` is set (`config.rs:195-202`), that model gets the span as a plain-text transcript instead, because caches are per model. Rejected: always sending a transcript, which makes the agent model pay full input price for the span. This needs the summarizer to follow `/model` when unset (kernel change 3).
+**Decided: the agent's own current model writes summaries, replaying the cached prefix.** A summary then costs about one step, and the model that will continue the work decides what to keep; a weak summarizer drops what the agent needs. When `[model.summarizer]` is set (`config.rs:195-202`), that model gets the span as a plain-text transcript instead, because caches are per model. Rejected: always sending a transcript, which makes the agent model pay full input price for the span. This needs the agent's provider and current model when `[model.summarizer]` is unset (kernel change 3).
 
 **Decided: when the summaries pass `max_summary_share` (default 0.15) of usable, the two oldest are merged into one with the same prompt.** It is the design's only rewrite; it is rare and counted in telemetry. Rejected: never merging, so a long REPL session eventually ends with overflow; and re-summarizing everything each time, which is the rewrite this design avoids.
 
@@ -231,10 +231,12 @@ max_summary_share = 0.15       # 0.05–0.30
 
 - **Kernel change.** When the provider rejects a request with `ModelError::ContextOverflow`, the session calls `compact(reason: Overflow)` once. If that changed anything, it retries the call.
   - A second overflow in the same step, or a compaction that changed nothing, ends the turn with `ContextOverflow`, and `ch -p` exits 3.
+  - Only a rejection that comes before any output is retried. One that arrives after some of the answer streamed ends the turn, because that text was already shown.
 - **The retry adds nothing to history.**
   - By the time the rejected request was sent, its reminders and notes were stored in history.
   - Running `call_model` again would compute the reminders again and run `before_model` again, which would store the same text twice.
-  - So the retry computes only the view again. It sends the request with the same system blocks and tools, and the new view already holds the reminders and notes, because they are in history.
+  - So the retry computes only the view again, and the `before_model` hooks don't run. It sends the request as the hooks left it, with the same system blocks and tools, and the new view already holds the reminders and notes, because they are in history.
+  - The compaction and the new view get the same `ContextCx` as the step's first view.
 - **The plugin's overflow compaction** ignores `min_free` and `trim_to`.
   - It trims every candidate in the middle, then summarizes (except under `elide`).
   - Because the estimate was wrong, it may also trim results in the recent window, except in the newest step.
@@ -266,7 +268,7 @@ max_summary_share = 0.15       # 0.05–0.30
   - for a summary: its span, text, copied user text and model.
 - **The view is recomputed on every step** from the history and the valid records. The rendering uses no clock, randomness or estimate. Because the replacement text is stored, a stub renders the same after resume even if the tools or settings changed.
 - **On load,** a record whose events are missing or whose hashes don't match is ignored, with a warning. That covers a crash between writing the log and the turn-end save (`mod.rs:563`).
-- **One session at a time.** The plugin keeps one session's state, keyed by `cx.session_id`, and reloads when the id changes, as `PlanStore` does (`plugins/planning/src/store.rs:36-42`).
+- **One session at a time.** The plugin keeps one session's state, keyed by `cx.cx.session_id`, and reloads when the id changes, as `PlanStore` does (`plugins/planning/src/store.rs:36-42`).
   - `/clear` starts an empty log; `/resume` and `--continue` load the session's log.
   - Without a session directory, records live in memory only.
 
@@ -296,7 +298,7 @@ max_summary_share = 0.15       # 0.05–0.30
   - the trigger: `soft`, `hard`, `overflow` or `manual`;
   - results elided, inputs shortened, reminders elided, superseded calls, and thinking blocks dropped;
   - the first edited event, and the summary's span and length.
-- **The summary call** emits `ModelRequest` and `Usage` with purpose `context.summarize`. Its cost goes into the session's totals; today only agent calls count (`model_call.rs:158-160`).
+- **The summary call** goes through `ContextCx::complete`, which emits `ModelRequest` with purpose `context.summarize` and records the call's usage. When the strategy returns, the session emits `Usage` for it and adds it to the totals, with its cost when the call's model has pricing. Today only agent calls count (`model_call.rs:158-160`).
 - **`Warning`** when a copy can't be saved, a summary fails, or log records are ignored on load.
 - **For Phase 9** (`architecture.md:291`):
   - peak context ÷ window, and the number of trims and summaries;
@@ -308,17 +310,16 @@ max_summary_share = 0.15       # 0.05–0.30
 
 The strategy owns all the policy, so the kernel changes stay small:
 
-1. **Overflow retry** (`model_call.rs:144-146`, `mod.rs:391-394`). Compact once, then send again with only the view recomputed: no new reminders, no second `before_model` run.
+1. **Overflow retry** (`model_call.rs:144-146`, `mod.rs:391-394`). Compact once, then send again with only the view recomputed: no new reminders, no second `before_model` run. Only an overflow before any output streamed is retried.
 2. **The `compact` signature** (`context.rs:73-81`).
-   - It takes `{ reason: Manual | Overflow, instructions }` and returns `{ changed: bool, message }`, so the kernel knows whether a retry makes sense.
+   - It takes `{ reason: Manual | Overflow, instructions }` and returns `{ changed: bool, message }`, so the kernel knows whether a retry makes sense. The message is shown only after `/compact`.
    - `PassthroughContext` returns `changed: false`.
 3. **`ContextCx`** (`context.rs:50-56`) gains:
-   - the agent's request template (model, system blocks, tools, `max_tokens`, temperature, thinking budget), so a summary can replay the cached prefix;
-   - a way to report usage, so plugin calls count in `/cost` and the saved totals.
+   - the agent's provider and request template (model, system blocks, tools, `max_tokens`, temperature, thinking budget), so a summary can replay the cached prefix. The template's model is the current one, so it follows `/model`;
+   - the summarizer only when `[model.summarizer]` is set. Today it is always there and stays on the configured model (`builder.rs:97-102`). A summarizer `provider` without an `id` means that provider's default model;
+   - `complete`, which runs a plugin's model call, emits `ModelRequest` and records the usage, so plugin calls count in `/cost` and the saved totals.
 
-   The summarizer also follows `/model` when `[model.summarizer]` is unset (`builder.rs:102`).
-
-Nothing changes in `View`, `Budget` or `History`. Optionally, spill's safe file-creation helper moves to `ch_kernel::util`, so the two plugins share it.
+Nothing changes in `View`, `Budget` or `History`. Spill's safe file-creation helpers move to `ch_kernel::util`, so the two plugins share them.
 
 ## Invariants for 6.5
 
@@ -345,7 +346,7 @@ Each one holds for every view, checked over scripted sessions:
 - [ ] An overflow compacts and retries at most once per step; a second overflow ends the turn.
 - [ ] An overflow retry adds no block to history: each reminder and note of the step is stored exactly once.
 - [ ] A log record with a missing event or a wrong hash is ignored.
-- [ ] A call whose input contains the elision marker is refused.
+- [ ] A call with an input string that is an elision marker is refused; one whose input only mentions the marker runs.
 
 ## Consequences
 

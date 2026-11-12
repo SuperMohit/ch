@@ -96,11 +96,22 @@ impl SessionBuilder {
             ),
         };
         let summ = kcfg.model.summarizer.clone().unwrap_or_default();
-        let summarizer = match &summ.provider {
-            Some(id) => registry.provider(Some(id))?,
-            None => provider.clone(),
+        let summarizer = match (summ.provider, summ.id) {
+            (None, None) => None,
+            (None, Some(id)) => Some((provider.clone(), id)),
+            (Some(p), id) => {
+                let p = registry.provider(Some(&p))?;
+                let id = match (id, p.default_model()) {
+                    (Some(id), _) => id,
+                    (None, Some(id)) => id.to_string(),
+                    (None, None) => anyhow::bail!(
+                        "model provider `{}` has no default model; set model.summarizer.id",
+                        p.id()
+                    ),
+                };
+                Some((p, id))
+            }
         };
-        let summarizer_model = summ.id;
         let context = registry.context(kcfg.select.context.as_deref())?;
         let executor = registry.executor(kcfg.select.executor.as_deref())?;
         let approver_id = self.approver.or(kcfg.select.approver.clone());
@@ -150,7 +161,6 @@ impl SessionBuilder {
             model,
             configured_model,
             summarizer,
-            summarizer_model,
             context,
             context_usage: UsageLog::default(),
             executor,

@@ -9,9 +9,10 @@ use crate::context::{Budget, CompactReason, CompactRequest, ContextCx, View};
 use crate::cx::Cx;
 use crate::events::AgentEvent;
 use crate::hook::{HookEvent, Verdict, run_hooks};
-use crate::model::{ModelError, ModelEvent, ModelRequest, ModelResponse};
+use crate::model::{
+    ModelError, ModelEvent, ModelRequest, ModelResponse, estimate_request_tokens, specs_chars,
+};
 use crate::tokens::estimate_tokens;
-use crate::tool::ToolSpec;
 use crate::types::{ContentBlock, Message, Role, TerminationReason, Usage};
 use crate::util::system_reminder;
 
@@ -89,7 +90,7 @@ impl Session {
 
         let request = ModelRequest {
             messages,
-            ..ccx.agent_request
+            ..ccx.agent_request.clone()
         };
 
         // before_model hooks
@@ -119,42 +120,50 @@ impl Session {
             self.history.append_to_last_user(self.turn, added);
         }
 
-        // Kept to send again if the provider rejects the request as too long.
+        // The request as the hooks left it, to send again if the provider rejects it as
+        // too long.
         let messages = std::mem::take(&mut request.messages);
-        let template = request.clone();
+        let resend = request.clone();
         request.messages = messages;
         match self.send(request, step, cx).await {
-            Err(ModelError::ContextOverflow(message)) => {
-                self.retry_after_overflow(template, message, step, cx).await
-            }
-            sent => sent.map_err(termination),
+            // Only before any output: what streamed has been shown already.
+            Err(Failed {
+                error: ModelError::ContextOverflow(message),
+                streamed: false,
+            }) => self.retry_after_overflow(&ccx, resend, message, step).await,
+            sent => sent.map_err(|f| termination(f.error)),
         }
     }
 
     /// The provider rejected the request as too long: compacts once and, if that changed
-    /// anything, sends `template` again with a new view. Only the view is recomputed: the
-    /// call's reminders and notes are in the history by now, so the new view holds them,
-    /// and asking the prompts and `before_model` hooks again would store them twice. A
+    /// anything, sends `resend` again with a new view. The compaction and the new view
+    /// get the same `ccx` as the first view. Only the view is recomputed: the call's
+    /// reminders and notes are in the history by now, so the new view holds them, and
+    /// asking the prompts and `before_model` hooks again would store them twice. A
     /// second overflow ends the turn.
     async fn retry_after_overflow(
         &mut self,
-        template: ModelRequest,
+        ccx: &ContextCx,
+        resend: ModelRequest,
         message: String,
         step: u32,
-        cx: &Cx,
     ) -> Result<ModelResponse, TerminationReason> {
-        let budget = self.budget(&template.system, &[]);
-        let ccx = self.context_cx(cx.clone(), template);
+        let cancel = &ccx.cx.cancel;
+        if cancel.is_cancelled() {
+            return Err(TerminationReason::Cancelled);
+        }
+        // The call's reminders are in the history now, not on top of it.
+        let budget = self.budget(&ccx.agent_request.system, &[]);
         let request = CompactRequest {
             reason: CompactReason::Overflow,
             instructions: None,
         };
         let compacted = self
             .context
-            .compact(&self.history, budget, &request, &ccx)
+            .compact(&self.history, budget, &request, ccx)
             .await;
         self.record_context_usage();
-        if cx.cancel.is_cancelled() {
+        if cancel.is_cancelled() {
             return Err(TerminationReason::Cancelled);
         }
         match compacted {
@@ -170,18 +179,20 @@ impl Session {
                 return Err(TerminationReason::ContextOverflow { message });
             }
         }
-        let messages = self.view(budget, &ccx).await?.messages;
-        let request = ModelRequest {
-            messages,
-            ..ccx.agent_request
-        };
-        self.send(request, step, cx).await.map_err(termination)
+        let messages = self.view(budget, ccx).await?.messages;
+        let request = ModelRequest { messages, ..resend };
+        self.send(request, step, &ccx.cx)
+            .await
+            .map_err(|f| termination(f.error))
     }
 
     /// The context strategy's view of the history.
     async fn view(&mut self, budget: Budget, ccx: &ContextCx) -> Result<View, TerminationReason> {
         let view = self.context.view(&self.history, budget, ccx).await;
         self.record_context_usage();
+        if ccx.cx.cancel.is_cancelled() {
+            return Err(TerminationReason::Cancelled);
+        }
         view.with_context(|| format!("context strategy `{}` failed", self.context.id()))
             .map_err(|e| TerminationReason::Error {
                 message: format!("{e:#}"),
@@ -193,19 +204,19 @@ impl Session {
         request: ModelRequest,
         step: u32,
         cx: &Cx,
-    ) -> Result<ModelResponse, ModelError> {
+    ) -> Result<ModelResponse, Failed> {
         debug_assert_eq!(
             request.messages.last(),
             self.history.last().map(|e| &e.message),
             "the request must end with the newest history message"
         );
         let raw_est = estimate_request_tokens(&request);
-        let model = request.model.clone();
+        let (model, purpose) = (request.model.clone(), request.purpose.clone());
         self.events.emit(AgentEvent::ModelRequest {
             turn: self.turn,
             step,
             model: model.clone(),
-            purpose: request.purpose.clone(),
+            purpose: purpose.clone(),
             messages: request.messages.len(),
             tokens_est: self.calibrator.calibrate(raw_est),
             context_window: self.context_window(),
@@ -214,26 +225,22 @@ impl Session {
         let response = self.stream_model(request, cx.cancel.clone()).await?;
         let actual = response.usage.prompt_tokens();
         self.calibrator.observe(raw_est, actual);
-        self.record_usage(&model, "agent", &response.usage);
+        self.record_usage(&model, &purpose, &response.usage);
         Ok(response)
     }
 
     /// Counts the model calls the context strategy made itself, such as summaries.
     pub(super) fn record_context_usage(&mut self) {
-        for (model, purpose, usage) in self.context_usage.take() {
-            self.record_usage(&model, &purpose, &usage);
+        for call in self.context_usage.take() {
+            self.record_usage(&call.model, &call.purpose, &call.usage);
         }
     }
 
-    /// Adds a model call's usage and cost to the session's totals. Pricing is for the
-    /// configured model, so a call to another model counts tokens only.
+    /// Adds a model call's usage and cost to the session's totals.
     fn record_usage(&mut self, model: &str, purpose: &str, usage: &Usage) {
         self.usage.add(usage);
         let cost = self
-            .kcfg
-            .model
-            .pricing
-            .filter(|_| model == self.configured_model)
+            .for_configured_model(model, self.kcfg.model.pricing)
             .map(|p| p.cost(usage));
         if let Some(c) = cost {
             self.cost += c;
@@ -249,34 +256,42 @@ impl Session {
         &self,
         request: ModelRequest,
         cancel: CancellationToken,
-    ) -> Result<ModelResponse, ModelError> {
+    ) -> Result<ModelResponse, Failed> {
         let mut stream = tokio::select! {
             biased;
-            _ = cancel.cancelled() => return Err(ModelError::Cancelled),
+            _ = cancel.cancelled() => return Err(ModelError::Cancelled.into()),
             s = self.provider.stream(request, cancel.clone()) => s?,
         };
         // Tool calls whose input is streaming: id → (name, bytes so far, last progress).
         let mut inputs: HashMap<String, (String, u64, Instant)> = HashMap::new();
+        // Whether some of the response has reached the event bus.
+        let mut streamed = false;
         loop {
             let next = tokio::select! {
                 biased;
-                _ = cancel.cancelled() => return Err(ModelError::Cancelled),
+                _ = cancel.cancelled() => {
+                    return Err(Failed { error: ModelError::Cancelled, streamed });
+                }
                 n = stream.next() => n,
             };
             match next {
                 None => {
-                    return Err(ModelError::Other(anyhow::anyhow!(
+                    let error = ModelError::Other(anyhow::anyhow!(
                         "model stream ended without a final response"
-                    )));
+                    ));
+                    return Err(Failed { error, streamed });
                 }
-                Some(Err(e)) => return Err(e),
+                Some(Err(error)) => return Err(Failed { error, streamed }),
                 Some(Ok(ModelEvent::TextDelta(text))) => {
+                    streamed = true;
                     self.events.emit(AgentEvent::TextDelta { text });
                 }
                 Some(Ok(ModelEvent::ThinkingDelta(text))) => {
+                    streamed = true;
                     self.events.emit(AgentEvent::ThinkingDelta { text });
                 }
                 Some(Ok(ModelEvent::ToolUseStart { id, name })) => {
+                    streamed = true;
                     self.events.emit(AgentEvent::ToolInputStarted {
                         id: id.clone(),
                         name: name.clone(),
@@ -302,6 +317,21 @@ impl Session {
     }
 }
 
+/// A failed model call, and whether any of its response had streamed out already.
+struct Failed {
+    error: ModelError,
+    streamed: bool,
+}
+
+impl From<ModelError> for Failed {
+    fn from(error: ModelError) -> Self {
+        Self {
+            error,
+            streamed: false,
+        }
+    }
+}
+
 /// How a failed agent call ends the turn.
 fn termination(e: ModelError) -> TerminationReason {
     match e {
@@ -321,18 +351,4 @@ fn append_to_last_user(messages: &mut Vec<Message>, blocks: Vec<ContentBlock>) {
             content: blocks,
         }),
     }
-}
-
-fn specs_chars(specs: &[ToolSpec]) -> usize {
-    specs
-        .iter()
-        .map(|t| t.name.len() + t.description.len() + t.input_schema.to_string().len())
-        .sum()
-}
-
-fn estimate_request_tokens(req: &ModelRequest) -> u64 {
-    let chars = req.system.iter().map(String::len).sum::<usize>()
-        + req.messages.iter().map(Message::char_len).sum::<usize>()
-        + specs_chars(&req.tools);
-    estimate_tokens(chars)
 }

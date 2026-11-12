@@ -1,5 +1,9 @@
 //! Small helpers shared by the kernel and plugins.
 
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
 /// Truncates `s` to at most `max_chars` characters, keeping the head and the tail and
 /// putting a marker in the middle that says how much was removed.
 pub fn truncate_middle(s: &str, max_chars: usize) -> String {
@@ -64,6 +68,44 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
+    Ok(())
+}
+
+// Files a plugin saves in the session directory for the model to read back (spilled or
+// elided output) are made with these, so nothing placed there can redirect a write.
+
+/// `dir` with its parent canonicalized and its own name kept, the anchor the file tools
+/// check reads against. Fails if `dir` is a symlink.
+pub fn anchored(dir: &Path) -> io::Result<PathBuf> {
+    if fs::symlink_metadata(dir)?.file_type().is_symlink() {
+        return Err(io::Error::other(format!("{} is a symlink", dir.display())));
+    }
+    let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
+        return Err(io::Error::other(format!("{} has no parent", dir.display())));
+    };
+    Ok(fs::canonicalize(parent)?.join(name))
+}
+
+/// Creates `path`, failing if anything (a file or a symlink) is already there, readable
+/// only by the user.
+pub fn create_private(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
+}
+
+/// Makes `dir` accessible only by the user (`0700`). Does nothing off Unix.
+#[cfg(unix)]
+pub fn restrict(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+}
+
+/// Makes `dir` accessible only by the user (`0700`). Does nothing off Unix.
+#[cfg(not(unix))]
+pub fn restrict(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
