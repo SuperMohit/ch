@@ -1,6 +1,6 @@
 [package]
 name = "ch-context"
-description = "Context management strategies"
+description = "Context management: trims old, bulky content in rare batches to fit the window"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,3 +12,15 @@ workspace = true
 
 [dependencies]
 ch-kernel.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+ch-provider-scripted.workspace = true
+ch-safety.workspace = true
+ch-tools-fs.workspace = true
