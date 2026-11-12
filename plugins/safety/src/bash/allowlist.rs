@@ -28,7 +28,7 @@ pub fn segment_is_read_only(seg: &Segment) -> bool {
     let cmd = Cmd::of(seg);
     // Environment variables can make an allowlisted program run another one
     // (`GIT_CONFIG_*` setting `core.fsmonitor`, `HOME` pointing git at another
-    // `.gitconfig`, `LD_PRELOAD`, `RUSTC_WRAPPER`), so only locale and display
+    // `.gitconfig`, `LD_PRELOAD`), so only locale and display
     // settings keep a command read-only.
     if !cmd.assignments.iter().all(|a| is_display_assignment(a)) {
         return false;
@@ -53,10 +53,6 @@ pub fn segment_is_read_only(seg: &Segment) -> bool {
         "sort" => !cmd.has_arg(|a| a == "-o" || a.starts_with("--output")),
         "date" => !cmd.has_arg(|a| a == "-s" || a.starts_with("--set")),
         "git" => git_is_read_only(&cmd),
-        "cargo" => matches!(
-            cmd.args.first().map(String::as_str),
-            Some("check" | "metadata" | "tree" | "--version" | "-V")
-        ),
         _ => false,
     }
 }
@@ -144,7 +140,6 @@ mod tests {
             "find . -name '*.rs'",
             "cat a.txt | grep x | wc -l",
             "cd src && ls",
-            "cargo check",
             "echo hi 2>&1",
             "ls >/dev/null",
             "head -n 5 a; tail b",
@@ -172,6 +167,13 @@ mod tests {
             "cat <<EOF\n$(id)\nEOF",
             "echo $'\\' '; rm -rf ~ #'",
             "cargo build",
+            // Build tools run the project's code: `cargo check` runs build scripts
+            // and proc macros; a `.cargo/config.toml` can name the `rustc` that
+            // `metadata` and `tree` run, and a `rust-toolchain.toml` the `cargo` itself.
+            "cargo check",
+            "cargo metadata",
+            "cargo tree",
+            "cargo --version",
             "npm test",
             "sort -o out in",
             "LD_PRELOAD=x.so ls",
