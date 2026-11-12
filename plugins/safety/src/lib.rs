@@ -5,6 +5,8 @@
 //! - [`PathGuard`] resolves model-supplied paths and rejects anything outside the
 //!   workspace (including `..` tricks and symlink escapes).
 //! - [`FileState`] tracks what the agent has read, so edits require a full, current read.
+//! - [`Policy`] is the compiled permission policy, for plugins that run commands on
+//!   their own and must not run more than the model could (diagnostics).
 //!
 //! It also adds a `pre_tool` hook (priority -100) implementing the permission policy
 //! from `[plugins.safety]`:
@@ -71,7 +73,12 @@ impl Plugin for SafetyPlugin {
             "safety",
             "Path guard, read-before-write tracking and the allow/ask/deny permission policy",
         )
-        .provides(&["service:PathGuard", "service:FileState", "hook:pre_tool"])
+        .provides(&[
+            "service:PathGuard",
+            "service:FileState",
+            "service:Policy",
+            "hook:pre_tool",
+        ])
         .project_settings(&["ask", "deny"])
     }
 
@@ -84,9 +91,10 @@ impl Plugin for SafetyPlugin {
             )
         })?);
         let state = Arc::new(FileState::with_root(guard.root()));
-        let policy = Policy::new(&config, guard.clone())?;
+        let policy = Arc::new(Policy::new(&config, guard.clone())?);
         cx.provide_service(guard)?;
         cx.provide_service(state)?;
+        cx.provide_service(policy.clone())?;
         cx.add_hook(PermissionHook::new(policy));
         Ok(())
     }
@@ -94,11 +102,11 @@ impl Plugin for SafetyPlugin {
 
 /// The `pre_tool` hook that applies a [`Policy`].
 pub struct PermissionHook {
-    policy: Policy,
+    policy: Arc<Policy>,
 }
 
 impl PermissionHook {
-    pub fn new(policy: Policy) -> Self {
+    pub fn new(policy: Arc<Policy>) -> Self {
         Self { policy }
     }
 }

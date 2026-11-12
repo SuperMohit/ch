@@ -136,7 +136,7 @@ Not doing: Rust dynamic libraries (`dlopen`), because Rust has no stable ABI and
 | Planning | `planning` (tool + system block + per-turn plan reminder) | enable or disable `planning` |
 | Context management | `context` with `strategy = "staged"` and so on | `[plugins.context] strategy = ...` |
 | Safety gates | `safety` (path guard, read-before-write, permission policy) | always on |
-| Post-edit diagnostics | `diagnostics` (post_tool hook) | enable or disable |
+| Post-edit diagnostics | `diagnostics` (pre_tool, post_tool, before_model and turn_end hooks; [ADR 0003](adr/0003-diagnostics-new-findings-only.md)) | enable or disable |
 | Stuck detection | `stuck` (hook: reminder, refusal, stop) | enable or disable |
 
 ## 5. Config and file locations
