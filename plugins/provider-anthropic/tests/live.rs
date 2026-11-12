@@ -80,3 +80,62 @@ async fn streamed_tool_use_round_trip() {
     assert_eq!(second.stop_reason, StopReason::EndTurn);
     assert!(second.message.text().contains("18"));
 }
+
+/// The context plugin drops the newest step's thinking when it trims, while that step's
+/// `tool_use` is answered by the request's last message. The API accepts a trailing run
+/// of thinking blocks removed; this checks it with enforcement on, as new accounts have
+/// it by default.
+#[tokio::test]
+#[ignore = "needs ANTHROPIC_API_KEY and network"]
+async fn a_tool_result_is_accepted_after_its_call_s_thinking_is_dropped() {
+    let model = std::env::var("CH_LIVE_ANTHROPIC_MODEL").unwrap_or("claude-haiku-5-5".into());
+    let provider = AnthropicProvider::new(AnthropicConfig {
+        prefix_mismatch_behavior: "error".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    let mut request = ModelRequest {
+        model,
+        system: vec!["Use the get_weather tool to answer weather questions.".into()],
+        messages: vec![Message::user(
+            "Think about which city I mean, then check the weather in the capital of France.",
+        )],
+        tools: vec![weather_tool()],
+        max_tokens: 4096,
+        temperature: None,
+        thinking_budget: Some(2048),
+        purpose: "live-test".into(),
+    };
+    let first = ch_kernel::complete(&provider, request.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(first.stop_reason, StopReason::ToolUse);
+    let thinking = |b: &ContentBlock| {
+        matches!(
+            b,
+            ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+        )
+    };
+    assert!(
+        first.message.content.iter().any(thinking),
+        "the model must think for this test to mean anything: {:?}",
+        first.message
+    );
+    let call = first.message.tool_calls().remove(0);
+
+    let mut stripped = first.message.clone();
+    stripped.content.retain(|b| !thinking(b));
+    request.messages.push(stripped);
+    request.messages.push(Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content: "18°C and sunny".into(),
+            is_error: false,
+        }],
+    });
+    let second = ch_kernel::complete(&provider, request, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(second.stop_reason, StopReason::EndTurn);
+}

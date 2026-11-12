@@ -29,6 +29,8 @@ use crate::request::{BodyOptions, build_body};
 pub const API_VERSION_HEADER: &str = "2023-06-01";
 /// Beta header for `fallbacks: "default"`.
 pub const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
+/// Beta header for `thinking.block_binding`.
+pub const BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
 const OFFICIAL_HOST: &str = "api.anthropic.com";
 
 /// `[plugins.provider-anthropic]`.
@@ -56,6 +58,9 @@ pub struct AnthropicConfig {
     /// Stream tool inputs without server-side buffering. Defaults to on for the official
     /// API and off for other base URLs (proxies may reject the field).
     pub eager_input_streaming: Option<bool>,
+    /// `thinking.block_binding.prefix_mismatch_behavior` (such as `"error"`), sent with
+    /// the binding-controls beta when thinking is on; empty to leave it to the account.
+    pub prefix_mismatch_behavior: String,
 }
 
 impl Default for AnthropicConfig {
@@ -70,6 +75,7 @@ impl Default for AnthropicConfig {
             thinking_display: "summarized".into(),
             fallbacks: "default".into(),
             eager_input_streaming: None,
+            prefix_mismatch_behavior: String::new(),
         }
     }
 }
@@ -90,6 +96,7 @@ impl AnthropicConfig {
             thinking_display: self.thinking_display.trim().to_string(),
             effort: self.effort.trim().to_string(),
             fallbacks,
+            prefix_mismatch_behavior: self.prefix_mismatch_behavior.trim().to_string(),
         }
     }
 }
@@ -143,7 +150,7 @@ impl AnthropicProvider {
         &self,
         key: &str,
         body: &Value,
-        beta: bool,
+        betas: &[&str],
         cancel: &CancellationToken,
     ) -> Result<ModelStream, Failure> {
         let mut req = self
@@ -153,8 +160,8 @@ impl AnthropicProvider {
             .header("anthropic-version", API_VERSION_HEADER)
             .header("accept", "text/event-stream")
             .json(body);
-        if beta {
-            req = req.header("anthropic-beta", FALLBACK_BETA);
+        if !betas.is_empty() {
+            req = req.header("anthropic-beta", betas.join(","));
         }
         let sent = tokio::select! {
             _ = cancel.cancelled() => return Err(Failure::fatal(ModelError::Cancelled)),
@@ -213,7 +220,7 @@ impl ModelProvider for AnthropicProvider {
     ) -> Result<ModelStream, ModelError> {
         let key = self.api_key()?;
         let opts = self.cfg.body_options();
-        let beta = opts.uses_fallbacks(&request.model);
+        let betas = opts.betas(&request.model);
         let body = build_body(&request, &opts);
         let base = Duration::from_millis(self.cfg.retry_base_ms);
         let mut retries = 0;
@@ -221,7 +228,7 @@ impl ModelProvider for AnthropicProvider {
             if cancel.is_cancelled() {
                 return Err(ModelError::Cancelled);
             }
-            match self.attempt(&key, &body, beta, &cancel).await {
+            match self.attempt(&key, &body, &betas, &cancel).await {
                 Ok(stream) => return Ok(stream),
                 Err(f) if f.retryable && retries < self.cfg.max_retries => {
                     let delay = f

@@ -4,11 +4,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ch_context::{Context, ContextConfig, Strategy};
+use ch_context::{Context, ContextConfig, REFUSED, Strategy};
 use ch_kernel::util::system_reminder;
 use ch_kernel::{
     AgentEvent, Budget, CompactOutcome, CompactReason, CompactRequest, ContentBlock, ContextCx,
-    ContextStrategy, Cx, History, Message, ModelRequest, Role, TokenCalibrator, ToolSpec, UsageLog,
+    ContextStrategy, Cx, History, Hook, HookDecision, HookEvent, Message, ModelRequest, Role,
+    TokenCalibrator, ToolCall, ToolSpec, UsageLog,
 };
 use ch_provider_scripted::ScriptedProvider;
 use serde_json::{Value, json};
@@ -21,6 +22,8 @@ struct Conv {
     history: History,
     turn: u32,
     calls: usize,
+    /// Extra characters of thinking in each step.
+    think: usize,
 }
 
 impl Conv {
@@ -37,6 +40,7 @@ impl Conv {
             history,
             turn: 1,
             calls: 0,
+            think: 0,
         }
     }
 
@@ -50,7 +54,11 @@ impl Conv {
                 role: Role::Assistant,
                 content: vec![
                     ContentBlock::Thinking {
-                        thinking: format!("thinking before call {}", self.calls),
+                        thinking: format!(
+                            "thinking before call {}{}",
+                            self.calls,
+                            "t".repeat(self.think)
+                        ),
                         signature: Some("signed".into()),
                     },
                     ContentBlock::ToolUse {
@@ -329,14 +337,14 @@ fn assert_stubs_read_back(history: &History, view: &[Message]) -> usize {
     read
 }
 
-/// Thinking blocks after a record's first edit, through its `at_event`, are gone; the
-/// others are kept.
+/// Thinking blocks after a record's first edit (all of them, for a reset), through its
+/// `at_event`, are gone; the others are kept.
 fn assert_thinking_rule(history: &History, view: &[Message], records: &[Value]) {
-    let ranges: Vec<(u64, u64)> = records
+    let ranges: Vec<(Option<u64>, u64)> = records
         .iter()
         .map(|r| {
             (
-                r["edits"][0]["event"].as_u64().unwrap(),
+                r["edits"][0]["event"].as_u64(),
                 r["at_event"].as_u64().unwrap(),
             )
         })
@@ -347,7 +355,7 @@ fn assert_thinking_rule(history: &History, view: &[Message], records: &[Value]) 
         }
         let dropped = ranges
             .iter()
-            .any(|&(first, at)| event.id > first && event.id <= at);
+            .any(|&(first, at)| first.is_none_or(|f| event.id > f) && event.id <= at);
         let kept = v.content.iter().filter(|b| is_thinking(b)).count();
         let had = event
             .message
@@ -448,16 +456,65 @@ async fn between_trims_each_view_extends_the_last_and_a_reload_renders_the_same_
     assert_eq!(records(&tmp.path().join("s1")).len(), 1);
 
     // A few small steps don't reach `soft` again: no new trim, and the view only grows.
+    // Their thinking was written against the trimmed view, so it stays.
     for _ in 0..3 {
         c.bash(100);
     }
     let next = view(&ctx, &c.history, window, &ccx).await;
     assert_eq!(next[..first.len()], first[..]);
-    assert_eq!(records(&tmp.path().join("s1")).len(), 1);
+    let log = records(&tmp.path().join("s1"));
+    assert_eq!(log.len(), 1);
+    assert_thinking_rule(&c.history, &next, &log);
+    let newest = next.len() - 2;
+    assert!(next[newest].content.iter().any(is_thinking));
 
-    // A new process renders the same bytes from the history and the log.
-    let reloaded = view(&elide(), &c.history, window, &ccx).await;
+    // A new process renders the same bytes from the history and the log, also with
+    // settings under which it would decide nothing: the bytes come from the log.
+    let other = Context::new(ContextConfig {
+        soft: 0.9,
+        elide_min_chars: 20_000,
+        superseded_tools: Vec::new(),
+        ..Default::default()
+    });
+    let reloaded = view(&other, &c.history, 1_000_000, &ccx).await;
     assert_eq!(reloaded, next);
+    // `none` doesn't trim, but a session trimmed before keeps its bytes.
+    let none = Context::new(ContextConfig {
+        strategy: Strategy::None,
+        ..Default::default()
+    });
+    assert_eq!(view(&none, &c.history, 1_000_000, &ccx).await, next);
+}
+
+#[tokio::test]
+async fn compact_between_turns_drops_the_final_answer_s_thinking() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut c = Conv::new("Fix the parser");
+    for _ in 0..6 {
+        c.bash(2000);
+    }
+    // The model's final answer, with its reasoning; `/compact` comes after it.
+    c.history.push(
+        1,
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "all done".into(),
+                    signature: Some("signed".into()),
+                },
+                ContentBlock::text("Done."),
+            ],
+        },
+    );
+    let ccx = ccx(Some(tmp.path()), FILE_TOOLS);
+    let out = compact(&elide(), &c.history, 1_000_000, &ccx, CompactReason::Manual).await;
+    assert!(out.changed, "{}", out.message);
+    // It was signed against the untrimmed history, so the next turn can't send it.
+    c.history.push(2, Message::user("next"));
+    let v = view(&elide(), &c.history, 1_000_000, &ccx).await;
+    let answer = &v[v.len() - 2];
+    assert_eq!(answer.content, [ContentBlock::text("Done.")]);
 }
 
 #[tokio::test]
@@ -559,38 +616,53 @@ async fn a_spilled_result_points_at_its_spill_file_and_needs_no_copy() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("s1");
     std::fs::create_dir_all(dir.join("spill")).unwrap();
-    let spill = std::fs::canonicalize(tmp.path())
-        .unwrap()
-        .join("s1/spill/call_1-bash-ab12cd34.txt");
-    std::fs::write(&spill, "the whole output").unwrap();
-    let mut c = Conv::new("Fix the parser");
-    c.call(
-        "bash",
-        json!({"command": "make"}),
+    let spill_dir = std::fs::canonicalize(tmp.path()).unwrap().join("s1/spill");
+    // Spill names a file after the call it was made for: this result's call is `c1`.
+    let own = spill_dir.join("c1-bash-ab12cd34.txt");
+    let other = spill_dir.join("c2-bash-ef56ab78.txt");
+    let head = "x".repeat(900);
+    std::fs::write(&own, format!("{head}{}", "y".repeat(5000))).unwrap();
+    std::fs::write(&other, format!("{head}{}", "y".repeat(5000))).unwrap();
+    let notice = |path: &Path| {
         format!(
-            "{}\n[… The full output is saved at {}.\nRead the rest]",
-            "x".repeat(900),
-            spill.display()
-        ),
-    );
+            "{head}\n\n[… The full output is saved at {}.\nRead the rest]",
+            path.display()
+        )
+    };
+    let mut c = Conv::new("Fix the parser");
+    c.call("bash", json!({"command": "make"}), notice(&own));
+    // Results that name another call's spill file get a copy instead.
+    c.call("bash", json!({"command": "make"}), notice(&own));
+    c.call("bash", json!({"command": "make"}), notice(&other));
     for _ in 0..3 {
         c.bash(100);
     }
     let ccx = ccx(Some(tmp.path()), &["bash"]);
     compact(&elide(), &c.history, 100_000, &ccx, CompactReason::Manual).await;
     let v = view(&elide(), &c.history, 100_000, &ccx).await;
-    let ContentBlock::ToolResult { content, .. } = &v[2].content[0] else {
-        panic!("{:?}", v[2]);
+    let result = |i: usize| match &v[i].content[0] {
+        ContentBlock::ToolResult { content, .. } => content.clone(),
+        other => panic!("{other:?}"),
     };
+    let first = result(2);
     assert!(
-        content.contains(&format!("The full output is saved at {}", spill.display())),
-        "{content}"
+        first.contains(&format!(
+            "The whole output, 5,900 bytes, is saved at {}",
+            own.display()
+        )),
+        "{first}"
     );
+    assert!(first.contains("a preview of 4 lines"), "{first}");
     assert!(
-        content.contains("`tail -n +N <path> | head -n 200`"),
-        "{content}"
+        first.contains("from line N on with `tail -n +N <path> | head -n 200`"),
+        "{first}"
     );
-    assert!(!dir.join("context/elided").exists());
+    // The second names `c1`'s file but is `c2`'s result; the third is `c3`'s.
+    for i in [4, 6] {
+        let stub = result(i);
+        assert!(stub.contains("context/elided/"), "{stub}");
+    }
+    assert!(dir.join("context/elided").exists());
 }
 
 #[tokio::test]
@@ -631,50 +703,161 @@ async fn an_overflow_trims_every_candidate_and_results_in_the_window_but_the_new
     assert!(!again.changed, "{}", again.message);
 }
 
-#[tokio::test]
-async fn bad_log_records_are_ignored_with_a_warning() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("s1");
-    let c = long_session();
-    let ccx = ccx(Some(tmp.path()), FILE_TOOLS);
-    let trimmed = view(&elide(), &c.history, 25_000, &ccx).await;
-    let log = dir.join("context/log.jsonl");
-    let good = std::fs::read_to_string(&log).unwrap();
-
-    // A line that doesn't parse, and a record whose block no longer matches.
-    let mut tampered: Value = serde_json::from_str(good.lines().next().unwrap()).unwrap();
-    tampered["edits"][0]["hash"] = json!("0000");
-    std::fs::write(&log, format!("not json\n{tampered}\n")).unwrap();
-    let mut rx = ccx.cx.events.subscribe();
-    let v = view(&elide(), &c.history, 1_000_000, &ccx).await;
-    assert_eq!(v, c.history.messages(), "neither record applies");
-    let warnings: Vec<String> = received(&mut rx)
+fn warnings(rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>) -> Vec<String> {
+    received(rx)
         .into_iter()
         .filter_map(|e| match e {
             AgentEvent::Warning { message } => Some(message),
             _ => None,
         })
-        .collect();
-    assert_eq!(warnings.len(), 2, "{warnings:#?}");
-    assert!(warnings[0].contains("record 1"), "{}", warnings[0]);
-    assert!(warnings[1].contains("has changed"), "{}", warnings[1]);
+        .collect()
+}
 
-    // A record from a log ahead of the saved history: its events are missing.
-    std::fs::write(&log, &good).unwrap();
-    let mut shorter = Conv::new("Fix the parser");
-    for _ in 0..5 {
-        shorter.bash(2000);
+fn thinking_left(view: &[Message]) -> usize {
+    view.iter()
+        .flat_map(|m| &m.content)
+        .filter(|b| is_thinking(b))
+        .count()
+}
+
+/// A history trimmed twice, with the model answering after each trim: its view and the
+/// two records.
+async fn trimmed_twice(tmp: &Path) -> (Conv, Vec<Message>, String) {
+    let mut c = long_session();
+    let ccx = ccx(Some(tmp), FILE_TOOLS);
+    let ctx = elide();
+    view(&ctx, &c.history, 25_000, &ccx).await;
+    for _ in 0..12 {
+        c.bash(2000);
+    }
+    let v = view(&ctx, &c.history, 25_000, &ccx).await;
+    c.bash(100);
+    let log = std::fs::read_to_string(tmp.join("s1/context/log.jsonl")).unwrap();
+    assert_eq!(log.lines().count(), 2);
+    (c, v, log)
+}
+
+#[tokio::test]
+async fn a_record_that_no_longer_matches_stops_the_log_and_resets_the_reasoning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (c, _, log) = trimmed_twice(tmp.path()).await;
+    let path = tmp.path().join("s1/context/log.jsonl");
+    let ccx = ccx(Some(tmp.path()), FILE_TOOLS);
+
+    // The first record's block changed (the history was edited), though the model
+    // answered after it: what was sent can't be rendered again.
+    let mut lines: Vec<Value> = log
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    lines[0]["edits"][0]["hash"] = json!("0000");
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    std::fs::write(&path, text).unwrap();
+    let mut rx = ccx.cx.events.subscribe();
+    let v = view(&elide(), &c.history, 1_000_000, &ccx).await;
+    let w = warnings(&mut rx);
+    assert_eq!(w.len(), 1, "{w:#?}");
+    assert!(
+        w[0].contains("record 1") && w[0].contains("has changed"),
+        "{}",
+        w[0]
+    );
+    // Neither record applies, the later one included; no thinking is sent.
+    assert_eq!(thinking_left(&v), 0);
+    let stripped: Vec<Message> = c.history.messages().iter().map(without_thinking).collect();
+    assert_eq!(v, stripped);
+    // The reset is in the log, so the next process sends the same bytes, quietly.
+    let after = records(&tmp.path().join("s1"));
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0]["kind"], "reset");
+    let mut rx = ccx.cx.events.subscribe();
+    assert_eq!(view(&elide(), &c.history, 1_000_000, &ccx).await, v);
+    assert!(warnings(&mut rx).is_empty());
+}
+
+#[tokio::test]
+async fn a_line_that_doesn_t_parse_resets_unless_it_is_the_torn_end_of_the_log() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (c, trimmed, log) = trimmed_twice(tmp.path()).await;
+    let path = tmp.path().join("s1/context/log.jsonl");
+    let ccx = ccx(Some(tmp.path()), FILE_TOOLS);
+
+    // A crash while appending: the last line is cut off. Nothing was sent with it.
+    std::fs::write(&path, format!("{log}{{\"kind\":\"eli")).unwrap();
+    let mut rx = ccx.cx.events.subscribe();
+    assert_eq!(
+        view(&elide(), &c.history, 1_000_000, &ccx).await[..trimmed.len()],
+        trimmed[..]
+    );
+    assert!(warnings(&mut rx)[0].contains("newer than the saved session"));
+    assert_eq!(
+        records(&tmp.path().join("s1")).len(),
+        2,
+        "the torn line is gone"
+    );
+
+    // Garbage in the middle of the log.
+    let first = log.lines().next().unwrap();
+    std::fs::write(&path, format!("not json\n{first}\n")).unwrap();
+    let v = view(&elide(), &c.history, 1_000_000, &ccx).await;
+    assert_eq!(thinking_left(&v), 0);
+    assert_eq!(records(&tmp.path().join("s1"))[0]["kind"], "reset");
+}
+
+#[tokio::test]
+async fn an_edit_to_a_block_already_edited_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (c, _, log) = trimmed_twice(tmp.path()).await;
+    let path = tmp.path().join("s1/context/log.jsonl");
+    let ccx = ccx(Some(tmp.path()), FILE_TOOLS);
+    let mut lines: Vec<Value> = log
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    // The second record also edits the first record's first block.
+    let twice = lines[0]["edits"][0].clone();
+    lines[1]["edits"].as_array_mut().unwrap().insert(0, twice);
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    std::fs::write(&path, text).unwrap();
+    let mut rx = ccx.cx.events.subscribe();
+    view(&elide(), &c.history, 1_000_000, &ccx).await;
+    let w = warnings(&mut rx);
+    assert!(
+        w[0].contains("record 2") && w[0].contains("edited twice"),
+        "{w:#?}"
+    );
+}
+
+#[tokio::test]
+async fn records_from_before_a_crash_are_dropped_and_don_t_come_back_when_ids_are_reused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("s1");
+    let ccx = ccx(Some(tmp.path()), FILE_TOOLS);
+    // The process trims at the start of a turn, then stops before the session is saved:
+    // the history on disk ends before that turn, but the log has the trim.
+    let mut lost = long_session();
+    lost.turn("now the docs");
+    view(&elide(), &lost.history, 25_000, &ccx).await;
+    assert_eq!(records(&dir).len(), 1);
+
+    // The next process reuses the turn's event id for another prompt.
+    let mut resumed = long_session();
+    resumed.turn("something else entirely");
+    let mut rx = ccx.cx.events.subscribe();
+    let v = view(&elide(), &resumed.history, 1_000_000, &ccx).await;
+    assert_eq!(v, resumed.history.messages(), "the lost trim isn't applied");
+    assert!(warnings(&mut rx)[0].contains("newer than the saved session"));
+    assert!(records(&dir).is_empty(), "it is gone from the log");
+
+    // A process after that, with the model having answered since: still nothing comes
+    // back, and nothing is reset.
+    for _ in 0..3 {
+        resumed.bash(100);
     }
     let mut rx = ccx.cx.events.subscribe();
-    let v = view(&elide(), &shorter.history, 1_000_000, &ccx).await;
-    assert_eq!(v, shorter.history.messages());
-    let missing = received(&mut rx)
-        .into_iter()
-        .any(|e| matches!(e, AgentEvent::Warning { message } if message.contains("is missing")));
-    assert!(missing);
-
-    // The intact log still renders the trimmed view.
-    assert_eq!(view(&elide(), &c.history, 25_000, &ccx).await, trimmed);
+    let v = view(&elide(), &resumed.history, 1_000_000, &ccx).await;
+    assert_eq!(v, resumed.history.messages());
+    assert!(warnings(&mut rx).is_empty());
 }
 
 #[tokio::test]
@@ -739,4 +922,111 @@ async fn a_copy_left_by_a_crash_is_reused_and_a_foreign_file_is_not_trusted() {
     );
     assert!(warned);
     assert_eq!(std::fs::read_to_string(&first).unwrap(), "something else");
+    // The record holds the stub that was sent, so a reload renders the same view.
+    assert_eq!(view(&elide(), &c.history, 25_000, &ccx).await, v);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_trim_whose_record_can_t_be_saved_isn_t_made() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let c = long_session();
+    let ccx = ccx(Some(tmp.path()), FILE_TOOLS);
+    let log = tmp.path().join("s1/context/log.jsonl");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, "").unwrap();
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o400)).unwrap();
+    let mut rx = ccx.cx.events.subscribe();
+    let ctx = elide();
+    let v = view(&ctx, &c.history, 25_000, &ccx).await;
+    assert_eq!(v, c.history.messages(), "the view goes out unchanged");
+    let w = warnings(&mut rx);
+    assert!(w[0].contains("so it wasn't made"), "{w:#?}");
+    // Nothing is half-applied: the next view decides again.
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let v = view(&ctx, &c.history, 25_000, &ccx).await;
+    assert_ne!(v, c.history.messages());
+    assert_eq!(view(&elide(), &c.history, 25_000, &ccx).await, v);
+}
+
+#[tokio::test]
+async fn a_result_shorter_than_its_stub_is_left_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A long session path makes the stub of a 205-character result longer than it.
+    let sessions = tmp
+        .path()
+        .join("sessions-in-a-deeply-nested-place".repeat(4));
+    std::fs::create_dir(&sessions).unwrap();
+    let mut c = Conv::new("Fix the parser");
+    c.call("bash", json!({"command": "ls"}), "x".repeat(205));
+    c.bash(5000);
+    for _ in 0..3 {
+        c.bash(100);
+    }
+    let ccx = ccx(Some(&sessions), FILE_TOOLS);
+    let ctx = Context::new(ContextConfig {
+        elide_min_chars: 200,
+        ..Default::default()
+    });
+    let out = compact(&ctx, &c.history, 1_000_000, &ccx, CompactReason::Manual).await;
+    assert!(out.message.contains("1 tool result"), "{}", out.message);
+    let v = view(&ctx, &c.history, 1_000_000, &ccx).await;
+    assert_eq!(v[2].content[0], c.history.messages()[2].content[0]);
+    assert_ne!(v[4].content[0], c.history.messages()[4].content[0]);
+}
+
+#[tokio::test]
+async fn the_projection_counts_the_thinking_a_trim_drops() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut c = Conv::new("Fix the parser");
+    c.think = 1500;
+    for _ in 0..30 {
+        c.bash(2000);
+    }
+    let ccx = ccx(Some(tmp.path()), FILE_TOOLS);
+    let window = 45_000;
+    let before = tokens(&c.history.messages());
+    assert!(before as f64 > 0.60 * window as f64, "{before}");
+    let v = view(&elide(), &c.history, window, &ccx).await;
+    let after = tokens(&v);
+    // Dropping the thinking frees most of what's needed: few results go, and the view
+    // ends near `trim_to`, not far below it.
+    assert!(after as f64 <= 0.40 * window as f64, "{after}");
+    assert!(after as f64 >= 0.35 * window as f64, "{after}");
+}
+
+#[tokio::test]
+async fn a_call_that_copies_a_stub_written_in_this_session_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let c = long_session();
+    let ctx = elide();
+    let hook = ctx.marker_hook();
+    let ccx = ccx(Some(tmp.path()), FILE_TOOLS);
+    let v = view(&ctx, &c.history, 25_000, &ccx).await;
+    let stub = v
+        .iter()
+        .flat_map(|m| &m.content)
+        .find_map(|b| match b {
+            ContentBlock::ToolResult { content, .. } if content.starts_with("[Output elided") => {
+                Some(content.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let call = |content: String| HookEvent::PreTool {
+        call: ToolCall {
+            id: "w1".into(),
+            name: "write_file".into(),
+            input: json!({"path": "notes.md", "content": content}),
+        },
+        read_only: false,
+    };
+    let copied = call(format!("The log said:\n{stub}\n"));
+    assert_eq!(hook.on(&copied, &ccx.cx).await, HookDecision::deny(REFUSED));
+    // Another session's stubs are not this one's; prose about stubs is fine.
+    let other = ccx_for("s2", Some(tmp.path()), FILE_TOOLS);
+    assert_eq!(hook.on(&copied, &other.cx).await, HookDecision::Continue);
+    let prose = call("A stub looks like `[Output elided to save context: 3 lines, …]`.".into());
+    assert_eq!(hook.on(&prose, &ccx.cx).await, HookDecision::Continue);
 }

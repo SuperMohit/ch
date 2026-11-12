@@ -8,7 +8,8 @@
 //! model's signed thinking stay valid.
 //!
 //! - The first message (the task) is never edited, and neither are the newest steps:
-//!   at least `recent` of the usable window and at least `min_recent_steps` steps.
+//!   at least `recent` of the usable window and at least `min_recent_steps` steps
+//!   (except their thinking, and on overflow their results but the newest step's).
 //! - When the view passes `soft` of the usable window, the middle is trimmed, in this
 //!   order: every call to a `superseded_tools` tool but the latest, tool results longer
 //!   than `elide_min_chars`, strings in tool inputs longer than `input_min_chars`, then
@@ -21,11 +22,15 @@
 //! - Text the user wrote is never changed.
 //! - A trim drops the thinking blocks it invalidates: those after its first edit.
 //! - `/compact` and an overflow trim every candidate.
-//! - A call whose input repeats a trimmed input's marker is refused.
+//! - A call whose input repeats a marker or a stub of this session is refused.
+//! - Each record is bound to the history it was decided on and is saved durably before
+//!   its trim is sent. On load, the log is applied up to its first record that doesn't
+//!   match; when the model had answered after that record, a reset record leaves out
+//!   all earlier thinking instead (see the ADR's implementation notes).
 //!
 //! ```toml
 //! [plugins.context]
-//! strategy = "elide"             # none | elide; summarize and staged aren't available yet
+//! strategy = "elide"             # none | elide; summarize and staged act as elide for now
 //! soft = 0.60                    # 0.30–0.90
 //! hard = 0.85                    # 0.50–0.95, at least soft + 0.05 (for summaries)
 //! recent = 0.30                  # 0.10–0.50, below soft
@@ -78,12 +83,13 @@ impl Plugin for ContextPlugin {
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
         let config: ContextConfig = cx.config()?;
-        let (config, warnings) = config.checked()?;
+        let (config, warnings) = config.checked();
         for warning in warnings {
             tracing::warn!("{warning}");
         }
-        cx.add_context(Context::new(config));
-        cx.add_hook(MarkerHook);
+        let context = Context::new(config);
+        cx.add_hook(context.marker_hook());
+        cx.add_context(context);
         Ok(())
     }
 }

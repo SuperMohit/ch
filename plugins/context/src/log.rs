@@ -1,23 +1,37 @@
 //! The compaction log: one record per trim, appended to
 //! `<session dir>/context/log.jsonl`. A record holds everything needed to render its
 //! effect, so the view is the same after a restart even if the settings or the tools
-//! changed.
+//! changed, and it is bound to the history it was decided on.
 
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
-use ch_kernel::util::{anchored, restrict};
-use ch_kernel::{CompactionKind, ContentBlock, EventId, History};
+use ch_kernel::util::{create_private, private_dir};
+use ch_kernel::{ContentBlock, EventId, History, Role};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::stub::{self, REMINDER, RESULT_PREFIX};
+
 /// A block of the history: its event and its index in the event's message.
 pub type Pos = (EventId, usize);
 
-/// What decided a compaction.
+/// What a record does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// Shortens blocks, and drops the thinking blocks after the first one, through
+    /// `at_event`.
+    Elided,
+    /// Drops every thinking block through `at_event`: written when the log couldn't be
+    /// applied, so the history goes on without reasoning that no longer matches it.
+    Reset,
+}
+
+/// What decided a record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Trigger {
@@ -27,6 +41,8 @@ pub enum Trigger {
     Overflow,
     /// `/compact`.
     Manual,
+    /// The log didn't match the history.
+    Recovery,
 }
 
 /// What an edit shortened.
@@ -71,38 +87,73 @@ impl Edit {
     }
 }
 
-/// One compaction. Its edits are sorted by position; thinking blocks after the first
-/// edit, through `at_event`, are dropped.
+/// One entry of the log. An `elided` record's edits are sorted by position.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Record {
-    pub kind: CompactionKind,
+    pub kind: Kind,
     pub trigger: Trigger,
     /// The newest history event when it was decided.
     pub at_event: EventId,
+    /// How many blocks `at_event` had then. The session adds the call's reminders to
+    /// that message after the view, so only these count.
+    pub at_blocks: usize,
+    /// [`hash_blocks`] of those blocks: event ids are reused after a crash, so the id
+    /// alone doesn't say it is the same history.
+    pub at_hash: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edits: Vec<Edit>,
 }
 
 impl Record {
-    /// Whether the thinking block at `pos` was written against what this record changed.
-    pub fn drops_thinking_at(&self, pos: Pos) -> bool {
-        self.edits
-            .first()
-            .is_some_and(|first| pos > first.pos() && pos.0 <= self.at_event)
+    /// A record bound to `history`'s newest event, or `None` for an empty history.
+    pub fn new(kind: Kind, trigger: Trigger, history: &History, edits: Vec<Edit>) -> Option<Self> {
+        let last = history.last()?;
+        Some(Self {
+            kind,
+            trigger,
+            at_event: last.id,
+            at_blocks: last.message.content.len(),
+            at_hash: hash_blocks(&last.message.content),
+            edits,
+        })
     }
 
-    /// Why this record can't be applied to `history`, if it can't: an event is missing,
-    /// or a block isn't the one it was made from.
+    /// Whether the thinking block at `pos` was written against what this record changed.
+    pub fn drops_thinking_at(&self, pos: Pos) -> bool {
+        pos.0 <= self.at_event
+            && match self.kind {
+                Kind::Reset => true,
+                Kind::Elided => self.edits.first().is_some_and(|first| pos > first.pos()),
+            }
+    }
+
+    /// Why this record can't be applied to `history`, if it can't. Blocks in `taken`
+    /// were edited by an earlier record.
     pub fn check(&self, history: &History, taken: &HashSet<Pos>) -> Result<(), String> {
         let events = history.events();
+        let Some(at) = find(history, self.at_event) else {
+            return Err(format!("event {} is missing", self.at_event));
+        };
+        let blocks = &events[at].message.content;
+        if blocks.len() < self.at_blocks || hash_blocks(&blocks[..self.at_blocks]) != self.at_hash {
+            return Err(format!(
+                "event {} isn't the one it was made on",
+                self.at_event
+            ));
+        }
+        if self.kind == Kind::Reset {
+            return if self.edits.is_empty() {
+                Ok(())
+            } else {
+                Err("a reset has edits".into())
+            };
+        }
         if self.edits.is_empty() {
             return Err("it has no edits".into());
         }
-        if find(history, self.at_event).is_none() {
-            return Err(format!("event {} is missing", self.at_event));
-        }
         let mut last = None;
         for edit in &self.edits {
-            if last.is_some_and(|l| l >= edit.pos()) || edit.event > self.at_event {
+            if last.is_some_and(|l| l >= edit.pos()) {
                 return Err("its edits are out of order".into());
             }
             last = Some(edit.pos());
@@ -112,42 +163,77 @@ impl Record {
                     edit.block, edit.event
                 ));
             }
-            let Some(i) = find(history, edit.event) else {
-                return Err(format!("event {} is missing", edit.event));
-            };
-            let Some(block) = events[i].message.content.get(edit.block) else {
-                return Err(format!("event {} has no block {}", edit.event, edit.block));
-            };
-            let fits = matches!(
-                (edit.kind, block, &edit.replacement),
-                (
-                    EditKind::Superseded | EditKind::Input,
-                    ContentBlock::ToolUse { .. },
-                    Replacement::Input(Value::Object(_))
-                ) | (
-                    EditKind::Result,
-                    ContentBlock::ToolResult { .. },
-                    Replacement::Text(_)
-                ) | (
-                    EditKind::Reminder,
-                    ContentBlock::Text { .. },
-                    Replacement::Text(_)
-                )
-            );
-            if !fits || hash(block) != edit.hash {
+            if edit.event >= self.at_event {
                 return Err(format!(
-                    "block {} of event {} has changed",
-                    edit.block, edit.event
+                    "event {} is not before event {}",
+                    edit.event, self.at_event
                 ));
             }
+            let i = find(history, edit.event)
+                .ok_or_else(|| format!("event {} is missing", edit.event))?;
+            fits(history, i, edit)?;
         }
         Ok(())
     }
 }
 
+/// Whether `edit` is one the planner makes, on event `i` of `history`: never on the
+/// first message; a superseded call's input becomes its marker; an input keeps its
+/// shape, with long strings replaced by their markers; a result becomes a stub; a
+/// reminder (not a turn's prompt) becomes the reminder stub. The block must be the one
+/// the edit was made from.
+pub fn fits(history: &History, i: usize, edit: &Edit) -> Result<(), String> {
+    let event = &history.events()[i];
+    let at = || format!("block {} of event {}", edit.block, edit.event);
+    if i == 0 {
+        return Err(format!("{} is in the first message", at()));
+    }
+    let Some(block) = event.message.content.get(edit.block) else {
+        return Err(format!("{} is missing", at()));
+    };
+    let ok = match (edit.kind, block, &edit.replacement) {
+        (EditKind::Superseded, ContentBlock::ToolUse { name, .. }, Replacement::Input(new)) => {
+            *new == stub::superseded(name)
+        }
+        (EditKind::Input, ContentBlock::ToolUse { input, .. }, Replacement::Input(new)) => {
+            stub::is_shortened(input, new)
+        }
+        (EditKind::Result, ContentBlock::ToolResult { .. }, Replacement::Text(new)) => {
+            new.starts_with(RESULT_PREFIX)
+        }
+        (EditKind::Reminder, ContentBlock::Text { text }, Replacement::Text(new)) => {
+            event.message.role == Role::User
+                && text.starts_with("<system-reminder>")
+                && !is_prompt(history, i, edit.block)
+                && new == REMINDER
+        }
+        _ => false,
+    };
+    if !ok || hash(block) != edit.hash {
+        return Err(format!("{} has changed", at()));
+    }
+    Ok(())
+}
+
+/// Whether block `b` of event `i` is a turn's prompt: the first block of the turn's first
+/// event. Notes and reminders come after it, or in later events.
+pub fn is_prompt(history: &History, i: usize, b: usize) -> bool {
+    let events = history.events();
+    b == 0 && (i == 0 || events[i - 1].turn != events[i].turn)
+}
+
 /// The index of event `id` in `history`.
 pub fn find(history: &History, id: EventId) -> Option<usize> {
     history.events().binary_search_by_key(&id, |e| e.id).ok()
+}
+
+/// Whether the model answered after event `id`: then what it was sent then is in the
+/// history, signed reasoning included.
+pub fn answered_after(history: &History, id: EventId) -> bool {
+    history
+        .events()
+        .iter()
+        .any(|e| e.id > id && e.message.role == Role::Assistant)
 }
 
 /// A digest of `block`, to tell whether a record still matches the history.
@@ -156,34 +242,38 @@ pub fn hash(block: &ContentBlock) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// A digest of `blocks`.
+pub fn hash_blocks(blocks: &[ContentBlock]) -> String {
+    let bytes = serde_json::to_vec(blocks).expect("content blocks serialize");
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 /// `<session dir>/context/log.jsonl`.
 fn log_path(session_dir: &Path) -> PathBuf {
     session_dir.join("context").join("log.jsonl")
 }
 
-/// The records saved for a session, in order. A line that doesn't parse is returned as
-/// an error message.
-pub fn load(session_dir: &Path) -> Vec<Result<Record, String>> {
+/// The lines of a session's log, each parsed or not. `Err` when the log can't be read.
+pub fn load(session_dir: &Path) -> Result<Vec<Result<Record, String>>, String> {
     let path = log_path(session_dir);
     match fs::symlink_metadata(&path) {
         Ok(meta) if meta.is_file() => {}
-        Ok(_) => return vec![Err(format!("{} is not a file", path.display()))],
-        Err(_) => return Vec::new(),
+        Ok(_) => return Err(format!("{} is not a file", path.display())),
+        Err(_) => return Ok(Vec::new()),
     }
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) => return vec![Err(format!("reading {}: {e}", path.display()))],
-    };
-    text.lines()
+    let text = fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    Ok(text
+        .lines()
         .filter(|l| !l.trim().is_empty())
         .enumerate()
         .map(|(i, line)| {
             serde_json::from_str(line).map_err(|e| format!("line {} doesn't parse: {e}", i + 1))
         })
-        .collect()
+        .collect())
 }
 
-/// Appends `record` to the session's log.
+/// Appends `record` to the session's log and makes it durable before returning, so a
+/// view is never sent with a trim that a restart wouldn't render.
 pub fn append(session_dir: &Path, record: &Record) -> io::Result<()> {
     let dir = private_dir(session_dir, "context")?;
     let path = dir.join("log.jsonl");
@@ -198,31 +288,43 @@ pub fn append(session_dir: &Path, record: &Record) -> io::Result<()> {
     let mut options = fs::OpenOptions::new();
     options.append(true).create(true);
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
     let mut line = serde_json::to_vec(record).expect("a record serializes");
     line.push(b'\n');
-    options.open(&path)?.write_all(&line)
+    let mut file = options.open(&path)?;
+    file.write_all(&line)?;
+    file.sync_data()
 }
 
-/// `<session dir>/<parts…>`, each directory created `0700` if needed, with the session
-/// directory anchored as the file tools check it. Fails if any of them is a symlink.
-pub fn private_dir(session_dir: &Path, parts: &str) -> io::Result<PathBuf> {
-    fs::create_dir_all(session_dir)?;
-    let mut dir = anchored(session_dir)?;
-    for part in parts.split('/') {
-        dir = dir.join(part);
-        match fs::create_dir(&dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
-        }
-        if !fs::symlink_metadata(&dir)?.is_dir() {
-            return Err(io::Error::other(format!(
-                "{} is not a directory (a symlink?)",
-                dir.display()
-            )));
-        }
-        restrict(&dir)?;
+/// Replaces the session's log with `records`: a new file, made durable, then renamed
+/// over the old one, so a crash leaves one or the other.
+pub fn rewrite(session_dir: &Path, records: &[Record]) -> io::Result<()> {
+    let dir = private_dir(session_dir, "context")?;
+    let tmp = dir.join("log.jsonl.tmp");
+    // One left by a crash: it was never renamed, so it holds nothing needed.
+    match fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
-    Ok(dir)
+    let mut text = Vec::new();
+    for record in records {
+        text.extend(serde_json::to_vec(record).expect("a record serializes"));
+        text.push(b'\n');
+    }
+    let written = create_private(&tmp).and_then(|mut f| {
+        f.write_all(&text)?;
+        f.sync_all()
+    });
+    if let Err(e) = written.and_then(|()| fs::rename(&tmp, dir.join("log.jsonl"))) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    // The rename itself.
+    #[cfg(unix)]
+    fs::File::open(&dir)?.sync_all()?;
+    Ok(())
 }

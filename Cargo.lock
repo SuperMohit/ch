@@ -261,9 +261,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ch-kernel",
+ "ch-planning",
  "ch-provider-scripted",
  "ch-safety",
  "ch-tools-fs",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

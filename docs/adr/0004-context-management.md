@@ -267,7 +267,7 @@ max_summary_share = 0.15       # 0.05–0.30
   - the range of thinking blocks to drop;
   - for a summary: its span, text, copied user text and model.
 - **The view is recomputed on every step** from the history and the valid records. The rendering uses no clock, randomness or estimate. Because the replacement text is stored, a stub renders the same after resume even if the tools or settings changed.
-- **On load,** a record whose events are missing or whose hashes don't match is ignored, with a warning. That covers a crash between writing the log and the turn-end save (`mod.rs:563`).
+- **On load,** a record whose events are missing or whose hashes don't match is ignored, with a warning. That covers a crash between writing the log and the turn-end save (`mod.rs:563`). *Changed in the implementation:* the log is applied up to its first record that doesn't match, and what happens next depends on whether the model answered after that record (see Implementation notes).
 - **One session at a time.** The plugin keeps one session's state, keyed by `cx.cx.session_id`, and reloads when the id changes, as `PlanStore` does (`plugins/planning/src/store.rs:36-42`).
   - `/clear` starts an empty log; `/resume` and `--continue` load the session's log.
   - Without a session directory, records live in memory only.
@@ -345,7 +345,7 @@ Each one holds for every view, checked over scripted sessions:
 - [ ] A long scripted session never overflows under `staged`. Under `none` it ends with `ContextOverflow`, and `ch -p` exits 3.
 - [ ] An overflow compacts and retries at most once per step; a second overflow ends the turn.
 - [ ] An overflow retry adds no block to history: each reminder and note of the step is stored exactly once.
-- [ ] A log record with a missing event or a wrong hash is ignored.
+- [ ] A log record with a missing event or a wrong hash is never applied, and neither is any record after it. A record the model answered after that no longer matches leads to a reset record.
 - [ ] A call with an input string that is an elision marker is refused; one whose input only mentions the marker runs.
 
 ## Consequences
@@ -369,3 +369,22 @@ Each one holds for every view, checked over scripted sessions:
 - **Dropping old steps without a summary.** The cheapest option, but the model loses track of what it did. It survives here only as elision of bulky content.
 - **A cheap summarizer model by default.** Rejected as the default: it can't use the agent's cache, and a weak summary drops instructions and constraints.
 - **Anthropic's server-side context management now.** Deferred to later work (see Signed thinking blocks): this ADR keeps one generic, testable path.
+
+## Implementation notes
+
+Where the `context` plugin differs from the decision above, and why. Trimming is implemented; summaries are not yet.
+
+- **The record doesn't store the thinking range.** It is the span after the first edit (the first of the record's sorted edits) through `at_event`, both of which are stored.
+- **Records are bound to their history.** Event ids are reused after a crash, so a record also stores `at_blocks`, how many blocks `at_event` had when it was decided, and a hash of those blocks. Only those count, because the session adds the call's reminders to that message after the view. A record whose `at_event` doesn't match is not applied.
+- **The log is applied up to its first record that doesn't match**, and never past it:
+  - If the model never answered after that record (the log is ahead of the saved history after a crash, or its last line was torn while being written), nothing in the history depends on it. It and every later record are dropped, and the log is rewritten without them (a new file, made durable, renamed over the old one), so they can't come back once event ids are reused.
+  - Otherwise a view that was sent can't be rendered again: the history was edited, or the log was damaged. The records from that one on are dropped, and a **reset record** takes their place. It drops every thinking block through the newest event, which is the API's documented recovery, and the log keeps it, so later requests send the same stripped history.
+- **A trim takes effect only once its record is durable.** With a session directory, the copies of the trimmed results are saved first, then the record is appended and synced; if that fails, the view goes out unchanged, with a warning.
+- **A record's edits are checked against the planner's own rules on load**, with one shared predicate: never in the first message, before `at_event`, a superseded call's input is exactly its marker, an input keeps its shape with only long strings replaced by markers for their length, a result's replacement is a stub, and a reminder is a `<system-reminder>` text block of a user message that isn't a turn's prompt, replaced by `[reminder elided]`.
+- **A spilled result's stub** says it shows "a preview of N lines, M characters" and gives the size of the spill file, read when the trim is made, and it keeps spill's notes on long lines and NUL bytes. A spill file is used only if its name starts with the result's call id, as spill names them, and it starts with the result's head.
+- **A result whose stub would be longer than the result is left as it is.** That happens just above `elide_min_chars` when the session path is long. Superseded calls are always replaced, so their invariant holds.
+- **The trim's projection counts the thinking it drops**, so a trim above `soft` stops near `trim_to`. Once there, it also takes every other candidate between its first and last edit: they cost no further cache rewrite, and later trims then rarely reach back before earlier ones.
+- **The `pre_tool` hook** also refuses an input string that contains a result stub or an input marker this session's trims wrote. Those carry paths and sizes, so text that only describes them, such as this ADR, isn't refused.
+- **`none` still renders the log**, so a session trimmed before keeps sending the same bytes; it makes no new trims. Disabling the plugin instead sends the raw history, which new accounts reject for such a session.
+- **`/compact` under `elide`** trims the middle with the recent window cut to `min_recent_steps`, as for a summary, and ignores the instructions, which are for summaries.
+- **Until summaries are written**, `elide` is the default, and `summarize` and `staged` act as `elide`, with a warning at startup. `hard`, `summary_max_words` and `max_summary_share` are checked now and take effect then.

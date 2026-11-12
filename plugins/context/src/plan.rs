@@ -5,30 +5,19 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 
+use ch_kernel::util::ReadTools;
 use ch_kernel::{Budget, ContentBlock, History, Message, Role, estimate_tokens};
 
 use crate::config::ContextConfig;
-use crate::log::{Edit, EditKind, Pos, Replacement, hash};
-use crate::stub::{self, Hint, Saved};
-
-/// How far a trim goes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Reach {
-    /// The view passed `soft`: the middle, until the view is down to `trim_to`.
-    Soft,
-    /// `/compact`: every candidate in the middle, with the recent window cut to
-    /// `min_recent_steps`.
-    Manual,
-    /// An overflow: every candidate in the middle, and tool results in the recent window
-    /// except in the newest step, since the estimate was wrong.
-    Overflow,
-}
+use crate::log::{Edit, EditKind, Pos, Replacement, Trigger, fits, hash, is_prompt};
+use crate::render::is_thinking;
+use crate::stub::{self, Saved};
 
 /// Where trimmed results can be saved, and how stubs tell the model to read them.
 pub struct Files {
     /// The session directory, anchored as the file tools check it.
     pub base: Option<PathBuf>,
-    pub hint: Hint,
+    pub tools: ReadTools,
 }
 
 impl Files {
@@ -55,61 +44,154 @@ pub struct Plan {
 
 /// Plans a trim of `view`, the history with the earlier records applied. Blocks in
 /// `taken` were trimmed before and are left alone.
+///
+/// - `Soft`: the middle, until the view is down to `trim_to`; then every other candidate
+///   between the first and last edit, which costs no further cache rewrite.
+/// - `Manual`: every candidate in the middle, with the recent window cut to
+///   `min_recent_steps`.
+/// - `Overflow`: every candidate in the middle, and tool results in the recent window
+///   except in the newest step, since the estimate was wrong.
 pub fn plan(
     history: &History,
     view: &[Message],
     taken: &HashSet<Pos>,
     budget: &Budget,
     config: &ContextConfig,
-    reach: Reach,
+    trigger: Trigger,
     files: &Files,
 ) -> Plan {
-    let mut plan = Plan::default();
-    let Some(regions) = regions(view, budget, config, reach) else {
-        return plan;
+    let Some(regions) = regions(view, budget, config, trigger) else {
+        return Plan::default();
     };
-    let events = history.events();
-    let mut chars: Vec<usize> = view.iter().map(Message::char_len).collect();
-    let mut total: u64 = chars.iter().map(|&c| estimate_tokens(c)).sum();
+    let mut p = Planner::new(history, view, taken, config, files);
     let target = config.trim_to * budget.usable() as f64;
-    let mut chosen = HashSet::new();
-    for (i, b, kind) in candidates(history, &regions, config) {
-        if reach == Reach::Soft && budget.calibrator.calibrate(total) as f64 <= target {
+    let candidates = candidates(history, &regions, config);
+    for &(i, b, kind) in &candidates {
+        if trigger == Trigger::Soft && budget.calibrator.calibrate(p.total) as f64 <= target {
             break;
         }
-        let pos = (events[i].id, b);
-        if taken.contains(&pos) || !chosen.insert(pos) {
-            continue;
+        p.add(i, b, kind);
+    }
+    if let (Some(first), Some(last)) = (
+        p.plan.edits.iter().map(Edit::pos).min(),
+        p.plan.edits.iter().map(Edit::pos).max(),
+    ) {
+        for &(i, b, kind) in &candidates {
+            let pos = (history.events()[i].id, b);
+            if first < pos && pos < last {
+                p.add(i, b, kind);
+            }
         }
-        let block = &events[i].message.content[b];
+    }
+    let mut plan = p.plan;
+    plan.edits.sort_by_key(Edit::pos);
+    plan
+}
+
+/// The edits chosen so far, and the size the view will have with them.
+struct Planner<'a> {
+    history: &'a History,
+    taken: &'a HashSet<Pos>,
+    config: &'a ContextConfig,
+    files: &'a Files,
+    /// Characters of each message of the view, with the chosen edits.
+    chars: Vec<usize>,
+    /// Characters of the thinking in each message of the view.
+    thinking: Vec<usize>,
+    /// Raw tokens of the whole view, with the chosen edits and the thinking they drop.
+    total: u64,
+    /// The message of the first edit: thinking in later messages is dropped.
+    first: Option<usize>,
+    chosen: HashSet<Pos>,
+    plan: Plan,
+}
+
+impl<'a> Planner<'a> {
+    fn new(
+        history: &'a History,
+        view: &[Message],
+        taken: &'a HashSet<Pos>,
+        config: &'a ContextConfig,
+        files: &'a Files,
+    ) -> Self {
+        let chars: Vec<usize> = view.iter().map(Message::char_len).collect();
+        let thinking = view
+            .iter()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .filter(|b| is_thinking(b))
+                    .map(ContentBlock::char_len)
+                    .sum()
+            })
+            .collect();
+        let total = chars.iter().map(|&c| estimate_tokens(c)).sum();
+        Self {
+            history,
+            taken,
+            config,
+            files,
+            chars,
+            thinking,
+            total,
+            first: None,
+            chosen: HashSet::new(),
+            plan: Plan::default(),
+        }
+    }
+
+    /// Message `i` has `chars` characters now.
+    fn resize(&mut self, i: usize, chars: usize) {
+        self.total -= estimate_tokens(self.chars[i]);
+        self.chars[i] = chars;
+        self.total += estimate_tokens(chars);
+    }
+
+    /// Adds the edit of `kind` to block `b` of event `i`, if it is one.
+    fn add(&mut self, i: usize, b: usize, kind: EditKind) {
+        let event = &self.history.events()[i];
+        let pos = (event.id, b);
+        if self.taken.contains(&pos) || self.chosen.contains(&pos) {
+            return;
+        }
+        let block = &event.message.content[b];
+        let mut original = None;
         let replacement = match (kind, block) {
             (EditKind::Superseded, ContentBlock::ToolUse { name, .. }) => {
                 Replacement::Input(stub::superseded(name))
             }
             (EditKind::Input, ContentBlock::ToolUse { input, .. }) => {
-                match stub::shortened_input(input, config.input_min_chars) {
+                match stub::shortened_input(input, self.config.input_min_chars) {
                     Some(short) => Replacement::Input(short),
-                    None => continue,
+                    None => return,
                 }
             }
-            (EditKind::Result, ContentBlock::ToolResult { content, .. }) => {
-                let spill = files
-                    .base
-                    .as_ref()
-                    .and_then(|base| stub::spill_file(content, &base.join("spill")));
-                let copy = files.copy_path(pos);
+            (
+                EditKind::Result,
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                },
+            ) => {
+                let spill = (self.files.base.as_ref())
+                    .and_then(|base| stub::spill_file(content, tool_use_id, &base.join("spill")));
+                let copy = self.files.copy_path(pos);
                 let saved = match (&spill, &copy) {
-                    (Some(path), _) => Saved::Spill(path),
+                    (Some((path, bytes)), _) => Saved::Spill {
+                        path,
+                        bytes: *bytes,
+                    },
                     (None, Some(path)) => Saved::Copy(path),
                     (None, None) => Saved::Nowhere,
                 };
-                let text = stub::result(content, saved, files.hint);
+                let text = stub::result(content, saved, self.files.tools);
                 // A result just over the limit can be shorter than its stub.
                 if text.len() >= content.len() {
-                    continue;
+                    return;
                 }
                 if let (None, Some(path)) = (spill, copy) {
-                    plan.originals.push(Original {
+                    original = Some(Original {
                         pos,
                         path,
                         content: content.clone(),
@@ -120,29 +202,40 @@ pub fn plan(
             (EditKind::Reminder, ContentBlock::Text { .. }) => {
                 Replacement::Text(stub::REMINDER.into())
             }
-            _ => continue,
+            _ => return,
         };
-        let old = block.char_len();
-        let new = match (block, &replacement) {
+        let edit = Edit {
+            event: pos.0,
+            block: b,
+            kind,
+            hash: hash(block),
+            replacement,
+        };
+        // The same rule as when the log is read back.
+        if fits(self.history, i, &edit).is_err() {
+            return;
+        }
+        let new = match (block, &edit.replacement) {
             (ContentBlock::ToolUse { name, .. }, Replacement::Input(input)) => {
                 name.len() + input.to_string().len()
             }
             (_, Replacement::Text(text)) => text.len(),
-            _ => old,
+            _ => block.char_len(),
         };
-        total -= estimate_tokens(chars[i]);
-        chars[i] = chars[i].saturating_sub(old) + new;
-        total += estimate_tokens(chars[i]);
-        plan.edits.push(Edit {
-            event: pos.0,
-            block: pos.1,
-            kind,
-            hash: hash(block),
-            replacement,
-        });
+        self.resize(i, self.chars[i].saturating_sub(block.char_len()) + new);
+        // The thinking this trim drops: in the messages after its first edit.
+        if self.first.is_none_or(|f| i < f) {
+            let end = self.first.map_or(self.chars.len(), |f| f + 1);
+            for j in i + 1..end {
+                let left = self.chars[j].saturating_sub(self.thinking[j]);
+                self.resize(j, left);
+            }
+            self.first = Some(i);
+        }
+        self.chosen.insert(pos);
+        self.plan.originals.extend(original);
+        self.plan.edits.push(edit);
     }
-    plan.edits.sort_by_key(Edit::pos);
-    plan
 }
 
 /// The message ranges a trim may edit.
@@ -161,7 +254,7 @@ fn regions(
     view: &[Message],
     budget: &Budget,
     config: &ContextConfig,
-    reach: Reach,
+    trigger: Trigger,
 ) -> Option<Regions> {
     if view.first()?.role != Role::User {
         return None;
@@ -183,12 +276,12 @@ fn regions(
         end = step;
         let enough_steps = taken + 1 >= config.min_recent_steps;
         let enough_tokens =
-            reach == Reach::Manual || budget.calibrator.calibrate(raw) as f64 >= minimum;
+            trigger == Trigger::Manual || budget.calibrator.calibrate(raw) as f64 >= minimum;
         if enough_steps && enough_tokens {
             break;
         }
     }
-    let results_too = if reach == Reach::Overflow {
+    let results_too = if trigger == Trigger::Overflow {
         start..newest
     } else {
         start..start
@@ -258,11 +351,4 @@ fn candidates(
         }
     }
     out
-}
-
-/// Whether block `b` of event `i` is a turn's prompt: the first block of the turn's first
-/// event. Notes and reminders come after it, or in later events.
-fn is_prompt(history: &History, i: usize, b: usize) -> bool {
-    let events = history.events();
-    b == 0 && (i == 0 || events[i - 1].turn != events[i].turn)
 }

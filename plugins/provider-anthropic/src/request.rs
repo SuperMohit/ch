@@ -20,12 +20,26 @@ pub struct BodyOptions {
     /// `fallbacks` value for models that support server-side refusal fallback; empty
     /// means off.
     pub fallbacks: String,
+    /// `thinking.block_binding.prefix_mismatch_behavior`; empty means "don't send".
+    pub prefix_mismatch_behavior: String,
 }
 
 impl BodyOptions {
     /// Whether the request for `model` uses the refusal-fallback beta.
     pub fn uses_fallbacks(&self, model: &str) -> bool {
         !self.fallbacks.is_empty() && caps(model).refusal_fallback
+    }
+
+    /// The betas a request for `model` needs.
+    pub fn betas(&self, model: &str) -> Vec<&'static str> {
+        let mut betas = Vec::new();
+        if self.uses_fallbacks(model) {
+            betas.push(crate::FALLBACK_BETA);
+        }
+        if !self.prefix_mismatch_behavior.is_empty() {
+            betas.push(crate::BINDING_BETA);
+        }
+        betas
     }
 }
 
@@ -53,7 +67,11 @@ pub fn build_body(req: &ModelRequest, opts: &BodyOptions) -> Value {
 
     let thinking = thinking(req, &caps, opts);
     let thinking_on = thinking.is_some() || caps.always_thinks;
-    if let Some(t) = thinking {
+    if let Some(mut t) = thinking {
+        if !opts.prefix_mismatch_behavior.is_empty() {
+            t["block_binding"] =
+                json!({ "prefix_mismatch_behavior": opts.prefix_mismatch_behavior });
+        }
         body.insert("thinking".into(), t);
     }
     if let Some(temp) = req.temperature
@@ -260,7 +278,27 @@ mod tests {
             thinking_display: "summarized".into(),
             effort: "high".into(),
             fallbacks: "default".into(),
+            prefix_mismatch_behavior: String::new(),
         }
+    }
+
+    #[test]
+    fn block_binding_goes_on_the_thinking_config_with_its_beta() {
+        let mut o = opts();
+        let model = "claude-opus-5-5";
+        assert!(
+            build_body(&req(model), &o)["thinking"]
+                .get("block_binding")
+                .is_none()
+        );
+        assert!(!o.betas(model).contains(&crate::BINDING_BETA));
+        o.prefix_mismatch_behavior = "error".into();
+        let body = build_body(&req(model), &o);
+        assert_eq!(
+            body["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+            "error"
+        );
+        assert!(o.betas(model).contains(&crate::BINDING_BETA));
     }
 
     #[test]

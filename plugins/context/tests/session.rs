@@ -79,6 +79,7 @@ fn session_as(
         Arc::new(BigPlugin),
         ch_safety::plugin(),
         ch_tools_fs::plugin(),
+        ch_planning::plugin(),
         ch_context::plugin(),
     ];
     let config = Arc::new(
@@ -163,6 +164,62 @@ async fn a_long_run_fits_under_elide_and_overflows_under_none() {
     assert!(
         matches!(r.reason, TerminationReason::ContextOverflow { .. }),
         "{r:?}"
+    );
+}
+
+fn plan(done: usize) -> ScriptStep {
+    let items: Vec<Value> = (0..4)
+        .map(|i| {
+            let status = match i.cmp(&done) {
+                std::cmp::Ordering::Less => "completed",
+                std::cmp::Ordering::Equal => "in_progress",
+                std::cmp::Ordering::Greater => "pending",
+            };
+            json!({"content": format!("Read part {i}"), "status": status,
+                   "activeForm": format!("Reading part {i}")})
+        })
+        .collect();
+    ScriptStep::tool("update_plan", json!({ "plan": items }))
+}
+
+#[tokio::test]
+async fn plan_reminders_and_trims_keep_each_request_extending_the_last() {
+    let d = dirs();
+    // Two turns of plan updates and big results: the planning reminder goes on the
+    // first call of each turn and stays in the history, and trims come in between.
+    let mut steps = Vec::new();
+    for turn in 0..2 {
+        for part in 0..3 {
+            steps.push(plan(part));
+            steps.extend((1..=8).map(|n| ScriptStep::tool("big", json!({ "n": turn * 10 + n }))));
+        }
+        steps.push(ScriptStep::text("done"));
+    }
+    let provider = ScriptedProvider::new(steps).with_context_window(WINDOW);
+    let mut s = session(provider.clone(), &d.ws, &d.sessions, "");
+    let mut rx = s.events().subscribe();
+    for prompt in ["read the logs", "and the rest"] {
+        assert_eq!(s.run_turn(prompt).await.reason, TerminationReason::Done);
+    }
+    let trims = compactions(&received(&mut rx));
+    assert!(trims >= 2, "{trims}");
+    let requests = provider.requests();
+    assert_eq!(rewrites(&requests), trims);
+    // The second turn's first call carried the plan reminder.
+    let second = requests
+        .iter()
+        .map(|r| format!("{:?}", r.messages.last().unwrap()))
+        .find(|last| last.contains("and the rest"))
+        .unwrap();
+    assert!(
+        second.contains("<system-reminder>") && second.contains("Read part"),
+        "{second}"
+    );
+    // Superseded plans are trimmed, the latest kept.
+    let last = format!("{:?}", requests.last().unwrap().messages);
+    assert!(
+        last.contains("a later update_plan call replaced this"),
+        "{last}"
     );
 }
 

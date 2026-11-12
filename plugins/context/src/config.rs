@@ -1,7 +1,11 @@
-//! `[plugins.context]`: the strategy and its limits.
+//! `[plugins.context]`: the strategy and its limits. `hard`, `summary_max_words` and
+//! `max_summary_share` are for summaries, which come with `summarize` and `staged`; they
+//! are checked now and take effect then.
 
-use anyhow::bail;
 use serde::Deserialize;
+
+/// The most `superseded_tools` kept.
+const MAX_SUPERSEDED_TOOLS: usize = 32;
 
 /// How the context is managed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -11,9 +15,9 @@ pub enum Strategy {
     None,
     /// Old, bulky content is trimmed.
     Elide,
-    /// Summaries only. Not available yet.
+    /// Summaries only. Not available yet: acts as `elide`, with a warning.
     Summarize,
-    /// Trims first, then summaries. Not available yet.
+    /// Trims first, then summaries. Not available yet: acts as `elide`, with a warning.
     Staged,
 }
 
@@ -25,7 +29,7 @@ pub struct ContextConfig {
     pub strategy: Strategy,
     /// Above this share, the middle is trimmed.
     pub soft: f64,
-    /// Above this share, a summary is written (from `summarize` and `staged`).
+    /// Above this share, a summary is written.
     pub hard: f64,
     /// The recent window kept word for word: at least this share...
     pub recent: f64,
@@ -41,10 +45,9 @@ pub struct ContextConfig {
     pub input_min_chars: usize,
     /// Tools whose every call but the latest is trimmed first.
     pub superseded_tools: Vec<String>,
-    /// The longest summary (from `summarize` and `staged`).
+    /// The longest summary.
     pub summary_max_words: usize,
-    /// Above this share of summaries, the two oldest are merged (from `summarize` and
-    /// `staged`).
+    /// Above this share of summaries, the two oldest are merged.
     pub max_summary_share: f64,
 }
 
@@ -85,21 +88,31 @@ impl ContextConfig {
         "max_summary_share",
     ];
 
-    /// Rejects a strategy that isn't available yet, and moves each value that is out of
-    /// range to the nearest allowed one. Returns a warning for each value moved.
-    pub fn checked(mut self) -> anyhow::Result<(Self, Vec<String>)> {
+    /// Moves each value that is out of range to the nearest allowed one, and a strategy
+    /// that isn't available yet to `elide`. Returns a warning for each change.
+    pub fn checked(mut self) -> (Self, Vec<String>) {
+        let mut warnings = Vec::new();
         if let s @ (Strategy::Summarize | Strategy::Staged) = self.strategy {
             let name = if s == Strategy::Summarize {
                 "summarize"
             } else {
                 "staged"
             };
-            bail!(
-                "plugins.context.strategy = \"{name}\" isn't available yet; use \"elide\" or \
-                 \"none\""
-            );
+            warnings.push(format!(
+                "plugins.context.strategy = \"{name}\" isn't available yet; using \"elide\""
+            ));
+            self.strategy = Strategy::Elide;
         }
-        let mut warnings = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        self.superseded_tools.retain(|t| seen.insert(t.clone()));
+        if self.superseded_tools.len() > MAX_SUPERSEDED_TOOLS {
+            warnings.push(format!(
+                "plugins.context.superseded_tools has {} tools; using the first \
+                 {MAX_SUPERSEDED_TOOLS}",
+                self.superseded_tools.len()
+            ));
+            self.superseded_tools.truncate(MAX_SUPERSEDED_TOOLS);
+        }
         let mut share = |name: &str, value: &mut f64, lo: f64, hi: f64| {
             let lo = lo.min(hi);
             let fixed = if value.is_nan() {
@@ -138,7 +151,7 @@ impl ContextConfig {
         count("elide_min_chars", &mut self.elide_min_chars, 200, 20_000);
         count("input_min_chars", &mut self.input_min_chars, 200, 20_000);
         count("summary_max_words", &mut self.summary_max_words, 200, 3000);
-        Ok((self, warnings))
+        (self, warnings)
     }
 }
 
@@ -154,7 +167,7 @@ mod tests {
 
     #[test]
     fn the_defaults_are_the_documented_ones_and_need_no_correction() {
-        let (config, warnings) = parse("").unwrap().checked().unwrap();
+        let (config, warnings) = parse("").unwrap().checked();
         assert_eq!(config, ContextConfig::default());
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(config.strategy, Strategy::Elide);
@@ -167,7 +180,7 @@ mod tests {
              min_free = 1.0\nmin_recent_steps = 0\nelide_min_chars = 5\ninput_min_chars = 1000000",
         )
         .unwrap();
-        let (config, warnings) = config.checked().unwrap();
+        let (config, warnings) = config.checked();
         assert_eq!(config.soft, 0.90);
         assert!((config.hard - 0.95).abs() < 1e-9, "{}", config.hard);
         assert_eq!(config.recent, 0.50);
@@ -188,8 +201,7 @@ mod tests {
     fn limits_that_depend_on_soft_follow_it() {
         let (config, _) = parse("[plugins.context]\nsoft = 0.4\nrecent = 0.38\ntrim_to = 0.39")
             .unwrap()
-            .checked()
-            .unwrap();
+            .checked();
         assert!((config.recent - 0.35).abs() < 1e-9, "{}", config.recent);
         assert!((config.trim_to - 0.35).abs() < 1e-9, "{}", config.trim_to);
     }
@@ -203,18 +215,36 @@ mod tests {
     }
 
     #[test]
-    fn strategies_that_need_summaries_are_refused_for_now() {
+    fn strategies_that_need_summaries_act_as_elide_for_now() {
         for name in ["summarize", "staged"] {
-            let err = parse(&format!("[plugins.context]\nstrategy = \"{name}\""))
+            let (config, warnings) = parse(&format!("[plugins.context]\nstrategy = \"{name}\""))
                 .unwrap()
-                .checked()
-                .unwrap_err();
-            assert!(err.to_string().contains("isn't available yet"), "{err}");
+                .checked();
+            assert_eq!(config.strategy, Strategy::Elide);
+            assert_eq!(
+                warnings,
+                [format!(
+                    "plugins.context.strategy = \"{name}\" isn't available yet; using \"elide\""
+                )]
+            );
         }
         let (config, _) = parse("[plugins.context]\nstrategy = \"none\"")
             .unwrap()
-            .checked()
-            .unwrap();
+            .checked();
         assert_eq!(config.strategy, Strategy::None);
+    }
+
+    #[test]
+    fn superseded_tools_are_deduplicated_and_capped() {
+        let list: Vec<String> = (0..40).map(|i| format!("\"t{}\"", i % 35)).collect();
+        let (config, warnings) = parse(&format!(
+            "[plugins.context]\nsuperseded_tools = [{}]",
+            list.join(", ")
+        ))
+        .unwrap()
+        .checked();
+        assert_eq!(config.superseded_tools.len(), MAX_SUPERSEDED_TOOLS);
+        assert_eq!(config.superseded_tools[..3], ["t0", "t1", "t2"]);
+        assert!(warnings[0].contains("has 35 tools"), "{warnings:?}");
     }
 }

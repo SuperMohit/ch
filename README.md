@@ -165,18 +165,20 @@ The `context` plugin keeps long sessions inside the model's window ([ADR 0004](d
 
 ```toml
 [plugins.context]
-strategy = "elide"                # or "none"; summaries ("summarize", "staged") come later
+strategy = "elide"                # or "none"; "summarize" and "staged" act as "elide" for now
 soft = 0.60                       # trim above this share
 trim_to = 0.40                    # down to this share
 min_free = 0.10                   # only if that frees at least this share
-recent = 0.30                     # never trim the newest steps holding this share,
+recent = 0.30                     # leave the newest steps holding this share,
 min_recent_steps = 2              # and at least this many steps
 elide_min_chars = 500             # trim tool results longer than this
 input_min_chars = 1000            # and tool-input strings longer than this
 superseded_tools = ["update_plan"]  # every call but the latest is trimmed first
 ```
 
-A value out of range is moved into it, with a warning. A project may set any of these without your trust.
+A value out of range is moved into it, with a warning. A project may set any of these without your trust. `hard`, `summary_max_words` and `max_summary_share` are for summaries, which come later.
+
+A trim also leaves out the model's earlier reasoning, which no longer matches the trimmed conversation. To turn trimming off, set `strategy = "none"` rather than `plugins.disable = ["context"]`: a session that was already trimmed has to keep sending its trims, and new accounts reject it otherwise.
 
 ### Project instructions and custom commands
 

@@ -16,6 +16,7 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+libc.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
@@ -24,3 +25,4 @@ tempfile.workspace = true
 ch-provider-scripted.workspace = true
 ch-safety.workspace = true
 ch-tools-fs.workspace = true
+ch-planning.workspace = true
