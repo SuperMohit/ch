@@ -135,9 +135,8 @@ impl Applied {
     pub fn add(&mut self, record: &Record) {
         self.taken.extend(record.edits.iter().map(Edit::pos));
         if let Some(s) = &record.summary {
-            if s.merges > 0 {
-                let merged = s.merges.min(self.summaries.len());
-                self.summaries.drain(..merged);
+            if s.merged {
+                self.summaries.drain(..2.min(self.summaries.len()));
                 self.summaries.insert(0, s.clone());
             } else {
                 self.summaries.push(s.clone());
@@ -162,10 +161,12 @@ impl Record {
         Self::bound(Kind::Elided, trigger, history.events().last()?, edits, None)
     }
 
-    /// A summary bound to `history`'s newest event.
-    pub fn summarized(trigger: Trigger, history: &History, summary: Summary) -> Option<Self> {
-        let last = history.events().last()?;
+    /// A summary bound to `history`'s newest event. A summary has a span, so the history
+    /// isn't empty.
+    pub fn summarized(trigger: Trigger, history: &History, summary: Summary) -> Self {
+        let last = history.events().last().expect("a summarized history");
         Self::bound(Kind::Summarized, trigger, last, Vec::new(), Some(summary))
+            .expect("bound to an event")
     }
 
     /// A reset of every thinking block so far, bound to the newest assistant message:
@@ -223,48 +224,10 @@ impl Record {
         }
         match (self.kind, &self.summary) {
             (Kind::Reset, None) if self.edits.is_empty() => Ok(()),
-            (Kind::Summarized, Some(s)) if self.edits.is_empty() => {
-                self.check_summary(history, applied, s)
-            }
+            (Kind::Summarized, Some(s)) if self.edits.is_empty() => s.check(history, applied, at),
             (Kind::Elided, None) => self.check_edits(history, applied),
             _ => Err(format!("a {:?} record has the wrong parts", self.kind)),
         }
-    }
-
-    fn check_summary(
-        &self,
-        history: &History,
-        applied: &Applied,
-        s: &Summary,
-    ) -> Result<(), String> {
-        let events = history.events();
-        let missing = |id| format!("event {id} is missing");
-        let from = find(history, s.from).ok_or_else(|| missing(s.from))?;
-        let to = find(history, s.to).ok_or_else(|| missing(s.to))?;
-        if from > to || s.to >= self.at_event {
-            return Err("its span is out of order".into());
-        }
-        if s.merges == 0 {
-            if from != applied.start(history) {
-                return Err("its span doesn't follow the earlier summaries".into());
-            }
-            // Roles alternate: the span ends just before a reply.
-            if events
-                .get(to + 1)
-                .is_none_or(|e| e.message.role != Role::Assistant)
-            {
-                return Err("its span doesn't end before a reply".into());
-            }
-        } else {
-            let merged = applied.summaries.get(..s.merges).unwrap_or_default();
-            if merged.len() != s.merges
-                || merged.first().is_none_or(|m| m.from != s.from)
-                || merged.last().is_none_or(|m| m.to != s.to)
-            {
-                return Err("it doesn't merge the oldest summaries".into());
-            }
-        }
-        Ok(())
     }
 
     fn check_edits(&self, history: &History, applied: &Applied) -> Result<(), String> {

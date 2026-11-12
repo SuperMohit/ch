@@ -188,8 +188,14 @@ pub fn ccx_for(id: &str, session_dir: Option<&Path>, tools: &[&str]) -> ContextC
 /// How [`Summarizer`] answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answer {
-    /// A numbered summary, with a tool call to ignore.
+    /// A numbered summary.
     Summary,
+    /// A summary and a tool call.
+    WithCall,
+    /// A summary cut off at the output limit.
+    CutOff,
+    /// A reply without text.
+    Empty,
     /// The provider fails.
     Fail,
     /// The model refuses.
@@ -203,8 +209,13 @@ pub enum Answer {
 pub struct Summarizer {
     pub requests: Arc<std::sync::Mutex<Vec<ModelRequest>>>,
     pub answer: Arc<std::sync::Mutex<Answer>>,
-    /// Extra characters in each summary.
+    /// Extra characters in each summary, as one word.
     pub pad: usize,
+    /// Extra words in each summary.
+    pub words: usize,
+    /// Requests over this many tokens are rejected as too long; it is the window the
+    /// provider reports.
+    pub window: Option<u64>,
 }
 
 impl Summarizer {
@@ -213,6 +224,8 @@ impl Summarizer {
             requests: Arc::default(),
             answer: Arc::new(std::sync::Mutex::new(Answer::Summary)),
             pad: 0,
+            words: 0,
+            window: None,
         }
     }
 
@@ -243,11 +256,17 @@ impl ModelProvider for Summarizer {
             requests.push(request.clone());
             requests.len()
         };
+        if let Some(window) = self.window
+            && request_tokens(&request) > window
+        {
+            return Err(ModelError::ContextOverflow("too long".into()));
+        }
         let answer = *self.answer.lock().unwrap();
         let text = format!(
-            "## Goal\nSummary {n} by {}.{}",
+            "## Goal\nSummary {n} by {}.{}{}",
             request.model,
-            "s".repeat(self.pad)
+            "s".repeat(self.pad),
+            " word".repeat(self.words)
         );
         let (content, stop_reason) = match answer {
             Answer::Fail => return Err(ModelError::Unavailable("no summaries today".into())),
@@ -256,17 +275,20 @@ impl ModelProvider for Summarizer {
                 return Ok(Box::pin(stream::pending()));
             }
             Answer::Refuse => (vec![ContentBlock::text("I can't.")], StopReason::Refusal),
-            Answer::Summary => (
+            Answer::Summary => (vec![ContentBlock::text(text)], StopReason::EndTurn),
+            Answer::WithCall => (
                 vec![
                     ContentBlock::text(text),
                     ContentBlock::ToolUse {
-                        id: "ignored".into(),
+                        id: "c".into(),
                         name: "bash".into(),
                         input: json!({"command": "ls"}),
                     },
                 ],
                 StopReason::ToolUse,
             ),
+            Answer::CutOff => (vec![ContentBlock::text(text)], StopReason::MaxTokens),
+            Answer::Empty => (vec![ContentBlock::text(" ")], StopReason::EndTurn),
         };
         let response = ModelResponse {
             message: Message {
@@ -284,6 +306,20 @@ impl ModelProvider for Summarizer {
             response,
         ))])))
     }
+
+    fn context_window(&self, _model: &str) -> Option<u64> {
+        self.window
+    }
+}
+
+/// A request's size as the providers estimate it: its system blocks, messages and tools.
+pub fn request_tokens(request: &ModelRequest) -> u64 {
+    let system: usize = request.system.iter().map(String::len).sum();
+    let messages: usize = request.messages.iter().map(Message::char_len).sum();
+    let tools: usize = (request.tools.iter())
+        .map(|t| t.name.len() + t.description.len() + t.input_schema.to_string().len())
+        .sum();
+    ch_kernel::estimate_tokens(system + messages + tools)
 }
 
 /// `ccx_for` with `provider` as the agent's provider, and a separate summarizer.
@@ -534,4 +570,107 @@ pub async fn trimmed_twice(tmp: &Path) -> (Conv, Vec<Message>, String) {
     let log = std::fs::read_to_string(tmp.join("s1/context/log.jsonl")).unwrap();
     assert_eq!(log.lines().count(), 2);
     (c, v, log)
+}
+
+// ---------- summaries ----------
+
+pub fn with(strategy: Strategy) -> Context {
+    Context::new(ContextConfig {
+        strategy,
+        ..Default::default()
+    })
+}
+
+/// The text of every text block in `message`.
+pub fn texts(message: &Message) -> Vec<String> {
+    message
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The summary blocks of a view's first message.
+pub fn summary_blocks(view: &[Message]) -> Vec<String> {
+    texts(&view[0])
+        .into_iter()
+        .filter(|t| t.starts_with("<context-summary"))
+        .collect()
+}
+
+/// What holds for a view with summaries: the first message starts with the history's,
+/// then the summaries; roles alternate; every call has its result; the last message is
+/// the history's.
+pub fn assert_summarized(history: &History, view: &[Message]) {
+    let first = &history.messages()[0];
+    assert_eq!(view[0].content[..first.content.len()], first.content[..]);
+    assert!(
+        view[0].content[first.content.len()..].iter().all(
+            |b| matches!(b, ContentBlock::Text { text } if text.starts_with("<context-summary"))
+        )
+    );
+    for (i, m) in view.iter().enumerate() {
+        let role = if i % 2 == 0 {
+            Role::User
+        } else {
+            Role::Assistant
+        };
+        assert_eq!(m.role, role, "message {i}");
+    }
+    for pair in view.windows(2) {
+        if pair[0].role != Role::Assistant {
+            continue;
+        }
+        let uses: Vec<_> = pair[0].tool_calls().into_iter().map(|c| c.id).collect();
+        let results: Vec<_> = (pair[1].content.iter())
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(uses, results);
+    }
+    assert_eq!(view.last(), history.messages().last());
+}
+
+/// `prompts/summary-merge.md` with the default word limit.
+pub fn summary_merge_prompt() -> String {
+    include_str!("../../../../prompts/summary-merge.md")
+        .trim()
+        .replace("{max_words}", "1000")
+}
+
+/// A window at which `history` is just above `share` of it.
+pub fn window_above(history: &History, share: f64) -> u64 {
+    (tokens(&history.messages()) as f64 / (share + 0.02)) as u64
+}
+
+/// Rounds of work: a new prompt, a plan, a message the user sends during the turn, and
+/// fifteen steps.
+pub fn round(c: &mut Conv, n: usize) {
+    c.turn(&format!("user prompt #{n}#"));
+    c.plan();
+    c.history.push(c.turn, Message::assistant("Working on it."));
+    c.history.push(
+        c.turn,
+        Message::user(format!("user note #{n}#, keep it short")),
+    );
+    for _ in 0..15 {
+        c.bash(2000);
+    }
+}
+
+/// A history the trims can't bring below `hard`: mostly short results.
+pub fn hard_to_trim() -> Conv {
+    let mut c = Conv::new("Fix the parser");
+    for _ in 0..4 {
+        c.bash(2000);
+    }
+    for _ in 0..150 {
+        c.bash(450);
+    }
+    c
 }

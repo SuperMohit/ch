@@ -43,9 +43,9 @@ pub struct ContextConfig {
     pub input_min_chars: usize,
     /// Tools whose every call but the latest is trimmed first.
     pub superseded_tools: Vec<String>,
-    /// The longest summary.
+    /// The length the summary prompt asks for, in words; a reply is cut at 1.5 times it.
     pub summary_max_words: usize,
-    /// Above this share of summaries, the two oldest are merged.
+    /// Above this share of summary text, the two oldest summaries are merged.
     pub max_summary_share: f64,
 }
 

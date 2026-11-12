@@ -164,10 +164,13 @@ Set `CH_HOME` to use a directory other than `~/.ch`, and `CH_LOG=debug` for verb
 The `context` plugin keeps long sessions inside the model's window ([ADR 0004](docs/adr/0004-context-management.md)). Shares are of the usable window: the context window minus the reserved output, the system prompt and the tools.
 
 - **Trims.** When the conversation passes `soft`, older bulky content between the task and the newest steps is trimmed in one batch: superseded plan updates, long tool results, long strings in earlier tool inputs, and old reminders. A trimmed result names a file in the session's directory that the model can read back.
-- **Summaries.** When it is still above `hard`, the model summarizes the older steps, and the summary takes their place after your task. Every message you wrote and the latest plan are copied next to the summary word for word. Summaries are never rewritten, except that the two oldest are merged when they pass `max_summary_share`. The agent's own model writes them, reading the conversation from the prompt cache; set `[model.summarizer]` to use another model, which gets a transcript instead.
-- **`/compact [instructions]`** summarizes now, all but the last `min_recent_steps` steps, with your instructions added to the prompt. A request the provider rejects as too long is trimmed, summarized and sent again.
+- **Summaries.** Above `hard`, when a trim wouldn't bring the conversation below it, the model summarizes the older steps instead, and the summary takes their place after your task. It is kept only if it frees `min_free`; if it isn't written or kept, the trim is made, and no summary is tried again until the conversation grows by `min_free` or the next turn starts. The REPL shows each summary under its compaction line.
+- **What is copied.** The messages you wrote in the summarized steps are copied next to the summary word for word, after escaping: a `<` that would open or close one of the summary's tags (such as `</user-messages>`) becomes `&lt;`. A message over 2,000 characters is cut there, with the path of a saved copy of all of it. The latest call to each of `superseded_tools` is copied too when it is in the summarized steps. Summaries are never rewritten, except that the two oldest are merged when the summaries' own text passes `max_summary_share`.
+- **Who writes them.** The agent's own model, sent its last request up to the summarized steps, so those are read from the prompt cache. With `[model.summarizer]` set, that model gets the steps as a transcript instead: your session's tool output and file contents, at its full input price. Its window must hold them; when the provider says how large it is, steps that don't fit are summarized in parts. A project may set `[model.summarizer] id` without your trust (its `provider` needs trust), which switches summaries to a transcript for that model on the agent's provider.
+- **`/compact [instructions]`** summarizes now, all but the last `min_recent_steps` steps, with your instructions added to the prompt. Under `elide` it trims the same steps instead and ignores the instructions.
+- **Overflow.** A request the provider rejects as too long is trimmed (`staged`, `elide`), including the results in the newest steps but the last, and summarized (`staged`, `summarize`), then sent again once. When the summary request is rejected as too long too, the steps are summarized in parts. A second rejection of the step ends the turn.
 
-What you wrote is never changed. Trims and summaries are rare and large, so the prompt cache keeps working between them.
+Text you wrote is never changed where it stands. Trims and summaries are rare and large, so the prompt cache keeps working between them.
 
 ```toml
 [plugins.context]
@@ -181,7 +184,7 @@ min_recent_steps = 2              # and at least this many steps
 elide_min_chars = 500             # trim tool results longer than this
 input_min_chars = 1000            # and tool-input strings longer than this
 superseded_tools = ["update_plan"]  # every call but the latest is trimmed first
-summary_max_words = 1000          # the longest summary
+summary_max_words = 1000          # the length asked for; a reply is cut at 1.5 times it
 max_summary_share = 0.15          # merge the two oldest summaries past this share
 ```
 

@@ -34,14 +34,7 @@ pub fn result(content: &str, saved: Saved<'_>, tools: ReadTools) -> String {
         count(line_count(content), "line"),
         count(content.chars().count(), "character")
     );
-    let how = match tools {
-        ReadTools::FileTools { .. } => "; read it with read_file (offset, limit) or grep_text",
-        ReadTools::Bash => {
-            "; read it from line N on with `tail -n +N <path> | head -n 200`, or search it \
-             with `grep -n`"
-        }
-        ReadTools::None => "",
-    };
+    let how = how(tools);
     match saved {
         Saved::Copy(path) => {
             let notes = ReadQuirks::of(content).notes(tools);
@@ -66,6 +59,31 @@ pub fn result(content: &str, saved: Saved<'_>, tools: ReadTools) -> String {
         }
         Saved::Nowhere => format!("{RESULT_PREFIX}{size}. Run the command again if you need it.]"),
     }
+}
+
+/// How a stub tells the model to read a saved file.
+fn how(tools: ReadTools) -> &'static str {
+    match tools {
+        ReadTools::FileTools { .. } => "; read it with read_file (offset, limit) or grep_text",
+        ReadTools::Bash => {
+            "; read it from line N on with `tail -n +N <path> | head -n 200`, or search it \
+             with `grep -n`"
+        }
+        ReadTools::None => "",
+    }
+}
+
+/// A message the user wrote, cut after `max` characters, with where all of it is saved.
+pub fn user_text(text: &str, max: usize, path: &Path, tools: ReadTools) -> String {
+    let head: String = text.chars().take(max).collect();
+    let rest = text.chars().count().saturating_sub(max);
+    format!(
+        "{head}\n[… {} more character{}; the whole message is saved at {}{}.]",
+        thousands(rest as u64),
+        if rest == 1 { "" } else { "s" },
+        path.display(),
+        how(tools)
+    )
 }
 
 /// `n` and `thing`, plural unless `n` is 1.

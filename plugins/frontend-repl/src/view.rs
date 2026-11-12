@@ -156,7 +156,7 @@ impl TurnView {
                 self.end_text(&mut out);
                 let what = match kind {
                     CompactionKind::Elided => "old tool output elided",
-                    CompactionKind::Summarized => "older turns summarized",
+                    CompactionKind::Summarized => "older steps summarized",
                 };
                 out.push(Action::Write(format!(
                     "{}\n",
@@ -167,6 +167,19 @@ impl TurnView {
                     ))
                 )));
                 self.last_started = None;
+            }
+            // The summary that replaced them, so the user sees what the model reads back.
+            AgentEvent::Custom { source, name, data }
+                if source == "context" && name == "compaction" =>
+            {
+                if let Some(text) = data["text"].as_str() {
+                    self.end_text(&mut out);
+                    let lines: String = (text.lines())
+                        .map(|l| format!("{}\n", dim(&format!("    {l}"))))
+                        .collect();
+                    out.push(Action::Write(lines));
+                    self.last_started = None;
+                }
             }
             _ => {}
         }
@@ -424,5 +437,31 @@ mod tests {
     fn fenced_code_spans_deltas() {
         let actions = run(&[delta("```\n- x\n"), delta("```\n- y\n"), assistant()]);
         assert_eq!(screen(&actions), "```\n- x\n```\n• y\n");
+    }
+
+    #[test]
+    fn a_summary_is_shown_under_its_compaction() {
+        let actions = run(&[
+            AgentEvent::ContextCompacted {
+                kind: CompactionKind::Summarized,
+                tokens_before: 90_000,
+                tokens_after: 20_000,
+            },
+            AgentEvent::Custom {
+                source: "context".into(),
+                name: "compaction".into(),
+                data: json!({"kind": "summarized", "text": "## Goal\nFix it."}),
+            },
+            AgentEvent::Custom {
+                source: "context".into(),
+                name: "compaction".into(),
+                data: json!({"kind": "elided"}),
+            },
+        ]);
+        assert_eq!(
+            screen(&actions),
+            "  · context: older steps summarized (90.0k → 20.0k tokens)\n    ## Goal\n    Fix \
+             it.\n"
+        );
     }
 }

@@ -15,10 +15,12 @@ use crate::strategy::{Context, ID, Made, Step, thinking_count, warn};
 use crate::stub::{self, Saved};
 
 /// A trim that has been decided but not saved.
-struct Decision {
+pub(crate) struct Decision {
     record: Record,
     originals: Vec<Original>,
     before: u64,
+    /// The size of the view with the trim.
+    pub(crate) after: u64,
     /// How the stubs tell the model to read the files, for a copy that fails.
     tools: ReadTools,
 }
@@ -34,26 +36,26 @@ impl Context {
         ccx: &ContextCx,
         trigger: Trigger,
     ) -> Step {
-        let files = Files {
-            base: ccx.cx.session_dir.as_deref().and_then(|d| anchor(d)),
-            tools: ReadTools::of(&ccx.cx),
-        };
-        match self.decide(history, records, budget, trigger, &files) {
+        match self.decide(history, records, budget, ccx, trigger) {
             Some(decision) => self.commit(history, records, decision, budget, ccx).await,
-            None => Step::Nothing,
+            None => Step::Nothing("nothing to trim before the last steps".into()),
         }
     }
 
     /// Plans a trim; `None` when there is nothing to trim or, above `soft`, when it
     /// wouldn't free `min_free`. Writes nothing.
-    fn decide(
+    pub(crate) fn decide(
         &self,
         history: &History,
         records: &[Record],
         budget: &Budget,
+        ccx: &ContextCx,
         trigger: Trigger,
-        files: &Files,
     ) -> Option<Decision> {
+        let files = &Files {
+            base: ccx.cx.session_dir.as_deref().and_then(|d| anchor(d)),
+            tools: ReadTools::of(&ccx.cx),
+        };
         let rendered = render(history, records);
         let applied = Applied::of(records);
         let plan = plan::plan(
@@ -72,7 +74,8 @@ impl Context {
         let before = budget.measure(&rendered.view());
         let mut all = records.to_vec();
         all.push(record.clone());
-        let freed = before.saturating_sub(budget.measure(&render(history, &all).view()));
+        let after = budget.measure(&render(history, &all).view());
+        let freed = before.saturating_sub(after);
         if trigger == Trigger::Soft
             && (freed as f64) < self.config.min_free * budget.usable() as f64
         {
@@ -82,6 +85,7 @@ impl Context {
             record,
             originals: plan.originals,
             before,
+            after,
             tools: files.tools,
         })
     }
@@ -89,7 +93,7 @@ impl Context {
     /// Saves a decided trim: the copies of its results, then its record. With a
     /// session directory it takes effect only once its record is durable, so a restart
     /// renders every view that was sent.
-    async fn commit(
+    pub(crate) async fn commit(
         &self,
         history: &History,
         records: &[Record],
@@ -102,6 +106,7 @@ impl Context {
             originals,
             before,
             tools,
+            ..
         } = decision;
         let failed = match ccx.cx.session_dir.as_deref() {
             Some(dir) => save_originals(dir.clone(), originals).await,
@@ -136,7 +141,7 @@ impl Context {
 
 /// The session directory anchored as the file tools check it, also before it exists;
 /// `None` if it is a symlink.
-fn anchor(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn anchor(dir: &Path) -> Option<PathBuf> {
     match fs::symlink_metadata(dir) {
         Ok(_) => anchored(dir).ok(),
         Err(_) => Some(fs::canonicalize(dir.parent()?).ok()?.join(dir.file_name()?)),
@@ -146,7 +151,10 @@ fn anchor(dir: &Path) -> Option<PathBuf> {
 /// Saves the originals of trimmed results off the async runtime: they can be large.
 /// The copies and their directories are made durable before the record that names them
 /// is written. Returns those that couldn't be saved, and why.
-async fn save_originals(session_dir: PathBuf, originals: Vec<Original>) -> Vec<(Original, String)> {
+pub(crate) async fn save_originals(
+    session_dir: PathBuf,
+    originals: Vec<Original>,
+) -> Vec<(Original, String)> {
     if originals.is_empty() {
         return Vec::new();
     }

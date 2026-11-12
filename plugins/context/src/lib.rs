@@ -19,13 +19,16 @@
 //! - A trimmed result's stub names a file the model can read back: spill's file, or a
 //!   copy in `<session dir>/context/elided/`. Without a session directory it says to
 //!   run the command again.
-//! - Above `hard` (`summarize`, and `staged` after a trim), the middle since the last
-//!   summary is summarized, and left out of the view: the summary is appended to the
-//!   first message, with the user's text and the latest superseded call copied word for
-//!   word. The agent's own model writes it, replaying its request so the history is
-//!   read from the cache; a `[model.summarizer]` gets a transcript instead. Past
-//!   `max_summary_share`, the two oldest summaries are merged.
-//! - Text the user wrote is never changed.
+//! - Above `hard` (`summarize`, and `staged` when a trim wouldn't bring the view below
+//!   it), the middle since the last summary is summarized, and left out of the view: the
+//!   summary is appended to the first message, with the user's text and the latest
+//!   superseded call copied word for word after escaping (a long message is cut, with a
+//!   saved copy). The agent's own model writes it, sent its request up to the span so
+//!   that is read from the cache; a `[model.summarizer]` gets a transcript instead. A
+//!   summary is kept only if it frees `min_free` (anything, on `/compact` and an
+//!   overflow); after one that isn't made, the next waits for growth or the next turn.
+//!   Past `max_summary_share` of summary text, the two oldest summaries are merged.
+//! - Text the user wrote is never changed where it stands.
 //! - A trim drops the thinking blocks after its first edit; a summary drops all the
 //!   thinking before it.
 //! - `/compact [instructions]` summarizes all but the last `min_recent_steps` steps

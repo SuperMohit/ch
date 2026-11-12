@@ -43,6 +43,8 @@ pub(crate) struct SessionLog {
     /// Why no more compactions are made in this session: its log may hold what wasn't
     /// sent.
     frozen: Option<String>,
+    /// After a summary that wasn't made: the turn, and the size of the view then.
+    backoff: Option<(u32, u64)>,
 }
 
 impl Shared {
@@ -92,12 +94,26 @@ pub(crate) struct Loaded {
 /// What came of a trim or a summary.
 pub(crate) enum Step {
     Made(Made),
-    /// Nothing to do, or not worth it.
-    Nothing,
-    /// A summary that couldn't be written; the conversation is kept as it was.
+    /// Nothing to do: why.
+    Nothing(String),
+    /// A summary that wasn't written, or wasn't worth keeping: why.
     Failed(String),
     /// Decided, but it couldn't be saved, so it wasn't made.
     NotSaved(String),
+}
+
+impl Step {
+    /// What `/compact` says about it.
+    fn said(self, what: &str) -> String {
+        match self {
+            Step::Made(made) => made.message,
+            Step::Nothing(why) => why,
+            Step::Failed(why) => format!("no summary was written: {why}"),
+            Step::NotSaved(why) => {
+                format!("the {what} couldn't be saved, so it wasn't made: {why}")
+            }
+        }
+    }
 }
 
 /// A trim or summary that was made: its records, the new view, and what `/compact`
@@ -143,6 +159,7 @@ impl Context {
                 records: Vec::new(),
                 written: HashSet::new(),
                 frozen: fresh.frozen,
+                backoff: None,
             };
             for record in fresh.records {
                 session.add(record);
@@ -152,16 +169,42 @@ impl Context {
         loaded(&slot).expect("just loaded")
     }
 
+    /// Runs `f` on `ccx`'s session log, if it is the one loaded.
+    fn with_session<T>(&self, ccx: &ContextCx, f: impl FnOnce(&mut SessionLog) -> T) -> Option<T> {
+        (self.shared.lock().as_mut())
+            .filter(|s| s.id == *ccx.cx.session_id)
+            .map(f)
+    }
+
     fn freeze(&self, ccx: &ContextCx, why: String) {
         warn(ccx, format!("no more compactions in this session: {why}"));
-        if let Some(s) = (self.shared.lock().as_mut()).filter(|s| s.id == *ccx.cx.session_id) {
-            s.frozen = Some(why);
-        }
+        self.with_session(ccx, |s| s.frozen = Some(why));
+    }
+
+    /// After a summary that wasn't made (`Some` with the size of the view then), no
+    /// summary is tried above `hard` until the view grows by `min_free` or the next turn
+    /// starts: each try is a paid call. `None` after one that was.
+    pub(crate) fn back_off(&self, ccx: &ContextCx, tokens: Option<u64>) {
+        let turn = ccx.cx.turn;
+        self.with_session(ccx, |s| s.backoff = tokens.map(|t| (turn, t)));
+    }
+
+    fn backed_off(&self, ccx: &ContextCx, tokens: u64, budget: &Budget) -> bool {
+        let grown = self.config.min_free * budget.usable() as f64;
+        self.with_session(ccx, |s| s.backoff)
+            .flatten()
+            .is_some_and(|(turn, then)| {
+                turn == ccx.cx.turn && (tokens as f64) < then as f64 + grown
+            })
     }
 
     /// Saves `record`: with a session directory, appended to the log and made durable
-    /// before it takes effect; then kept for the session.
+    /// before it takes effect; then kept for the session. Refused once the session is
+    /// frozen.
     pub(crate) async fn persist(&self, ccx: &ContextCx, record: &Record) -> Result<(), String> {
+        if let Some(why) = self.with_session(ccx, |s| s.frozen.clone()).flatten() {
+            return Err(format!("compactions are off for this session: {why}"));
+        }
         if let Some(dir) = ccx.cx.session_dir.as_deref() {
             let (dir, line) = (dir.clone(), record.clone());
             let appended = tokio::task::spawn_blocking(move || log::append(&dir, &line))
@@ -184,9 +227,7 @@ impl Context {
                 return Err(why);
             }
         }
-        if let Some(s) = (self.shared.lock().as_mut()).filter(|s| s.id == *ccx.cx.session_id) {
-            s.add(record.clone());
-        }
+        self.with_session(ccx, |s| s.add(record.clone()));
         Ok(())
     }
 }
@@ -204,33 +245,44 @@ impl ContextStrategy for Context {
         cx: &ContextCx,
     ) -> anyhow::Result<View> {
         // Under `none` too: a session compacted earlier must keep rendering the same bytes.
-        let Loaded {
-            mut records,
-            frozen,
-        } = self.records(history, cx).await;
-        let mut current = render(history, &records).view();
-        let usable = budget.usable() as f64;
-        let over = |share: f64, view: &[Message]| budget.measure(view) as f64 > share * usable;
+        let Loaded { records, frozen } = self.records(history, cx).await;
+        let current = render(history, &records).view();
         let strategy = self.config.strategy;
         if frozen.is_some() || strategy == Strategy::None {
             return Ok(View { messages: current });
         }
-        if matches!(strategy, Strategy::Elide | Strategy::Staged)
-            && over(self.config.soft, &current)
-            && let Step::Made(made) = self
-                .trim(history, &records, &budget, cx, Trigger::Soft)
-                .await
-        {
-            records.extend(made.records);
-            current = made.view;
-        }
+        let usable = budget.usable() as f64;
+        let size = budget.measure(&current);
+        let trim = (matches!(strategy, Strategy::Elide | Strategy::Staged)
+            && size as f64 > self.config.soft * usable)
+            .then(|| self.decide(history, &records, &budget, cx, Trigger::Soft))
+            .flatten();
+        // A trim that leaves the view above `hard` isn't made: the summary replays the
+        // view as it was sent, which the cache holds, and makes the trim pointless. It is
+        // made if the summary isn't.
+        let projected = trim.as_ref().map_or(size, |t| t.after);
         if matches!(strategy, Strategy::Summarize | Strategy::Staged)
-            && over(self.config.hard, &current)
-            && let Step::Made(made) = self
-                .summarize(history, &records, &budget, cx, Trigger::Hard, None)
-                .await
+            && projected as f64 > self.config.hard * usable
+            && !self.backed_off(cx, size, &budget)
         {
-            current = made.view;
+            let step = self
+                .summarize(history, &records, &budget, cx, Trigger::Hard, None)
+                .await;
+            if let Step::Made(made) = step {
+                return Ok(View {
+                    messages: made.view,
+                });
+            }
+            if cx.cx.cancel.is_cancelled() {
+                return Ok(View { messages: current });
+            }
+        }
+        if let Some(trim) = trim
+            && let Step::Made(made) = self.commit(history, &records, trim, &budget, cx).await
+        {
+            return Ok(View {
+                messages: made.view,
+            });
         }
         Ok(View { messages: current })
     }
@@ -270,48 +322,51 @@ impl ContextStrategy for Context {
             _ => false,
         };
         let summarizes = matches!(strategy, Strategy::Summarize | Strategy::Staged);
-        let mut said = Vec::new();
-        let mut changed = false;
+        let mut steps = Vec::new();
         if trims {
-            match self.trim(history, &records, &budget, cx, trigger).await {
-                Step::Made(made) => {
-                    records.extend(made.records);
-                    said.push(made.message);
-                    changed = true;
-                }
-                other => said.push(why_not(other, "trim")),
+            let step = self.trim(history, &records, &budget, cx, trigger).await;
+            if let Step::Made(made) = &step {
+                records.extend(made.records.iter().cloned());
             }
+            steps.push((step, "trim"));
         }
-        if summarizes {
-            match self
+        if summarizes && !cx.cx.cancel.is_cancelled() {
+            let step = self
                 .summarize(history, &records, &budget, cx, trigger, instructions)
-                .await
-            {
-                Step::Made(made) => {
-                    said.push(made.message);
-                    changed = true;
-                }
-                other => said.push(why_not(other, "summarize")),
-            }
+                .await;
+            steps.push((step, "summary"));
         }
-        let message = if changed {
-            said.retain(|m| !m.starts_with("nothing to"));
-            said.join(" ")
-        } else {
-            said.join("; ")
+        let changed = steps.iter().any(|(s, _)| matches!(s, Step::Made(_)));
+        // After a change, "nothing to do" for the other step goes without saying.
+        let said: Vec<String> = (steps.into_iter())
+            .filter(|(s, _)| !(changed && matches!(s, Step::Nothing(_))))
+            .map(|(s, what)| s.said(what))
+            .collect();
+        let message = match changed {
+            true => said
+                .iter()
+                .map(|s| sentence(s))
+                .collect::<Vec<_>>()
+                .join(" "),
+            false => said.join("; "),
         };
         Ok(CompactOutcome { changed, message })
     }
 }
 
-/// What `/compact` says when a step made nothing.
-fn why_not(step: Step, what: &str) -> String {
-    match step {
-        Step::Made(made) => made.message,
-        Step::Nothing => format!("nothing to {what} before the last steps"),
-        Step::Failed(why) => format!("the summary failed: {why}"),
-        Step::NotSaved(why) => format!("the {what} couldn't be saved, so it wasn't made: {why}"),
+/// `s` as a sentence: capitalized, with a full stop.
+fn sentence(s: &str) -> String {
+    let mut chars = s.chars();
+    let mut out: String = chars
+        .next()
+        .into_iter()
+        .flat_map(char::to_uppercase)
+        .collect();
+    out.push_str(chars.as_str());
+    if !out.ends_with('.') {
+        out.push('.');
     }
+    out
 }
 
 /// Thinking blocks in `view`.
@@ -325,4 +380,52 @@ pub(crate) fn thinking_count(view: &[Message]) -> usize {
 pub(crate) fn warn(ccx: &ContextCx, message: String) {
     tracing::warn!("{message}");
     ccx.cx.emit(AgentEvent::Warning { message });
+}
+
+#[cfg(test)]
+mod tests {
+    use ch_kernel::{Cx, ModelRequest, UsageLog};
+    use ch_provider_scripted::ScriptedProvider;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn once_frozen_nothing_more_is_saved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cx = Cx::detached("/ws");
+        cx.session_dir = Some(Arc::new(tmp.path().join("s")));
+        let ccx = ContextCx {
+            cx,
+            provider: Arc::new(ScriptedProvider::new(Vec::new())),
+            agent_request: ModelRequest {
+                model: "m".into(),
+                system: Vec::new(),
+                messages: Vec::new(),
+                tools: Vec::new(),
+                max_tokens: 100,
+                temperature: None,
+                thinking_budget: None,
+                purpose: "agent".into(),
+            },
+            summarizer: None,
+            usage: UsageLog::default(),
+        };
+        let mut history = History::new();
+        history.push(1, Message::user("task"));
+        history.push(1, Message::assistant("done"));
+        let context = Context::new(ContextConfig::default());
+        context.records(&history, &ccx).await;
+        let record = Record::reset(&history).unwrap();
+        context.persist(&ccx, &record).await.unwrap();
+        // A trim whose record couldn't be taken back out freezes the session; a summary
+        // decided in the same view must not be saved after it.
+        context.freeze(&ccx, "the log may keep part of a record".into());
+        let refused = context.persist(&ccx, &record).await.unwrap_err();
+        assert!(
+            refused.starts_with("compactions are off for this session"),
+            "{refused}"
+        );
+        let log = std::fs::read_to_string(tmp.path().join("s/context/log.jsonl")).unwrap();
+        assert_eq!(log.lines().count(), 1);
+    }
 }

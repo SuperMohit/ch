@@ -1,60 +1,25 @@
 //! The plugin in real sessions with the scripted provider, whose window is small enough
 //! to overflow: trimming keeps a long run going, stubs are read back with `read_file`
-//! after a resume, and a copied marker is refused.
+//! after a resume, and a copied marker is refused. Summaries in sessions are in
+//! `signed.rs`.
+
+mod sessions;
 
 use std::path::Path;
 use std::sync::Arc;
 
-use ch_kernel::reexports::async_trait;
 use ch_kernel::{
-    AgentEvent, Config, ContentBlock, Cx, ModelRequest, Plugin, PluginManifest, RegisterCx,
-    RegistryBuilder, Role, Session, SessionStore, TerminationReason, Tool, ToolOutput, ToolSpec,
+    AgentEvent, ContentBlock, ModelRequest, Role, Session, SessionStore, TerminationReason,
 };
 use ch_provider_scripted::{ScriptStep, ScriptedPlugin, ScriptedProvider};
 use serde_json::{Value, json};
+use sessions::{build, dirs, received};
 
 /// Trims only, for the tests of trimming in a session.
 const ELIDE: &str = "[plugins.context]\nstrategy = \"elide\"";
 
 /// The scripted provider rejects requests over this many tokens.
 const WINDOW: u64 = 20_000;
-
-/// `big`: a 3,000-character log, different for each `n`.
-struct Big;
-
-#[async_trait]
-impl Tool for Big {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "big".into(),
-            description: "When: tests. Protocol: -. Error modes: -. Side effects: none.".into(),
-            input_schema: json!({"type": "object", "properties": {"n": {"type": "integer"}}}),
-            read_only: true,
-        }
-    }
-
-    async fn call(&self, input: Value, _cx: &Cx) -> ToolOutput {
-        let n = input["n"].as_u64().unwrap_or(0);
-        let lines = input["lines"].as_u64().unwrap_or(100);
-        ToolOutput::ok(
-            (1..=lines)
-                .map(|i| format!("big {n:02} line {i:03} of the log\n"))
-                .collect::<String>(),
-        )
-    }
-}
-
-struct BigPlugin;
-
-impl Plugin for BigPlugin {
-    fn manifest(&self) -> PluginManifest {
-        PluginManifest::new("big", "test tool")
-    }
-    fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
-        cx.add_tool(Big);
-        Ok(())
-    }
-}
 
 /// `count` calls to `big`, then a reply.
 fn calls(count: u64) -> Vec<ScriptStep> {
@@ -78,45 +43,15 @@ fn session_as(
     sessions: &Path,
     toml: &str,
 ) -> Session {
-    let plugins: Vec<Arc<dyn Plugin>> = vec![
+    build(
+        id,
         Arc::new(ScriptedPlugin::from_provider(provider)),
-        Arc::new(BigPlugin),
-        ch_safety::plugin(),
-        ch_tools_fs::plugin(),
-        ch_planning::plugin(),
-        ch_context::plugin(),
-    ];
-    let config = Arc::new(
-        Config::parse(&format!(
-            "plugins.enable = [\"provider-scripted\"]\n[model]\nmax_output_tokens = 2000\n{toml}"
-        ))
-        .unwrap(),
-    );
-    let registry = RegistryBuilder::build(plugins, &config, ws).unwrap();
-    Session::builder(Arc::new(registry), config)
-        .workspace(ws)
-        .id(id)
-        .store(SessionStore::new(sessions))
-        .build()
-        .unwrap()
-}
-
-struct Dirs {
-    _tmp: tempfile::TempDir,
-    ws: std::path::PathBuf,
-    sessions: std::path::PathBuf,
-}
-
-fn dirs() -> Dirs {
-    let tmp = tempfile::tempdir().unwrap();
-    let ws = tmp.path().join("ws");
-    std::fs::create_dir(&ws).unwrap();
-    let sessions = tmp.path().join("sessions");
-    Dirs {
         ws,
         sessions,
-        _tmp: tmp,
-    }
+        &format!(
+            "plugins.enable = [\"provider-scripted\"]\n[model]\nmax_output_tokens = 2000\n{toml}"
+        ),
+    )
 }
 
 fn compactions(events: &[AgentEvent]) -> usize {
@@ -135,10 +70,6 @@ fn rewrites(requests: &[ModelRequest]) -> usize {
             b.len() < a.len() || b[..a.len()] != a[..]
         })
         .count()
-}
-
-fn received(rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>) -> Vec<AgentEvent> {
-    std::iter::from_fn(|| rx.try_recv().ok()).collect()
 }
 
 #[tokio::test]
@@ -356,139 +287,4 @@ async fn a_call_that_copies_a_marker_is_refused() {
     assert!(is_error);
     assert!(content.contains(ch_context::REFUSED), "{content}");
     assert!(!d.ws.join("a.txt").exists());
-}
-
-/// The scripted provider, with summary calls answered apart so they don't use up the
-/// script.
-struct Summaries(ScriptedProvider);
-
-#[async_trait]
-impl ch_kernel::ModelProvider for Summaries {
-    fn id(&self) -> &str {
-        "scripted-summaries"
-    }
-
-    async fn stream(
-        &self,
-        request: ModelRequest,
-        cancel: ch_kernel::reexports::CancellationToken,
-    ) -> Result<ch_kernel::ModelStream, ch_kernel::ModelError> {
-        use ch_kernel::{Message, ModelEvent, ModelResponse, StopReason, Usage};
-        if request.purpose != "context.summarize" {
-            return self.0.stream(request, cancel).await;
-        }
-        let response = ModelResponse {
-            message: Message::assistant("## Goal\nRead the logs.\n## Next step\nKeep reading."),
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-        };
-        let events = vec![Ok(ModelEvent::Completed(response))];
-        Ok(Box::pin(ch_kernel::reexports::futures::stream::iter(
-            events,
-        )))
-    }
-
-    fn context_window(&self, model: &str) -> Option<u64> {
-        self.0.context_window(model)
-    }
-
-    fn default_model(&self) -> Option<&str> {
-        Some("scripted")
-    }
-}
-
-struct SummariesPlugin(ScriptedProvider);
-
-impl Plugin for SummariesPlugin {
-    fn manifest(&self) -> PluginManifest {
-        PluginManifest::new("scripted-summaries", "test provider")
-    }
-    fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
-        cx.add_provider(Summaries(self.0.clone()));
-        Ok(())
-    }
-}
-
-/// A session under the default strategy, `staged`.
-fn staged_session(provider: ScriptedProvider, ws: &Path, sessions: &Path) -> Session {
-    let plugins: Vec<Arc<dyn Plugin>> = vec![
-        Arc::new(SummariesPlugin(provider)),
-        Arc::new(BigPlugin),
-        ch_safety::plugin(),
-        ch_tools_fs::plugin(),
-        ch_planning::plugin(),
-        ch_context::plugin(),
-    ];
-    let config = Arc::new(
-        Config::parse("[model]\nprovider = \"scripted-summaries\"\nmax_output_tokens = 2000")
-            .unwrap(),
-    );
-    let registry = RegistryBuilder::build(plugins, &config, ws).unwrap();
-    Session::builder(Arc::new(registry), config)
-        .workspace(ws)
-        .id("s1")
-        .store(SessionStore::new(sessions))
-        .build()
-        .unwrap()
-}
-
-#[tokio::test]
-async fn a_long_run_fits_under_staged_and_each_request_extends_the_last_between_compactions() {
-    let d = dirs();
-    // Big results to trim, and small ones that only a summary can take away.
-    let mut steps: Vec<ScriptStep> = (1..=120)
-        .map(|n| {
-            let lines = if n % 2 == 0 { 100 } else { 12 };
-            ScriptStep::tool("big", json!({ "n": n, "lines": lines }))
-        })
-        .collect();
-    steps.push(ScriptStep::text("done"));
-    let provider = ScriptedProvider::new(steps).with_context_window(12_000);
-    let mut s = staged_session(provider.clone(), &d.ws, &d.sessions);
-    let mut rx = s.events().subscribe();
-    let r = s.run_turn("read the logs").await;
-    assert_eq!(r.reason, TerminationReason::Done, "{r:?}");
-    assert_eq!(r.steps, 121);
-
-    // Which agent requests came right after a compaction.
-    let mut after_compaction = Vec::new();
-    let mut compacted = false;
-    let (mut trims, mut summaries) = (0, 0);
-    for event in received(&mut rx) {
-        match event {
-            AgentEvent::ContextCompacted { kind, .. } => {
-                compacted = true;
-                match kind {
-                    ch_kernel::CompactionKind::Elided => trims += 1,
-                    ch_kernel::CompactionKind::Summarized => summaries += 1,
-                }
-            }
-            AgentEvent::ModelRequest { purpose, .. } if purpose == "agent" => {
-                after_compaction.push(compacted);
-                compacted = false;
-            }
-            _ => {}
-        }
-    }
-    assert!(
-        trims > 0 && summaries > 0,
-        "{trims} trims, {summaries} summaries"
-    );
-    let requests = provider.requests();
-    assert_eq!(requests.len(), after_compaction.len());
-    for (i, pair) in requests.windows(2).enumerate() {
-        if after_compaction[i + 1] {
-            continue;
-        }
-        let (a, b) = (&pair[0].messages, &pair[1].messages);
-        assert_eq!(
-            b[..a.len()],
-            a[..],
-            "request {} doesn't extend the last",
-            i + 1
-        );
-    }
-    // The summaries are in the last request's first message.
-    let first = format!("{:?}", requests.last().unwrap().messages[0]);
-    assert!(first.contains("<context-summary n=\\\"1\\\""), "{first}");
 }
