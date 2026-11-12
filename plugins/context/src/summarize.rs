@@ -10,7 +10,7 @@ use ch_kernel::{
     AgentEvent, Budget, CompactionKind, ContextCx, History, Message, ModelError, ModelProvider,
     ModelRequest, Role, estimate_tokens,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::log::{Applied, Record, Trigger};
 use crate::plan::{self, Original};
@@ -102,7 +102,8 @@ impl Context {
     /// summary appended to the first message. Above `hard` the window is the usual one;
     /// on `/compact` and an overflow it holds only `min_recent_steps` steps, and when
     /// the span doesn't fit the summarizer, its parts are summarized one after another.
-    /// A failure stops automatic summaries for a while.
+    /// A failure warns, unless the turn was cancelled, and stops automatic summaries for
+    /// a while; a part that fails after others were written keeps them.
     pub(crate) async fn summarize(
         &self,
         history: &History,
@@ -115,33 +116,37 @@ impl Context {
         let mut all = records.to_vec();
         let mut made = Vec::new();
         let mut said = Vec::new();
-        for _ in 0..PIECES {
+        // Each turn of the loop writes a part, or ends it.
+        for parts in 0..PIECES {
             let before_view = render(history, &all).view();
             let (record, whole) = match self
                 .piece(history, &all, budget, ccx, trigger, instructions)
                 .await
             {
                 Ok(piece) => piece,
-                Err(step) if made.is_empty() => {
-                    if matches!(step, Step::Failed(_) | Step::NotSaved(_))
-                        && !ccx.cx.cancel.is_cancelled()
+                Err(step) => {
+                    let cancelled = ccx.cx.cancel.is_cancelled();
+                    if let Step::Failed(why) = &step
+                        && !cancelled
                     {
+                        warn(ccx, not_written(why, parts));
+                    }
+                    // The earlier parts stand.
+                    if parts > 0 {
+                        break;
+                    }
+                    if matches!(step, Step::Failed(_) | Step::NotSaved(_)) && !cancelled {
                         self.back_off(ccx, Some(budget.measure(&before_view)));
                     }
                     return step;
                 }
-                // The earlier parts stand.
-                Err(_) => break,
             };
             all.push(record.clone());
             made.push(record.clone());
-            let merged = match self.merge(history, &all, budget, ccx, trigger).await {
-                Ok(Some(merge)) => {
-                    all.push(merge.clone());
-                    made.push(merge);
-                    true
-                }
-                Ok(None) => false,
+            let merge = match self.merge(history, &all, budget, ccx, trigger).await {
+                Ok(merge) => merge,
+                // A cancelled merge, like a cancelled summary, doesn't warn.
+                Err(_) if ccx.cx.cancel.is_cancelled() => None,
                 Err(why) => {
                     warn(
                         ccx,
@@ -149,12 +154,22 @@ impl Context {
                             "couldn't merge the two oldest summaries: {why}; the new summary was kept"
                         ),
                     );
-                    false
+                    None
                 }
             };
+            all.extend(merge.clone());
+            made.extend(merge.clone());
             let view = render(history, &all).view();
             let (before, after) = (budget.measure(&before_view), budget.measure(&view));
-            report(ccx, &record, &before_view, &view, before, after, merged);
+            report(
+                ccx,
+                &record,
+                merge.as_ref(),
+                &before_view,
+                &view,
+                before,
+                after,
+            );
             let s = record.summary.as_ref().expect("a summary record");
             said.push(format!(
                 "Summarized {}: {} → {} tokens.",
@@ -162,7 +177,7 @@ impl Context {
                 short_tokens(before),
                 short_tokens(after)
             ));
-            if merged {
+            if merge.is_some() {
                 said.push("The two oldest summaries were merged into one.".into());
             }
             if whole || trigger == Trigger::Hard || ccx.cx.cancel.is_cancelled() {
@@ -219,7 +234,7 @@ impl Context {
             merged: false,
         };
         let record = Record::summarized(trigger, history, summary);
-        self.saves(history, records, &record, budget, ccx)?;
+        self.saves(history, records, &record, budget)?;
         self.persist(ccx, &record).await.map_err(Step::NotSaved)?;
         Ok((record, span.end == whole.end))
     }
@@ -232,7 +247,6 @@ impl Context {
         records: &[Record],
         record: &Record,
         budget: &Budget,
-        ccx: &ContextCx,
     ) -> Result<(), Step> {
         let before = budget.measure(&render(history, records).view());
         let mut all = records.to_vec();
@@ -245,14 +259,11 @@ impl Context {
         if after < before && (before - after) as f64 >= enough {
             return Ok(());
         }
-        Err(failed(
-            ccx,
-            format!(
-                "it would take the conversation from {} to {} tokens, too little to be worth it",
-                short_tokens(before),
-                short_tokens(after)
-            ),
-        ))
+        Err(Step::Failed(format!(
+            "it would take the conversation from {} to {} tokens, too little to be worth it",
+            short_tokens(before),
+            short_tokens(after)
+        )))
     }
 
     /// When the summaries' own text passes `max_summary_share`, merges the two oldest
@@ -332,7 +343,7 @@ async fn write(
                 Some(end) => span.end = end,
                 None => {
                     let why = "a single step doesn't fit the summarizer's window";
-                    return Err(failed(ccx, why.into()));
+                    return Err(Step::Failed(why.into()));
                 }
             }
             continue;
@@ -344,7 +355,7 @@ async fn write(
                 span.end = end;
             }
             (Err(Fail::Cancelled), _) => return Err(Step::Failed("cancelled".into())),
-            (Err(Fail::TooLong(why) | Fail::Other(why)), _) => return Err(failed(ccx, why)),
+            (Err(Fail::TooLong(why) | Fail::Other(why)), _) => return Err(Step::Failed(why)),
         }
     }
 }
@@ -373,10 +384,15 @@ async fn ask(
     }
 }
 
-/// A summary that wasn't made, warned about.
-fn failed(ccx: &ContextCx, why: String) -> Step {
-    warn(ccx, format!("no summary was written: {why}"));
-    Step::Failed(why)
+/// The warning for a summary that wasn't made, after `parts` that were.
+fn not_written(why: &str, parts: usize) -> String {
+    match parts {
+        0 => format!("no summary was written: {why}"),
+        1 => format!("couldn't summarize the rest: {why}; the part summarized before it was kept"),
+        n => format!(
+            "couldn't summarize the rest: {why}; the {n} parts summarized before it were kept"
+        ),
+    }
 }
 
 /// The user's texts as a summary keeps them: up to [`USER_TEXT_MAX`] characters each.
@@ -428,42 +444,49 @@ fn short_tokens(n: u64) -> String {
     }
 }
 
-/// Emits the summary's events: the text goes with them, so the user sees what the
-/// model will read back.
+/// Emits the summary's events, then the merge's if it set one off: the text goes with
+/// them, so the user sees what the model will read back.
 fn report(
     ccx: &ContextCx,
     record: &Record,
+    merge: Option<&Record>,
     before_view: &[Message],
     view: &[Message],
     before: u64,
     after: u64,
-    merged: bool,
 ) {
-    let s = record.summary.as_ref().expect("a summary record");
     ccx.cx.emit(AgentEvent::ContextCompacted {
         kind: CompactionKind::Summarized,
         tokens_before: before,
         tokens_after: after,
     });
-    ccx.cx.emit_custom(
-        ID,
-        "compaction",
-        json!({
-            "kind": "summarized",
-            "trigger": record.trigger,
-            "n": s.n,
-            "covers": s.covers(),
-            "from_event": s.from,
-            "to_event": s.to,
-            "text": s.text,
-            "user_messages": s.users.len(),
-            "latest_calls": s.calls.len(),
-            "model": s.model,
-            "merged": merged,
-            "thinking_dropped": thinking_count(before_view).saturating_sub(thinking_count(view)),
-            "at_event": record.at_event,
-            "tokens_before": before,
-            "tokens_after": after,
-        }),
-    );
+    let mut data = described("summarized", record);
+    data["merged"] = json!(merge.is_some());
+    data["thinking_dropped"] =
+        json!(thinking_count(before_view).saturating_sub(thinking_count(view)));
+    data["tokens_before"] = json!(before);
+    data["tokens_after"] = json!(after);
+    ccx.cx.emit_custom(ID, "compaction", data);
+    if let Some(merge) = merge {
+        ccx.cx
+            .emit_custom(ID, "compaction", described("merged", merge));
+    }
+}
+
+/// What a summary's event says about it.
+fn described(kind: &str, record: &Record) -> Value {
+    let s = record.summary.as_ref().expect("a summary record");
+    json!({
+        "kind": kind,
+        "trigger": record.trigger,
+        "n": s.n,
+        "covers": s.covers(),
+        "from_event": s.from,
+        "to_event": s.to,
+        "text": s.text,
+        "user_messages": s.users.len(),
+        "latest_calls": s.calls.len(),
+        "model": s.model,
+        "at_event": record.at_event,
+    })
 }

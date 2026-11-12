@@ -172,13 +172,23 @@ impl TurnView {
                 )));
                 self.last_started = None;
             }
-            // The summary that replaced them, so the user sees what the model reads back.
+            // The summary that replaced them, or the merge of the two oldest, so the user
+            // sees what the model reads back.
             AgentEvent::Custom { source, name, data }
                 if source == "context" && name == "compaction" =>
             {
                 if let Some(text) = data["text"].as_str() {
                     self.end_text(&mut out);
-                    let lines: String = (text.lines())
+                    // A merge has no compaction line of its own.
+                    if data["kind"] == "merged" {
+                        out.push(Action::Write(format!(
+                            "{}\n",
+                            dim("  · context: the two oldest summaries merged into one")
+                        )));
+                    }
+                    // The model wrote it: no cursor move or colour from it reaches the
+                    // terminal.
+                    let lines: String = (terminal_text(text).lines())
                         .map(|l| format!("{}\n", dim(&format!("    {l}"))))
                         .collect();
                     out.push(Action::Write(lines));
@@ -456,6 +466,11 @@ mod tests {
                 tool: None,
                 reason: "r\u{1b}[8m".into(),
             },
+            AgentEvent::Custom {
+                source: "context".into(),
+                name: "compaction".into(),
+                data: json!({"kind": "summarized", "text": "## Goal\u{1b}[8m\n\u{1b}[1Anext\r"}),
+            },
         ]);
         for action in &actions {
             let text = match action {
@@ -472,6 +487,7 @@ mod tests {
         assert!(s.contains("⚠ w\n"), "{s}");
         assert!(s.contains("· n: red"), "{s}");
         assert!(s.contains("blocked by h: r\n"), "{s}");
+        assert!(s.ends_with("    ## Goal\n    next\n"), "{s}");
     }
 
     #[test]
@@ -502,13 +518,19 @@ mod tests {
             AgentEvent::Custom {
                 source: "context".into(),
                 name: "compaction".into(),
+                data: json!({"kind": "merged", "text": "## Goal\nBoth."}),
+            },
+            AgentEvent::Custom {
+                source: "context".into(),
+                name: "compaction".into(),
                 data: json!({"kind": "elided"}),
             },
         ]);
         assert_eq!(
             screen(&actions),
             "  · context: older steps summarized (90.0k → 20.0k tokens)\n    ## Goal\n    Fix \
-             it.\n"
+             it.\n  · context: the two oldest summaries merged into one\n    ## Goal\n    \
+             Both.\n"
         );
     }
 }

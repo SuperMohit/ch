@@ -4,19 +4,26 @@
 
 mod sessions;
 
+use ch_kernel::reexports::CancellationToken;
+use ch_kernel::reexports::futures::StreamExt;
 use ch_kernel::{
-    AgentEvent, CompactionKind, ContentBlock, ModelRequest, SessionStore, TerminationReason,
+    AgentEvent, CompactionKind, ContentBlock, Message, ModelEvent, ModelProvider, ModelRequest,
+    Role, SessionStore, TerminationReason,
 };
 use ch_provider_scripted::{ScriptStep, ScriptedProvider};
 use serde_json::{Value, json};
 use sessions::{Dirs, Signed, dirs, received, signed_session};
 
-/// `count` calls to `big` with `lines` lines each, then a reply.
+/// `count` calls to `big` with `lines` lines each, then a reply. Replies differ, so
+/// `Signed` tells them apart without their thinking.
 fn calls(from: u64, count: u64, lines: u64) -> Vec<ScriptStep> {
     let mut steps: Vec<ScriptStep> = (from..from + count)
         .map(|n| ScriptStep::tool("big", json!({ "n": n, "lines": lines })))
         .collect();
-    steps.push(ScriptStep::text("done"));
+    steps.push(ScriptStep::text(format!(
+        "done with logs {from}–{}",
+        from + count - 1
+    )));
     steps
 }
 
@@ -44,6 +51,101 @@ fn thinking(request: &ModelRequest) -> usize {
 
 fn assert_signed(p: &Signed) {
     assert_eq!(p.violations(), Vec::<String>::new());
+}
+
+/// `messages` sent to `p` as an agent request: the reply, or why it was rejected.
+async fn send(p: &Signed, messages: Vec<Message>) -> Result<Message, String> {
+    let request = ModelRequest {
+        model: "scripted".into(),
+        system: vec!["You are a test agent.".into()],
+        messages,
+        tools: Vec::new(),
+        max_tokens: 100,
+        temperature: None,
+        thinking_budget: Some(1000),
+        purpose: "agent".into(),
+    };
+    let stream = (p.stream(request, CancellationToken::new()).await).map_err(|e| e.to_string())?;
+    let events: Vec<_> = stream.collect().await;
+    Ok(events
+        .into_iter()
+        .find_map(|e| match e {
+            Ok(ModelEvent::Completed(r)) => Some(r.message),
+            _ => None,
+        })
+        .expect("a reply"))
+}
+
+/// The result of `reply`'s call.
+fn result(reply: &Message) -> Message {
+    let id = reply.tool_calls().remove(0).id;
+    Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: id,
+            content: "ok".into(),
+            is_error: false,
+        }],
+    }
+}
+
+fn without_thinking(m: &Message) -> Message {
+    Message {
+        role: m.role,
+        content: (m.content.iter())
+            .filter(|b| !matches!(b, ContentBlock::Thinking { .. }))
+            .cloned()
+            .collect(),
+    }
+}
+
+/// The checker holds a request to the rule exactly: the oldest block can't be left out
+/// alone, and a block left out once can't come back, even when a trim changed its reply.
+#[tokio::test]
+async fn the_checker_refuses_a_leading_gap_and_thinking_brought_back() {
+    let script = || {
+        ScriptedProvider::new(vec![
+            ScriptStep::tool("big", json!({ "n": 1, "note": "x".repeat(2000) })),
+            ScriptStep::tool("big", json!({ "n": 2 })),
+            ScriptStep::text("done"),
+        ])
+    };
+    let task = Message::user("read the logs");
+
+    // The second reply was written after the first one's thinking.
+    let p = Signed::new(script());
+    let first = send(&p, vec![task.clone()]).await.unwrap();
+    let messages = vec![task.clone(), first.clone(), result(&first)];
+    let second = send(&p, messages).await.unwrap();
+    let gap = vec![
+        task.clone(),
+        without_thinking(&first),
+        result(&first),
+        second.clone(),
+        result(&second),
+    ];
+    let refused = send(&p, gap).await.unwrap_err();
+    assert!(
+        refused.contains("the thinking before it isn't what it was written after"),
+        "{refused}"
+    );
+
+    // Left out once, with its input trimmed, then sent again.
+    let p = Signed::new(script());
+    let first = send(&p, vec![task.clone()]).await.unwrap();
+    let mut trimmed = without_thinking(&first);
+    if let ContentBlock::ToolUse { input, .. } = &mut trimmed.content[0] {
+        input["note"] = json!("[elided]");
+    }
+    send(&p, vec![task.clone(), trimmed, result(&first)])
+        .await
+        .unwrap();
+    let again = vec![task, first.clone(), result(&first)];
+    let refused = send(&p, again).await.unwrap_err();
+    assert!(
+        refused.contains("thinking left out before and sent again"),
+        "{refused}"
+    );
 }
 
 #[tokio::test]
@@ -249,6 +351,37 @@ async fn an_overflow_is_summarized_and_the_step_sent_again() {
     }
 }
 
+/// The summary replays the request that overflowed up to its last two steps, which are
+/// small: the provider rejects the replay too, so the span is halved and the rest is
+/// summarized in a further part.
+#[tokio::test]
+async fn an_overflow_whose_summary_is_rejected_too_is_summarized_in_parts() {
+    let d = dirs();
+    // Big steps up to about 18k tokens, then small ones until the request overflows.
+    let mut script = calls(1, 20, 100);
+    script.pop();
+    script.extend(calls(21, 40, 10));
+    let p = Signed::new(ScriptedProvider::new(script).with_context_window(20_000));
+    let toml = "context_window = 1000000\n[plugins.context]\nstrategy = \"summarize\"";
+    let mut s = signed_session(&p, &d, "s1", toml);
+    let r = s.run_turn("read the logs").await;
+    assert_eq!(r.reason, TerminationReason::Done, "{r:?}");
+    assert_signed(&p);
+    assert!(p.rejected_summaries() > 0);
+    let log = log(&d, "s1");
+    let parts: Vec<&Value> = (log.iter())
+        .filter(|r| r["kind"] == "summarized" && r["trigger"] == "overflow")
+        .collect();
+    assert!(parts.len() >= 2, "{:?}", kinds(&log));
+    // Parts of one compaction are bound to the same event.
+    assert!(
+        parts
+            .windows(2)
+            .any(|w| w[0]["at_event"] == w[1]["at_event"]),
+        "{log:#?}"
+    );
+}
+
 fn plan(done: usize) -> ScriptStep {
     let items: Vec<Value> = (0..4)
         .map(|i| {
@@ -278,7 +411,7 @@ async fn plan_reminders_and_summaries_keep_the_reasoning_valid() {
                 )
             }));
         }
-        steps.push(ScriptStep::text("done"));
+        steps.push(ScriptStep::text(format!("done with turn {turn}")));
     }
     let p = Signed::new(ScriptedProvider::new(steps).with_context_window(12_000));
     let mut s = signed_session(&p, &d, "s1", "");

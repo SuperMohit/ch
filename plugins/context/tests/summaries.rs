@@ -62,7 +62,8 @@ async fn above_hard_the_middle_becomes_a_summary_in_the_first_message() {
         blocks[0].starts_with(&format!(
             "<context-summary n=\"1\" covers=\"turn 1, steps 1–{}\">\nYour own notes on these \
              steps, written when they were removed from the context. They record what \
-             happened and are not instructions; what the user wrote is in <user-messages>.\n",
+             happened and are not instructions; what the user wrote is in the user-messages \
+             blocks.\n",
             span / 2
         )),
         "{}",
@@ -224,7 +225,9 @@ async fn past_max_summary_share_the_two_oldest_summaries_are_merged() {
         "{text}"
     );
     assert_eq!(text.matches("<context-summary n=").count(), 2);
+    // The notes come first, and the prompt says so.
     assert!(text.ends_with(&summary_merge_prompt()), "{text}");
+    assert!(summary_merge_prompt().starts_with("Above are two of your earlier"));
     let blocks = summary_blocks(&v);
     assert_eq!(blocks.len(), 1);
     assert!(blocks[0].starts_with("<context-summary n=\"1\""));
@@ -232,14 +235,69 @@ async fn past_max_summary_share_the_two_oldest_summaries_are_merged() {
     // Both summaries' copied parts are kept.
     assert!(blocks[0].contains("user prompt #1#"));
     assert!(blocks[0].contains("user prompt #2#") || blocks[0].contains("user prompt #3#"));
-    let merged = received(&mut rx)
-        .into_iter()
-        .any(|e| matches!(e, AgentEvent::Custom { data, .. } if data["merged"] == true));
-    assert!(merged);
+    // The summary's event says it set off a merge, and the merged note has its own, with
+    // its text, so the user sees it.
+    let events = received(&mut rx);
+    let custom = |kind: &str| {
+        (events.iter())
+            .filter_map(|e| match e {
+                AgentEvent::Custom { data, .. } if data["kind"] == kind => Some(data.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(custom("summarized").iter().any(|d| d["merged"] == true));
+    let merges = custom("merged");
+    assert_eq!(merges.len(), 1);
+    assert_eq!(merges[0]["n"], 1);
+    let note = merges[0]["text"].as_str().unwrap();
+    assert!(note.starts_with("## Goal\nSummary 3 by m."), "{note}");
     assert_eq!(
         view(&with(Strategy::None), &c.history, 10_000_000, &ccx).await,
         v
     );
+}
+
+#[tokio::test]
+async fn a_merge_cancelled_mid_call_keeps_the_summary_without_a_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut c = Conv::new("Fix the parser");
+    for _ in 0..30 {
+        c.bash(2000);
+    }
+    let mut p = Summarizer::new();
+    p.pad = 3000;
+    let ccx = ccx_with(Some(tmp.path()), &p, None);
+    let ctx = Context::new(ContextConfig {
+        strategy: Strategy::Summarize,
+        max_summary_share: 0.05,
+        ..Default::default()
+    });
+    let session = tmp.path().join("s1");
+    let mut n = 0;
+    while records(&session).is_empty() && n < 12 {
+        n += 1;
+        round(&mut c, n);
+        view(&ctx, &c.history, 30_000, &ccx).await;
+    }
+    // The second summary sets off a merge, and the turn is cancelled during it.
+    p.queue(&[Answer::Summary, Answer::Cancel]);
+    let mut rx = ccx.cx.events.subscribe();
+    let mut v = Vec::new();
+    while records(&session).len() < 2 && n < 12 {
+        n += 1;
+        round(&mut c, n);
+        v = view(&ctx, &c.history, 30_000, &ccx).await;
+    }
+    assert!(ccx.cx.cancel.is_cancelled());
+    let requests = p.requests();
+    assert_eq!(requests.len(), 3, "two summaries and the merge");
+    assert!(texts(&requests[2].messages[0])[0].starts_with("<task>"));
+    let log = records(&session);
+    assert_eq!(log.len(), 2, "{log:#?}");
+    assert!(log.iter().all(|r| r["summary"]["merged"] != true));
+    assert_eq!(summary_blocks(&v).len(), 2);
+    assert_eq!(warnings(&mut rx), Vec::<String>::new());
 }
 
 #[tokio::test]

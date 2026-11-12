@@ -111,10 +111,12 @@ pub fn received(rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>) -> Vec<Ag
 /// checked, summary calls included. A signature records the system blocks, the tools
 /// and the messages before the reply, without their thinking. A request is rejected
 /// when a thinking block follows other messages than it was signed after; when the
-/// blocks before a kept block aren't those it was signed after, less a leading run
-/// (a gap, or a block brought back); or when a block that was left out once is sent
-/// again. Summary calls are answered here, so they don't use up the script, and every
-/// request is held to the scripted provider's window.
+/// thinking blocks before a kept block aren't exactly those it was signed after (one
+/// left out, or one brought back); or when a block that was left out once is sent
+/// again. A reply sent without its thinking is known by what a trim doesn't change:
+/// its tool-use ids, which are made unique here, or, without a call, its text. Summary
+/// calls are answered here, so they don't use up the script, and every request is held
+/// to the scripted provider's window.
 #[derive(Clone)]
 pub struct Signed {
     pub inner: ScriptedProvider,
@@ -127,14 +129,19 @@ pub struct Signed {
 pub struct Signing {
     /// Each signature, and the signatures of the blocks before it when it was written.
     issued: HashMap<String, Vec<String>>,
-    /// Each signed reply without its thinking, and its signature.
-    replies: HashMap<String, String>,
+    /// Each signed reply's [`reply_key`], and its signature; `None` once two replies had
+    /// the same key, so neither can be told apart without its thinking.
+    replies: HashMap<String, Option<String>>,
     /// Signatures whose message was sent without them.
     dropped: HashSet<String>,
+    /// Replies from the script so far: their number makes their tool-use ids unique.
+    answered: usize,
     /// What was wrong with each request that broke the rules.
     pub violations: Vec<String>,
     /// Requests rejected as too long.
     pub rejected: usize,
+    /// Summary requests among them.
+    pub rejected_summaries: usize,
     /// The summary requests.
     pub summaries: Vec<ModelRequest>,
 }
@@ -165,6 +172,10 @@ impl Signed {
         self.state.lock().unwrap().rejected
     }
 
+    pub fn rejected_summaries(&self) -> usize {
+        self.state.lock().unwrap().rejected_summaries
+    }
+
     pub fn summaries(&self) -> Vec<ModelRequest> {
         self.state.lock().unwrap().summaries.clone()
     }
@@ -184,6 +195,27 @@ fn digest(value: &impl serde::Serialize) -> String {
     let mut h = DefaultHasher::new();
     serde_json::to_string(value).unwrap().hash(&mut h);
     format!("{:016x}", h.finish())
+}
+
+/// What tells a reply apart when it is sent without its thinking, which a trim's edits
+/// don't change: its tool-use ids, or, without a call, its text.
+fn reply_key(m: &Message) -> String {
+    let ids: Vec<&str> = (m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    if !ids.is_empty() {
+        return format!("calls {}", ids.join(" "));
+    }
+    let texts: Vec<&str> = (m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    format!("text {}", digest(&texts))
 }
 
 fn sign(request: &ModelRequest, before: usize) -> String {
@@ -226,16 +258,15 @@ impl Signing {
                         "message {k}: thinking left out before and sent again"
                     ));
                 }
-                if !before.ends_with(&kept) {
+                if *before != kept {
                     wrong.push(format!(
-                        "message {k}: the thinking before it isn't what it was written after, \
-                         less a leading run"
+                        "message {k}: the thinking before it isn't what it was written after"
                     ));
                 }
                 kept.push(sig.clone());
             }
             if signatures.is_empty()
-                && let Some(sig) = self.replies.get(&digest(&without_thinking(m)))
+                && let Some(Some(sig)) = self.replies.get(&reply_key(m))
             {
                 left_out.push(sig.clone());
             }
@@ -256,7 +287,9 @@ impl Signing {
             .collect();
         self.issued.insert(sig.clone(), before);
         self.replies
-            .insert(digest(&without_thinking(reply)), sig.clone());
+            .entry(reply_key(reply))
+            .and_modify(|s| *s = None)
+            .or_insert_with(|| Some(sig.clone()));
         reply.content.insert(
             0,
             ContentBlock::Thinking {
@@ -290,6 +323,9 @@ impl ModelProvider for Signed {
                 && estimate_request_tokens(&request) > window
             {
                 st.rejected += 1;
+                if request.purpose == "context.summarize" {
+                    st.rejected_summaries += 1;
+                }
                 return Err(ModelError::ContextOverflow("over the window".into()));
             }
             if request.purpose == "context.summarize" {
@@ -316,10 +352,27 @@ impl ModelProvider for Signed {
             .collect()
             .await;
         let mut st = self.state.lock().unwrap();
+        // A resumed session's new script numbers its calls from the start again.
+        st.answered += 1;
+        let n = st.answered;
+        let unique = |id: String| format!("{id}-{n}");
         let events = events
             .into_iter()
             .map(|e| match e {
+                Ok(ModelEvent::ToolUseStart { id, name }) => Ok(ModelEvent::ToolUseStart {
+                    id: unique(id),
+                    name,
+                }),
+                Ok(ModelEvent::ToolInputDelta { id, len }) => Ok(ModelEvent::ToolInputDelta {
+                    id: unique(id),
+                    len,
+                }),
                 Ok(ModelEvent::Completed(mut r)) => {
+                    for block in &mut r.message.content {
+                        if let ContentBlock::ToolUse { id, .. } = block {
+                            *id = unique(std::mem::take(id));
+                        }
+                    }
                     st.sign(&request, &mut r.message);
                     Ok(ModelEvent::Completed(r))
                 }

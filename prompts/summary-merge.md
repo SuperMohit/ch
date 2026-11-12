@@ -1,4 +1,4 @@
-Below are two of your earlier <context-summary> notes for consecutive parts of the
+Above are two of your earlier <context-summary> notes for consecutive parts of the
 conversation, with the user's messages and latest tool calls from them. Rewrite the two
 notes as one, under the same headings, in at most {max_words} words. Keep what later
 work still needs: exact paths, names, commands, errors, decisions, and what was tried

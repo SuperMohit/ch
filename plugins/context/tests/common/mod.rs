@@ -190,6 +190,8 @@ pub fn ccx_for(id: &str, session_dir: Option<&Path>, tools: &[&str]) -> ContextC
 pub enum Answer {
     /// A numbered summary.
     Summary,
+    /// A numbered summary this many characters longer.
+    Longer(usize),
     /// A summary and a tool call.
     WithCall,
     /// A summary cut off at the output limit.
@@ -209,6 +211,8 @@ pub enum Answer {
 pub struct Summarizer {
     pub requests: Arc<std::sync::Mutex<Vec<ModelRequest>>>,
     pub answer: Arc<std::sync::Mutex<Answer>>,
+    /// Answers to the next requests it takes, in order, before `answer` again.
+    pub queued: Arc<std::sync::Mutex<std::collections::VecDeque<Answer>>>,
     /// Extra characters in each summary, as one word.
     pub pad: usize,
     /// Extra words in each summary.
@@ -223,6 +227,7 @@ impl Summarizer {
         Self {
             requests: Arc::default(),
             answer: Arc::new(std::sync::Mutex::new(Answer::Summary)),
+            queued: Arc::default(),
             pad: 0,
             words: 0,
             window: None,
@@ -231,6 +236,11 @@ impl Summarizer {
 
     pub fn answer(&self, answer: Answer) {
         *self.answer.lock().unwrap() = answer;
+    }
+
+    /// Answers the next requests it takes (not those over its window) with `answers`.
+    pub fn queue(&self, answers: &[Answer]) {
+        self.queued.lock().unwrap().extend(answers);
     }
 
     pub fn requests(&self) -> Vec<ModelRequest> {
@@ -261,7 +271,8 @@ impl ModelProvider for Summarizer {
         {
             return Err(ModelError::ContextOverflow("too long".into()));
         }
-        let answer = *self.answer.lock().unwrap();
+        let queued = self.queued.lock().unwrap().pop_front();
+        let answer = queued.unwrap_or(*self.answer.lock().unwrap());
         let text = format!(
             "## Goal\nSummary {n} by {}.{}{}",
             request.model,
@@ -276,6 +287,10 @@ impl ModelProvider for Summarizer {
             }
             Answer::Refuse => (vec![ContentBlock::text("I can't.")], StopReason::Refusal),
             Answer::Summary => (vec![ContentBlock::text(text)], StopReason::EndTurn),
+            Answer::Longer(extra) => (
+                vec![ContentBlock::text(format!("{text}{}", "s".repeat(extra)))],
+                StopReason::EndTurn,
+            ),
             Answer::WithCall => (
                 vec![
                     ContentBlock::text(text),

@@ -1,6 +1,7 @@
 //! The rules a summary keeps, over hand-built histories: what fits the summarizer, when
-//! a summary is worth keeping, backing off after a failure, a trim left undone for a
-//! summary, the copied text, and the checks when the log is read back.
+//! a summary or a merge is worth keeping, when a merge is due, backing off after a
+//! failure, a trim left undone for a summary, the copied text, and the checks when the
+//! log is read back.
 
 mod common;
 
@@ -82,6 +83,161 @@ async fn a_separate_summarizer_s_window_is_checked_before_the_call() {
     assert_contiguous(&log);
 }
 
+/// Above `hard` one part is written, even when the span doesn't fit the summarizer: the
+/// rest stays in the view for a later summary.
+#[tokio::test]
+async fn above_hard_only_one_part_is_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let c = long_session();
+    let agent = Summarizer::new();
+    let mut small = Summarizer::new();
+    small.window = Some(7_000);
+    let ccx = ccx_with(Some(tmp.path()), &agent, Some((&small, "small-model")));
+    let mut rx = ccx.cx.events.subscribe();
+    let window = window_above(&c.history, 0.85);
+    let v = view(&with(Strategy::Summarize), &c.history, window, &ccx).await;
+    assert_eq!(small.requests().len(), 1);
+    let log = summarized(&tmp.path().join("s1"));
+    assert_eq!(log.len(), 1, "{log:#?}");
+    assert_eq!(log[0]["trigger"], "hard");
+    // The span was halved: what follows the part is still in the view, before the
+    // recent window that a summary above `hard` keeps anyway.
+    let next = log[0]["summary"]["to"].as_u64().unwrap() + 1;
+    let events = c.history.events();
+    let sent = &events[events.iter().position(|e| e.id == next).unwrap()].message;
+    assert_eq!(without_thinking(&v[1]), without_thinking(sent));
+    assert!(tokens(&v[1..]) as f64 > 0.5 * window as f64);
+    assert_eq!(warnings(&mut rx), Vec::<String>::new());
+}
+
+/// A merge is due on the summaries' own text, not on the user's messages and latest
+/// calls copied next to it, which a merge keeps anyway.
+#[tokio::test]
+async fn a_merge_is_due_on_the_summaries_own_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut c = Conv::new("Fix the parser");
+    for _ in 0..30 {
+        c.bash(2000);
+    }
+    let p = Summarizer::new();
+    let ccx = ccx_with(Some(tmp.path()), &p, None);
+    let mut rx = ccx.cx.events.subscribe();
+    let ctx = Context::new(ContextConfig {
+        strategy: Strategy::Summarize,
+        max_summary_share: 0.05,
+        ..Default::default()
+    });
+    let session = tmp.path().join("s1");
+    let mut v = Vec::new();
+    for n in 1..=12 {
+        c.turn(&format!("prompt {n}: {}", "p".repeat(1900)));
+        c.history.push(c.turn, Message::assistant("Working on it."));
+        c.history.push(
+            c.turn,
+            Message::user(format!("note {n}: {}", "q".repeat(1900))),
+        );
+        for _ in 0..15 {
+            c.bash(2000);
+        }
+        v = view(&ctx, &c.history, 30_000, &ccx).await;
+        if summarized(&session).len() >= 2 {
+            break;
+        }
+    }
+    let log = summarized(&session);
+    assert!(
+        log.iter().all(|r| r["summary"]["merged"] != true),
+        "{log:#?}"
+    );
+    assert_eq!(p.requests().len(), log.len(), "no merge was asked for");
+    let blocks = summary_blocks(&v);
+    assert_eq!(blocks.len(), 2);
+    // The blocks are past the share, their texts aren't.
+    let share = 0.05 * budget(30_000).usable() as f64;
+    let size = |chars: usize| ch_kernel::estimate_tokens(chars) as f64;
+    assert!(size(blocks.iter().map(String::len).sum()) > share);
+    let texts: usize = (log.iter())
+        .map(|r| r["summary"]["text"].as_str().unwrap().len())
+        .sum();
+    assert!(size(texts) <= share);
+    assert_eq!(warnings(&mut rx), Vec::<String>::new());
+}
+
+/// A merge whose note would make the view bigger isn't kept; the new summary is.
+#[tokio::test]
+async fn a_merge_is_kept_only_if_it_makes_the_view_smaller() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut c = Conv::new("Fix the parser");
+    for _ in 0..30 {
+        c.bash(2000);
+    }
+    let mut p = Summarizer::new();
+    p.pad = 3000;
+    let ccx = ccx_with(Some(tmp.path()), &p, None);
+    let ctx = Context::new(ContextConfig {
+        strategy: Strategy::Summarize,
+        max_summary_share: 0.05,
+        ..Default::default()
+    });
+    let session = tmp.path().join("s1");
+    let mut n = 0;
+    while records(&session).is_empty() && n < 12 {
+        n += 1;
+        round(&mut c, n);
+        view(&ctx, &c.history, 30_000, &ccx).await;
+    }
+    // The second summary sets off a merge whose note is longer than both summaries.
+    p.queue(&[Answer::Summary, Answer::Longer(20_000)]);
+    let mut rx = ccx.cx.events.subscribe();
+    while records(&session).len() < 2 && n < 12 {
+        n += 1;
+        round(&mut c, n);
+        view(&ctx, &c.history, 30_000, &ccx).await;
+    }
+    assert_eq!(p.requests().len(), 3, "two summaries and the merge");
+    let log = records(&session);
+    assert_eq!(log.len(), 2, "{log:#?}");
+    assert!(log.iter().all(|r| r["summary"]["merged"] != true));
+    assert_eq!(
+        warnings(&mut rx),
+        [
+            "couldn't merge the two oldest summaries: the merged summary isn't shorter than \
+          the two; the new summary was kept"
+        ]
+    );
+}
+
+/// A part that fails after others were written: they stand, and the warning says so.
+#[tokio::test]
+async fn a_part_that_fails_after_others_keeps_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    let c = long_session();
+    let agent = Summarizer::new();
+    let mut small = Summarizer::new();
+    small.window = Some(7_000);
+    small.queue(&[Answer::Summary, Answer::Fail]);
+    let ccx = ccx_with(Some(tmp.path()), &agent, Some((&small, "small-model")));
+    let mut rx = ccx.cx.events.subscribe();
+    let out = compact(
+        &with(Strategy::Summarize),
+        &c.history,
+        1_000_000,
+        &ccx,
+        CompactReason::Manual,
+    )
+    .await;
+    assert!(out.changed, "{}", out.message);
+    assert_eq!(small.requests().len(), 2);
+    assert_eq!(summarized(&tmp.path().join("s1")).len(), 1);
+    assert_eq!(
+        warnings(&mut rx),
+        [
+            "couldn't summarize the rest: provider unavailable: no summaries today; the part \
+          summarized before it was kept"
+        ]
+    );
+}
+
 #[tokio::test]
 async fn a_long_reply_is_cut_with_a_note() {
     let tmp = tempfile::tempdir().unwrap();
@@ -95,6 +251,37 @@ async fn a_long_reply_is_cut_with_a_note() {
     let text = log[0]["summary"]["text"].as_str().unwrap();
     assert!(text.ends_with("\n[summary cut at 1500 words]"), "{text}");
     assert_eq!(text.split_whitespace().count(), 1500 + 5);
+}
+
+/// A reply of few words but more characters than a record may hold is cut to that
+/// limit, so the summary sent now is the one read back later.
+#[tokio::test]
+async fn a_reply_over_the_character_limit_is_cut_and_reads_back_the_same() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut c = Conv::new("Fix the parser");
+    for _ in 0..60 {
+        c.bash(2000);
+    }
+    let mut p = Summarizer::new();
+    p.pad = 70_000;
+    let ccx = ccx_with(Some(tmp.path()), &p, None);
+    let mut rx = ccx.cx.events.subscribe();
+    let ctx = with(Strategy::Summarize);
+    let out = compact(&ctx, &c.history, 1_000_000, &ccx, CompactReason::Manual).await;
+    assert!(out.changed, "{}", out.message);
+    let live = view(&ctx, &c.history, 1_000_000, &ccx).await;
+    let log = summarized(&tmp.path().join("s1"));
+    let text = log[0]["summary"]["text"].as_str().unwrap();
+    assert!(
+        text.ends_with("\n[summary cut at 64,000 characters]"),
+        "{}",
+        text.len()
+    );
+    assert_eq!(text.chars().count(), 64_000);
+    // Another process reads the log back.
+    let reloaded = view(&with(Strategy::None), &c.history, 10_000_000, &ccx).await;
+    assert_eq!(reloaded, live);
+    assert_eq!(warnings(&mut rx), Vec::<String>::new());
 }
 
 #[tokio::test]
