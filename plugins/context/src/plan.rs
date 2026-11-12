@@ -6,11 +6,11 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use ch_kernel::util::ReadTools;
-use ch_kernel::{Budget, ContentBlock, History, Message, Role, estimate_tokens};
+use ch_kernel::{Budget, ContentBlock, History, Role, estimate_tokens};
 
 use crate::config::ContextConfig;
 use crate::log::{Edit, EditKind, Pos, Replacement, Trigger, fits, hash, is_prompt};
-use crate::render::is_thinking;
+use crate::render::{Rendered, is_thinking};
 use crate::stub::{self, Saved};
 
 /// Where trimmed results can be saved, and how stubs tell the model to read them.
@@ -53,17 +53,17 @@ pub struct Plan {
 ///   except in the newest step, since the estimate was wrong.
 pub fn plan(
     history: &History,
-    view: &[Message],
+    rendered: &Rendered,
     taken: &HashSet<Pos>,
     budget: &Budget,
     config: &ContextConfig,
     trigger: Trigger,
     files: &Files,
 ) -> Plan {
-    let Some(regions) = regions(view, budget, config, trigger) else {
+    let Some(regions) = regions(rendered, budget, config, trigger) else {
         return Plan::default();
     };
-    let mut p = Planner::new(history, view, taken, config, files);
+    let mut p = Planner::new(history, rendered, taken, config, files);
     let target = config.trim_to * budget.usable() as f64;
     let candidates = candidates(history, &regions, config);
     for &(i, b, kind) in &candidates {
@@ -109,20 +109,24 @@ struct Planner<'a> {
 impl<'a> Planner<'a> {
     fn new(
         history: &'a History,
-        view: &[Message],
+        rendered: &Rendered,
         taken: &'a HashSet<Pos>,
         config: &'a ContextConfig,
         files: &'a Files,
     ) -> Self {
-        let chars: Vec<usize> = view.iter().map(Message::char_len).collect();
-        let thinking = view
-            .iter()
-            .map(|m| {
-                m.content
-                    .iter()
-                    .filter(|b| is_thinking(b))
-                    .map(ContentBlock::char_len)
-                    .sum()
+        // The summarized span isn't sent.
+        let sent = |i: usize| i == 0 || i >= rendered.start;
+        let chars: Vec<usize> = (rendered.messages.iter().enumerate())
+            .map(|(i, m)| if sent(i) { m.char_len() } else { 0 })
+            .collect();
+        let thinking = (rendered.messages.iter().enumerate())
+            .map(|(i, m)| {
+                let thinking = m.content.iter().filter(|b| is_thinking(b));
+                if sent(i) {
+                    thinking.map(ContentBlock::char_len).sum()
+                } else {
+                    0
+                }
             })
             .collect();
         let total = chars.iter().map(|&c| estimate_tokens(c)).sum();
@@ -246,50 +250,78 @@ struct Regions {
     results_too: Range<usize>,
 }
 
-/// The preamble is the first message. The recent window is the newest steps (an
-/// assistant message and the user message that answers it) holding at least `recent` of
-/// the usable window and at least `min_recent_steps` steps; it starts at an assistant
-/// message. The middle is what's in between.
+/// The preamble is the first message, with the summaries. The recent window is the
+/// newest steps (an assistant message and the user message that answers it) holding at
+/// least `recent` of the usable window and at least `min_recent_steps` steps; it starts
+/// at an assistant message. The middle is what's in between, after the summarized span.
+/// Indices are the history's.
 fn regions(
-    view: &[Message],
+    rendered: &Rendered,
     budget: &Budget,
     config: &ContextConfig,
     trigger: Trigger,
 ) -> Option<Regions> {
-    if view.first()?.role != Role::User {
+    let window = window(rendered, budget, config, trigger == Trigger::Manual)?;
+    let newest = (rendered.start..rendered.messages.len())
+        .rev()
+        .find(|&i| rendered.messages[i].role == Role::Assistant)?;
+    let results_too = if trigger == Trigger::Overflow {
+        window..newest
+    } else {
+        window..window
+    };
+    Some(Regions {
+        middle: rendered.start..window,
+        results_too,
+    })
+}
+
+/// Where the recent window starts. `short`: it holds `min_recent_steps` steps however
+/// small they are, as for `/compact`.
+fn window(
+    rendered: &Rendered,
+    budget: &Budget,
+    config: &ContextConfig,
+    short: bool,
+) -> Option<usize> {
+    let messages = &rendered.messages;
+    if messages.first()?.role != Role::User {
         return None;
     }
-    let steps: Vec<usize> = (1..view.len())
-        .filter(|&i| view[i].role == Role::Assistant)
+    let steps: Vec<usize> = (rendered.start.max(1)..messages.len())
+        .filter(|&i| messages[i].role == Role::Assistant)
         .collect();
-    let newest = *steps.last()?;
     let minimum = config.recent * budget.usable() as f64;
-    let mut start = newest;
+    let mut start = *steps.last()?;
     let mut raw = 0;
-    let mut end = view.len();
+    let mut end = messages.len();
     for (taken, &step) in steps.iter().rev().enumerate() {
         start = step;
-        raw += view[step..end]
+        raw += messages[step..end]
             .iter()
             .map(|m| estimate_tokens(m.char_len()))
             .sum::<u64>();
         end = step;
         let enough_steps = taken + 1 >= config.min_recent_steps;
-        let enough_tokens =
-            trigger == Trigger::Manual || budget.calibrator.calibrate(raw) as f64 >= minimum;
+        let enough_tokens = short || budget.calibrator.calibrate(raw) as f64 >= minimum;
         if enough_steps && enough_tokens {
             break;
         }
     }
-    let results_too = if trigger == Trigger::Overflow {
-        start..newest
-    } else {
-        start..start
-    };
-    Some(Regions {
-        middle: 1..start,
-        results_too,
-    })
+    Some(start)
+}
+
+/// The span a summary replaces: the middle after the earlier summaries, up to the
+/// recent window, as history indices. It starts at a reply and ends just before one.
+/// `short`: the window holds only `min_recent_steps` steps (`/compact`, an overflow).
+pub fn summary_span(
+    rendered: &Rendered,
+    budget: &Budget,
+    config: &ContextConfig,
+    short: bool,
+) -> Option<Range<usize>> {
+    let window = window(rendered, budget, config, short)?;
+    (rendered.start < window).then_some(rendered.start..window)
 }
 
 /// Every block a trim could shorten, in priority order: superseded calls, long tool

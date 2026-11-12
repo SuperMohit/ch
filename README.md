@@ -161,24 +161,36 @@ Set `CH_HOME` to use a directory other than `~/.ch`, and `CH_LOG=debug` for verb
 
 ### Context management
 
-The `context` plugin keeps long sessions inside the model's window ([ADR 0004](docs/adr/0004-context-management.md)). Shares are of the usable window: the context window minus the reserved output, the system prompt and the tools. When the conversation passes `soft`, older bulky content between the task and the newest steps is trimmed in one batch: superseded plan updates, long tool results, long strings in earlier tool inputs, and old reminders. What you wrote is never changed. A trimmed result names a file in the session's directory that the model can read back. Trims are rare and large, so the prompt cache keeps working between them. `/compact` trims now, and a request the provider rejects as too long is trimmed and sent again.
+The `context` plugin keeps long sessions inside the model's window ([ADR 0004](docs/adr/0004-context-management.md)). Shares are of the usable window: the context window minus the reserved output, the system prompt and the tools.
+
+- **Trims.** When the conversation passes `soft`, older bulky content between the task and the newest steps is trimmed in one batch: superseded plan updates, long tool results, long strings in earlier tool inputs, and old reminders. A trimmed result names a file in the session's directory that the model can read back.
+- **Summaries.** Above `hard`, when a trim wouldn't bring the conversation below it, the model summarizes the older steps instead, and the summary takes their place after your task. It is kept only if it frees `min_free`; if it isn't written or kept, the trim is made, and no summary is tried again until the conversation grows by `min_free` or the next turn starts. The REPL shows each summary under its compaction line, and the note that replaces two merged summaries.
+- **What is copied.** The messages you wrote in the summarized steps are copied next to the summary word for word, after escaping: a `<` that would open or close one of the summary's tags (such as `</user-messages>`) becomes `&lt;`. A message over 2,000 characters is cut there, with the path of a saved copy of all of it. The latest call to each of `superseded_tools` is copied too when it is in the summarized steps. Summaries are never rewritten, except that the two oldest are merged when the summaries' own text passes `max_summary_share`.
+- **Who writes them.** The agent's own model, sent its last request up to the summarized steps, so those are read from the prompt cache. With `[model.summarizer]` set, that model gets the steps as a transcript instead: your session's tool output and file contents, at its full input price. Its window must hold them; when the provider says how large it is, steps that don't fit are summarized in parts. A project may set `[model.summarizer] id` without your trust (its `provider` needs trust), which switches summaries to a transcript for that model on the agent's provider.
+- **`/compact [instructions]`** summarizes now, all but the last `min_recent_steps` steps, with your instructions added to the prompt. Under `elide` it trims the same steps instead and ignores the instructions.
+- **Overflow.** A request the provider rejects as too long is trimmed (`staged`, `elide`), including the results in the newest steps but the last, and summarized (`staged`, `summarize`), then sent again once. When the summary request is rejected as too long too, the steps are summarized in parts. A second rejection of the step ends the turn.
+
+Text you wrote is never changed where it stands. Trims and summaries are rare and large, so the prompt cache keeps working between them.
 
 ```toml
 [plugins.context]
-strategy = "elide"                # or "none"; "summarize" and "staged" act as "elide" for now
+strategy = "staged"               # trims, then summaries; or "elide", "summarize", "none"
 soft = 0.60                       # trim above this share
 trim_to = 0.40                    # down to this share
 min_free = 0.10                   # only if that frees at least this share
+hard = 0.85                       # summarize above this share
 recent = 0.30                     # leave the newest steps holding this share,
 min_recent_steps = 2              # and at least this many steps
 elide_min_chars = 500             # trim tool results longer than this
 input_min_chars = 1000            # and tool-input strings longer than this
 superseded_tools = ["update_plan"]  # every call but the latest is trimmed first
+summary_max_words = 1000          # the length asked for; a reply is cut at 1.5 times it
+max_summary_share = 0.15          # merge the two oldest summaries past this share
 ```
 
-A value out of range is moved into it, with a warning. A project may set any of these without your trust. `hard`, `summary_max_words` and `max_summary_share` are for summaries, which come later.
+A value out of range is moved into it, with a warning. A project may set any of these without your trust.
 
-A trim also leaves out the model's earlier reasoning, which no longer matches the trimmed conversation. To turn trimming off, set `strategy = "none"` rather than `plugins.disable = ["context"]`: a session that was already trimmed has to keep sending its trims, and new accounts reject it otherwise.
+A trim or a summary also leaves out the model's earlier reasoning, which no longer matches the shortened conversation. To turn this off, set `strategy = "none"` rather than `plugins.disable = ["context"]`: a session that was already trimmed or summarized has to keep sending them, and new accounts reject it otherwise.
 
 ### Project instructions and custom commands
 
@@ -213,7 +225,7 @@ flowchart TB
 
     subgraph PL["Built-in plugins, called by the turn loop in this order"]
         direction LR
-        prompts["Prompt contributors<br/>prompt-base<br/>project-instructions"] --> ctx["Context strategy<br/>context (elide)"] --> prov["Model providers<br/>anthropic · openai<br/>scripted"] --> hooks["Hooks<br/>safety"] --> appr["Approvers<br/>repl · auto-deny<br/>auto-allow"] --> tools["Tools<br/>tools-fs · bash<br/>web_fetch"]
+        prompts["Prompt contributors<br/>prompt-base<br/>project-instructions"] --> ctx["Context strategy<br/>context (staged)"] --> prov["Model providers<br/>anthropic · openai<br/>scripted"] --> hooks["Hooks<br/>safety"] --> appr["Approvers<br/>repl · auto-deny<br/>auto-allow"] --> tools["Tools<br/>tools-fs · bash<br/>web_fetch"]
     end
 
     subgraph OTHER["Also built in"]
@@ -248,14 +260,14 @@ The kernel has no concrete providers, tools, prompts or UI. [docs/architecture.m
 | `plugins/tools-fs` | `read_file`, `edit_file`, `write_file`, `list_files`, `glob_files`, `grep_text` |
 | `plugins/tool-bash` | The `bash` tool (with a bash-only variant when the file tools are off) |
 | `plugins/tool-web-fetch` | The `web_fetch` tool: fetches pages and converts HTML to markdown |
-| `plugins/context` | Context management: trims old, bulky content in rare batches so long sessions fit the window ([ADR 0004](docs/adr/0004-context-management.md)) |
+| `plugins/context` | Context management: trims old, bulky content and summarizes older steps, in rare batches, so long sessions fit the window ([ADR 0004](docs/adr/0004-context-management.md)) |
 | `plugins/executor-local` | Runs commands in their own process group, with timeout and cancellation |
 | `plugins/prompt-base` | System prompt and a tool-usage block that matches the enabled tools |
 | `plugins/project-instructions` | `CH.md` / `AGENTS.md` and an environment block |
 | `plugins/commands-core`, `commands-markdown` | Built-in and markdown slash commands |
 | `plugins/frontend-repl`, `frontend-print` | The interactive REPL and the headless `-p` frontend |
 
-The other crates under `plugins/` are placeholders for upcoming phases: MCP, external plugins, shell hooks, telemetry and a Docker executor. Summaries in context management come later too.
+The other crates under `plugins/` are placeholders for upcoming phases: MCP, external plugins, shell hooks, telemetry and a Docker executor.
 
 ### Writing a plugin
 

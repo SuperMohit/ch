@@ -1,4 +1,4 @@
-//! The compaction log: one record per trim, appended to
+//! The compaction log: one record per trim or summary, appended to
 //! `<session dir>/context/log.jsonl`. A record holds everything needed to render its
 //! effect, so the view is the same after a restart even if the settings or the tools
 //! changed, and it is bound to the history it was decided on.
@@ -15,6 +15,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::stub::{self, REMINDER, RESULT_PREFIX};
+use crate::summary::Summary;
 
 /// A block of the history: its event and its index in the event's message.
 pub type Pos = (EventId, usize);
@@ -29,6 +30,9 @@ pub enum Kind {
     /// Drops every thinking block through `at_event`: written when the log couldn't be
     /// applied, so the history goes on without reasoning that no longer matches it.
     Reset,
+    /// Replaces a span of the history with a summary appended to the first message, and
+    /// drops every thinking block through `at_event`.
+    Summarized,
 }
 
 /// What decided a record.
@@ -37,6 +41,8 @@ pub enum Kind {
 pub enum Trigger {
     /// The view passed `soft`.
     Soft,
+    /// The view passed `hard`.
+    Hard,
     /// The provider rejected the request as too long.
     Overflow,
     /// `/compact`.
@@ -102,12 +108,65 @@ pub struct Record {
     pub at_hash: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edits: Vec<Edit>,
+    /// A `summarized` record's summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<Summary>,
+}
+
+/// What the records so far have done: the blocks they edited and the summaries in the
+/// first message, oldest first.
+#[derive(Debug, Clone, Default)]
+pub struct Applied {
+    pub taken: HashSet<Pos>,
+    pub summaries: Vec<Summary>,
+    /// The highest summary number so far, merged ones included.
+    pub last_n: usize,
+}
+
+impl Applied {
+    pub fn of(records: &[Record]) -> Self {
+        let mut applied = Self::default();
+        for record in records {
+            applied.add(record);
+        }
+        applied
+    }
+
+    pub fn add(&mut self, record: &Record) {
+        self.taken.extend(record.edits.iter().map(Edit::pos));
+        if let Some(s) = &record.summary {
+            if s.merged {
+                self.summaries.drain(..2.min(self.summaries.len()));
+                self.summaries.insert(0, s.clone());
+            } else {
+                self.summaries.push(s.clone());
+            }
+            self.last_n = self.last_n.max(s.n);
+        }
+    }
+
+    /// The history index of the first event after the summarized span: 1 with no
+    /// summary.
+    pub fn start(&self, history: &History) -> usize {
+        self.summaries
+            .last()
+            .and_then(|s| find(history, s.to))
+            .map_or(1, |i| i + 1)
+    }
 }
 
 impl Record {
     /// A trim bound to `history`'s newest event, or `None` for an empty history.
     pub fn elided(trigger: Trigger, history: &History, edits: Vec<Edit>) -> Option<Self> {
-        Self::bound(Kind::Elided, trigger, history.events().last()?, edits)
+        Self::bound(Kind::Elided, trigger, history.events().last()?, edits, None)
+    }
+
+    /// A summary bound to `history`'s newest event. A summary has a span, so the history
+    /// isn't empty.
+    pub fn summarized(trigger: Trigger, history: &History, summary: Summary) -> Self {
+        let last = history.events().last().expect("a summarized history");
+        Self::bound(Kind::Summarized, trigger, last, Vec::new(), Some(summary))
+            .expect("bound to an event")
     }
 
     /// A reset of every thinking block so far, bound to the newest assistant message:
@@ -118,10 +177,16 @@ impl Record {
         let last = (history.events().iter())
             .rev()
             .find(|e| e.message.role == Role::Assistant)?;
-        Self::bound(Kind::Reset, Trigger::Recovery, last, Vec::new())
+        Self::bound(Kind::Reset, Trigger::Recovery, last, Vec::new(), None)
     }
 
-    fn bound(kind: Kind, trigger: Trigger, at: &Event, edits: Vec<Edit>) -> Option<Self> {
+    fn bound(
+        kind: Kind,
+        trigger: Trigger,
+        at: &Event,
+        edits: Vec<Edit>,
+        summary: Option<Summary>,
+    ) -> Option<Self> {
         Some(Self {
             kind,
             trigger,
@@ -129,21 +194,23 @@ impl Record {
             at_blocks: at.message.content.len(),
             at_hash: hash_blocks(&at.message.content),
             edits,
+            summary,
         })
     }
 
     /// Whether the thinking block at `pos` was written against what this record changed.
+    /// A summary changes the first message, so all thinking before it goes.
     pub fn drops_thinking_at(&self, pos: Pos) -> bool {
         pos.0 <= self.at_event
             && match self.kind {
-                Kind::Reset => true,
+                Kind::Reset | Kind::Summarized => true,
                 Kind::Elided => self.edits.first().is_some_and(|first| pos > first.pos()),
             }
     }
 
-    /// Why this record can't be applied to `history`, if it can't. Blocks in `taken`
-    /// were edited by an earlier record.
-    pub fn check(&self, history: &History, taken: &HashSet<Pos>) -> Result<(), String> {
+    /// Why this record can't be applied to `history` after the records that did
+    /// `applied`, if it can't.
+    pub fn check(&self, history: &History, applied: &Applied) -> Result<(), String> {
         let events = history.events();
         let Some(at) = find(history, self.at_event) else {
             return Err(format!("event {} is missing", self.at_event));
@@ -155,23 +222,26 @@ impl Record {
                 self.at_event
             ));
         }
-        if self.kind == Kind::Reset {
-            return if self.edits.is_empty() {
-                Ok(())
-            } else {
-                Err("a reset has edits".into())
-            };
+        match (self.kind, &self.summary) {
+            (Kind::Reset, None) if self.edits.is_empty() => Ok(()),
+            (Kind::Summarized, Some(s)) if self.edits.is_empty() => s.check(history, applied, at),
+            (Kind::Elided, None) => self.check_edits(history, applied),
+            _ => Err(format!("a {:?} record has the wrong parts", self.kind)),
         }
+    }
+
+    fn check_edits(&self, history: &History, applied: &Applied) -> Result<(), String> {
         if self.edits.is_empty() {
             return Err("it has no edits".into());
         }
+        let start = applied.start(history);
         let mut last = None;
         for edit in &self.edits {
             if last.is_some_and(|l| l >= edit.pos()) {
                 return Err("its edits are out of order".into());
             }
             last = Some(edit.pos());
-            if taken.contains(&edit.pos()) {
+            if applied.taken.contains(&edit.pos()) {
                 return Err(format!(
                     "block {} of event {} is edited twice",
                     edit.block, edit.event
@@ -185,6 +255,9 @@ impl Record {
             }
             let i = find(history, edit.event)
                 .ok_or_else(|| format!("event {} is missing", edit.event))?;
+            if i < start {
+                return Err(format!("event {} was summarized", edit.event));
+            }
             fits(history, i, edit)?;
         }
         Ok(())
@@ -421,6 +494,7 @@ mod tests {
             at_blocks: 1,
             at_hash: "h".into(),
             edits: Vec::new(),
+            summary: None,
         }
     }
 
