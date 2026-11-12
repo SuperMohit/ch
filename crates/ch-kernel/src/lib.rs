@@ -29,7 +29,10 @@ pub mod util;
 pub use approver::{Approval, ApprovalRequest, Approver};
 pub use command::{CmdCx, Command, Outcome};
 pub use config::{Config, KernelConfig, ModelConfig, Pricing};
-pub use context::{Budget, ContextCx, ContextStrategy, PassthroughContext, View};
+pub use context::{
+    Budget, CallUsage, CompactOutcome, CompactReason, CompactRequest, ContextCx, ContextStrategy,
+    PassthroughContext, UsageLog, View,
+};
 pub use cx::Cx;
 pub use events::{AgentEvent, CompactionKind, EventBus, EventSink};
 pub use executor::{ExecRequest, ExecResult, Executor};

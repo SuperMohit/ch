@@ -43,7 +43,7 @@ While the agent works, you see its text streamed as it arrives, one line per too
 
 When an action needs approval, answer `y` (yes), `n` (no, optionally with a reason) or `a` (always allow this for the session). After `a`, you can also save the rule to `.ch/config.toml`.
 
-**Slash commands:** `/help`, `/clear`, `/compact`, `/model [id]`, `/cost`, `/tools`, `/plugins`, `/config`, `/resume [id]`, `/exit`.
+**Slash commands:** `/help`, `/clear`, `/compact [instructions]`, `/model [id]`, `/cost`, `/tools`, `/plugins`, `/config`, `/resume [id]`, `/exit`.
 
 ### Headless mode
 
@@ -159,6 +159,27 @@ Each plugin reads its own `[plugins.<id>]` section. Two useful commands:
 
 Set `CH_HOME` to use a directory other than `~/.ch`, and `CH_LOG=debug` for verbose logs in `~/.ch/logs/`.
 
+### Context management
+
+The `context` plugin keeps long sessions inside the model's window ([ADR 0004](docs/adr/0004-context-management.md)). Shares are of the usable window: the context window minus the reserved output, the system prompt and the tools. When the conversation passes `soft`, older bulky content between the task and the newest steps is trimmed in one batch: superseded plan updates, long tool results, long strings in earlier tool inputs, and old reminders. What you wrote is never changed. A trimmed result names a file in the session's directory that the model can read back. Trims are rare and large, so the prompt cache keeps working between them. `/compact` trims now, and a request the provider rejects as too long is trimmed and sent again.
+
+```toml
+[plugins.context]
+strategy = "elide"                # or "none"; "summarize" and "staged" act as "elide" for now
+soft = 0.60                       # trim above this share
+trim_to = 0.40                    # down to this share
+min_free = 0.10                   # only if that frees at least this share
+recent = 0.30                     # leave the newest steps holding this share,
+min_recent_steps = 2              # and at least this many steps
+elide_min_chars = 500             # trim tool results longer than this
+input_min_chars = 1000            # and tool-input strings longer than this
+superseded_tools = ["update_plan"]  # every call but the latest is trimmed first
+```
+
+A value out of range is moved into it, with a warning. A project may set any of these without your trust. `hard`, `summary_max_words` and `max_summary_share` are for summaries, which come later.
+
+A trim also leaves out the model's earlier reasoning, which no longer matches the trimmed conversation. To turn trimming off, set `strategy = "none"` rather than `plugins.disable = ["context"]`: a session that was already trimmed has to keep sending its trims, and new accounts reject it otherwise.
+
 ### Project instructions and custom commands
 
 - **Instructions:** `CH.md` and `AGENTS.md` files from the git root down to the workspace, plus `~/.ch/CH.md`, are added to the system prompt. Use them for build and test commands, conventions and things to avoid.
@@ -192,7 +213,7 @@ flowchart TB
 
     subgraph PL["Built-in plugins, called by the turn loop in this order"]
         direction LR
-        prompts["Prompt contributors<br/>prompt-base<br/>project-instructions"] --> ctx["Context strategy<br/>passthrough"] --> prov["Model providers<br/>anthropic · openai<br/>scripted"] --> hooks["Hooks<br/>safety"] --> appr["Approvers<br/>repl · auto-deny<br/>auto-allow"] --> tools["Tools<br/>tools-fs · bash<br/>web_fetch"]
+        prompts["Prompt contributors<br/>prompt-base<br/>project-instructions"] --> ctx["Context strategy<br/>context (elide)"] --> prov["Model providers<br/>anthropic · openai<br/>scripted"] --> hooks["Hooks<br/>safety"] --> appr["Approvers<br/>repl · auto-deny<br/>auto-allow"] --> tools["Tools<br/>tools-fs · bash<br/>web_fetch"]
     end
 
     subgraph OTHER["Also built in"]
@@ -227,13 +248,14 @@ The kernel has no concrete providers, tools, prompts or UI. [docs/architecture.m
 | `plugins/tools-fs` | `read_file`, `edit_file`, `write_file`, `list_files`, `glob_files`, `grep_text` |
 | `plugins/tool-bash` | The `bash` tool (with a bash-only variant when the file tools are off) |
 | `plugins/tool-web-fetch` | The `web_fetch` tool: fetches pages and converts HTML to markdown |
+| `plugins/context` | Context management: trims old, bulky content in rare batches so long sessions fit the window ([ADR 0004](docs/adr/0004-context-management.md)) |
 | `plugins/executor-local` | Runs commands in their own process group, with timeout and cancellation |
 | `plugins/prompt-base` | System prompt and a tool-usage block that matches the enabled tools |
 | `plugins/project-instructions` | `CH.md` / `AGENTS.md` and an environment block |
 | `plugins/commands-core`, `commands-markdown` | Built-in and markdown slash commands |
 | `plugins/frontend-repl`, `frontend-print` | The interactive REPL and the headless `-p` frontend |
 
-The other crates under `plugins/` are placeholders for upcoming phases: context management, MCP, external plugins, shell hooks, telemetry and a Docker executor.
+The other crates under `plugins/` are placeholders for upcoming phases: MCP, external plugins, shell hooks, telemetry and a Docker executor. Summaries in context management come later too.
 
 ### Writing a plugin
 

@@ -1,8 +1,10 @@
 //! Where spilled output goes: `<session dir>/spill/`.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+
+use ch_kernel::util::{create_private, private_dir, safe_name};
 
 /// Attempts at a fresh random file name before saving gives up.
 const NAME_TRIES: usize = 3;
@@ -17,7 +19,7 @@ pub fn save(
     content: &str,
     max_bytes: u64,
 ) -> io::Result<PathBuf> {
-    let dir = spill_dir(session_dir)?;
+    let dir = private_dir(session_dir, "spill")?;
     let used = used_bytes(&dir)?;
     let size = content.len() as u64;
     if used.saturating_add(size) > max_bytes {
@@ -26,7 +28,7 @@ pub fn save(
              ({used} + {size} > {max_bytes} bytes)"
         )));
     }
-    let base = format!("{}-{}", safe(call_id), safe(tool));
+    let base = format!("{}-{}", safe_name(call_id), safe_name(tool));
     for _ in 0..NAME_TRIES {
         let suffix = &uuid::Uuid::new_v4().simple().to_string()[..8];
         let path = dir.join(format!("{base}-{suffix}.txt"));
@@ -50,41 +52,6 @@ pub fn save(
     )))
 }
 
-/// `<session dir>/spill`, created `0700` if needed, with the session directory's parent
-/// canonicalized (the same anchor the file tools check reads against). Fails if either
-/// directory is a symlink, so nothing placed there can redirect where output goes.
-fn spill_dir(session_dir: &Path) -> io::Result<PathBuf> {
-    fs::create_dir_all(session_dir)?;
-    let session = anchored(session_dir)?;
-    let dir = session.join("spill");
-    match fs::create_dir(&dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e),
-    }
-    let meta = fs::symlink_metadata(&dir)?;
-    if !meta.is_dir() {
-        return Err(io::Error::other(format!(
-            "{} is not a directory (a symlink?)",
-            dir.display()
-        )));
-    }
-    restrict(&dir)?;
-    Ok(dir)
-}
-
-/// `dir` with its parent canonicalized and its own name kept; fails if `dir` is a
-/// symlink.
-fn anchored(dir: &Path) -> io::Result<PathBuf> {
-    if fs::symlink_metadata(dir)?.file_type().is_symlink() {
-        return Err(io::Error::other(format!("{} is a symlink", dir.display())));
-    }
-    let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
-        return Err(io::Error::other(format!("{} has no parent", dir.display())));
-    };
-    Ok(fs::canonicalize(parent)?.join(name))
-}
-
 /// Bytes in the regular files directly in `dir`.
 fn used_bytes(dir: &Path) -> io::Result<u64> {
     let mut used = 0u64;
@@ -97,45 +64,6 @@ fn used_bytes(dir: &Path) -> io::Result<u64> {
     Ok(used)
 }
 
-/// `s` with everything but ASCII letters, digits, `-` and `_` replaced, at most 64
-/// characters, so ids and tool names are safe in a file name.
-fn safe(s: &str) -> String {
-    let cleaned: String = s
-        .chars()
-        .take(64)
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
-            _ => '_',
-        })
-        .collect();
-    if cleaned.is_empty() {
-        "result".into()
-    } else {
-        cleaned
-    }
-}
-
-/// Creates `path`, failing if anything (a file or a symlink) is already there, readable
-/// only by the user.
-fn create_private(path: &Path) -> io::Result<fs::File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)
-}
-
-#[cfg(unix)]
-fn restrict(dir: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-}
-
-#[cfg(not(unix))]
-fn restrict(_dir: &Path) -> io::Result<()> {
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,11 +72,6 @@ mod tests {
 
     #[test]
     fn names_are_sanitized_and_never_overwrite() {
-        assert_eq!(safe("toolu_01/../x"), "toolu_01____x");
-        assert_eq!(safe("mcp__gh__search"), "mcp__gh__search");
-        assert_eq!(safe(""), "result");
-        assert_eq!(safe(&"a".repeat(100)).len(), 64);
-
         let tmp = tempfile::tempdir().unwrap();
         let session = tmp.path().join("s1");
         let a = save(&session, "call_0", "bash", "first", BIG).unwrap();

@@ -1,10 +1,12 @@
-//! The full conversation log. Context strategies read it and produce a *view*; the log
-//! itself is never rewritten except by explicit user actions (`/clear`).
+//! The full conversation log. Context strategies read it and produce a *view*. The log
+//! is only appended to: the newest user message gets a model call's reminders and
+//! notes before it is sent, and nothing that was sent is changed, except by explicit
+//! user actions (`/clear`).
 
 use serde::{Deserialize, Serialize};
 
 use crate::tokens::estimate_tokens;
-use crate::types::{Message, Role};
+use crate::types::{ContentBlock, Message, Role};
 
 /// Stable, monotonically increasing id of a history event.
 pub type EventId = u64;
@@ -49,6 +51,28 @@ impl History {
         id
     }
 
+    /// Adds `blocks` to the newest message if it is a user message, or as a new user
+    /// message otherwise. The session uses it for a model call's reminders and hook
+    /// notes: the newest user message hasn't been sent yet, so this appends to the
+    /// conversation the model has seen instead of rewriting it.
+    pub fn append_to_last_user(&mut self, turn: u32, blocks: Vec<ContentBlock>) {
+        match self.events.last_mut() {
+            Some(last) if last.message.role == Role::User => {
+                last.message.content.extend(blocks);
+                last.tokens_est = estimate_tokens(last.message.char_len());
+            }
+            _ => {
+                self.push(
+                    turn,
+                    Message {
+                        role: Role::User,
+                        content: blocks,
+                    },
+                );
+            }
+        }
+    }
+
     pub fn events(&self) -> &[Event] {
         &self.events
     }
@@ -69,15 +93,40 @@ impl History {
         self.events.last()
     }
 
-    /// Text of the first user message (the original task), if any.
+    /// The first text block of the first user message (the original task), if any.
+    /// Later blocks of that message are reminders and notes.
     pub fn first_user_text(&self) -> Option<String> {
-        self.events
-            .iter()
-            .find(|e| e.message.role == Role::User)
-            .map(|e| e.message.text())
+        let first = self.events.iter().find(|e| e.message.role == Role::User)?;
+        first.message.content.iter().find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
     }
 
     pub fn clear(&mut self) {
         self.events.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn appending_extends_the_newest_user_message_or_starts_one() {
+        let mut h = History::new();
+        h.push(1, Message::user("task"));
+        let before = h.last().unwrap().tokens_est;
+        h.append_to_last_user(1, vec![ContentBlock::text("x".repeat(700))]);
+        assert_eq!(h.len(), 1);
+        assert_eq!(h.last().unwrap().message.content.len(), 2);
+        assert!(h.last().unwrap().tokens_est > before);
+        assert_eq!(h.first_user_text().as_deref(), Some("task"));
+
+        // After an assistant message, the blocks start a new user message.
+        h.push(1, Message::assistant("done"));
+        h.append_to_last_user(2, vec![ContentBlock::text("note")]);
+        let last = h.last().unwrap();
+        assert_eq!((h.len(), last.turn, last.message.role), (3, 2, Role::User));
     }
 }

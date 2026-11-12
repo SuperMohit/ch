@@ -192,12 +192,14 @@ impl Default for ModelConfig {
     }
 }
 
+/// A separate model for context summaries. With neither key set, summaries use the
+/// agent's provider and current model (following `/model`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SummarizerConfig {
     /// Defaults to the agent's provider.
     pub provider: Option<String>,
-    /// Defaults to the agent's model.
+    /// Defaults to `provider`'s default model; required when it has none.
     pub id: Option<String>,
 }
 

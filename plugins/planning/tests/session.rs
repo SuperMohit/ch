@@ -61,10 +61,10 @@ async fn the_plan_reaches_the_model_through_its_calls_and_one_reminder_per_turn(
 
     let requests: Vec<String> = provider.requests().iter().map(text).collect();
     assert_eq!(requests.len(), 4);
-    // Turn 1: the nudge on its first request only.
-    assert!(requests[0].contains(NO_PLAN_REMINDER));
-    for r in &requests[1..] {
-        assert!(!r.contains(NO_PLAN_REMINDER));
+    // Turn 1: the nudge is added to its first request only. It stays in the history, so
+    // later requests repeat that one copy and add none.
+    for r in &requests {
+        assert_eq!(r.matches(NO_PLAN_REMINDER).count(), 1);
     }
     // Within a turn the plan is only in the calls the model made: one copy of it per
     // update_plan call, and the tool results add none.
@@ -120,7 +120,8 @@ async fn a_resumed_session_keeps_its_plan_and_clear_drops_it() {
         resumed_turn.contains("2. [in_progress] Fix"),
         "{resumed_turn}"
     );
-    assert!(!resumed_turn.contains(NO_PLAN_REMINDER));
+    // The only nudge is the one the first turn stored; the resumed turn adds the plan.
+    assert_eq!(resumed_turn.matches(NO_PLAN_REMINDER).count(), 1);
     let after_clear = text(&requests[1]);
     assert!(after_clear.contains(NO_PLAN_REMINDER), "{after_clear}");
     assert!(!after_clear.contains("The current plan"));

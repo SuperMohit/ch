@@ -25,7 +25,7 @@ flowchart TB
 
     subgraph PL["Built-in plugins, called by the turn loop in this order"]
         direction LR
-        prompts["Prompt contributors<br/>prompt-base<br/>project-instructions"] --> ctx["Context strategy<br/>passthrough"] --> prov["Model providers<br/>anthropic · openai<br/>scripted"] --> hooks["Hooks<br/>safety"] --> appr["Approvers<br/>repl · auto-deny<br/>auto-allow"] --> tools["Tools<br/>tools-fs · bash<br/>web_fetch"]
+        prompts["Prompt contributors<br/>prompt-base<br/>project-instructions"] --> ctx["Context strategy<br/>context (elide)"] --> prov["Model providers<br/>anthropic · openai<br/>scripted"] --> hooks["Hooks<br/>safety"] --> appr["Approvers<br/>repl · auto-deny<br/>auto-allow"] --> tools["Tools<br/>tools-fs · bash<br/>web_fetch"]
     end
 
     subgraph OTHER["Also built in"]
@@ -100,7 +100,7 @@ sequenceDiagram
 | **Tool** | many | `spec() -> ToolSpec`, `call(input, &ToolCx) -> ToolOutput` | `tools-fs`, `tool-bash`, `tool-web-fetch`, `planning` (`update_plan`) |
 | **Hook** | many, ordered by priority | `on(&HookEvent, &Cx) -> HookDecision` | `safety` (permissions), `stuck`, `diagnostics`, `hooks-shell` |
 | **PromptContributor** | many, ordered | `system_blocks(cx)`, `turn_reminders(cx)` | `prompt-base`, `project-instructions`, `planning` |
-| **ContextStrategy** | 1 | `view(&History, Budget, cx) -> View` | `context` (`none` / `elide` / `summarize` / `staged`) |
+| **ContextStrategy** | 1 | `view(&History, Budget, cx) -> View`, `compact(&History, Budget, &CompactRequest, cx) -> CompactOutcome` | `context` (`none` / `elide` / `summarize` / `staged`) |
 | **Command** (slash) | many | `name()`, `run(args, &CmdCx) -> Outcome` | `commands-core`, `commands-markdown` |
 | **EventSink** | many | `handle(&AgentEvent)`, `flush()` | `telemetry-langfuse`, `telemetry-jsonl` |
 | **Executor** | 1 | `run(cmd, cwd, timeout, cancel) -> ExecResult` | `executor-local`, `executor-docker` |
@@ -136,7 +136,7 @@ Not doing: Rust dynamic libraries (`dlopen`), because Rust has no stable ABI and
 | Planning | `planning` (tool + system block + per-turn plan reminder) | enable or disable `planning` |
 | Context management | `context` with `strategy = "staged"` and so on | `[plugins.context] strategy = ...` |
 | Safety gates | `safety` (path guard, read-before-write, permission policy) | always on |
-| Post-edit diagnostics | `diagnostics` (post_tool hook) | enable or disable |
+| Post-edit diagnostics | `diagnostics` (pre_tool, post_tool, before_model and turn_end hooks; [ADR 0003](adr/0003-diagnostics-new-findings-only.md)) | enable or disable |
 | Stuck detection | `stuck` (hook: reminder, refusal, stop) | enable or disable |
 
 ## 5. Config and file locations
@@ -160,7 +160,7 @@ enable  = ["tools-fs", "tool-bash", "tool-web-fetch", "planning", "context", "st
 disable = []
 
 [plugins.context]
-strategy = "staged"             # none | elide | summarize | staged
+strategy = "elide"              # none | elide (summarize and staged act as elide for now)
 soft = 0.60
 hard = 0.85
 recent = 0.30
@@ -246,9 +246,9 @@ These are starting values. Every one is a config setting, and the eval runner ([
 | Output cap per model call | 16,384 tokens |
 | Tool result truncation | 24k chars. With `spill` (on by default) the full output is saved to `<session dir>/spill/` and the model gets head, tail, the omitted line range and the path, to read the rest with `read_file`/`grep_text` ([ADR 0002](adr/0002-spill-oversized-tool-output.md)); without it the middle is cut |
 | Parallel read-only tool calls | up to 8 |
-| Context: soft threshold (elide) | 0.60 × usable window |
+| Context: soft threshold (trim) | 0.60 × usable window; a trim goes down to 0.40 and runs only if it frees at least 0.10 |
 | Context: hard threshold (summarize) | 0.85 × usable window |
-| Context: verbatim recent window | 0.30 × window, at least 2 turns |
+| Context: verbatim recent window | 0.30 × usable window, at least 2 steps |
 | Stuck: reminder / refuse / stop / malformed | 5 identical calls / after 2 identical failures with the same error / 8 identical calls failed or refused / 3 responses with only malformed calls |
 | Bash timeout | 120s default, 600s max |
 
@@ -259,14 +259,19 @@ These are starting values. Every one is a config setting, and the eval runner ([
 | `none` | – | – |
 | `elide` | ✓ | – |
 | `summarize` | – | ✓ |
-| `staged` (default) | ✓ first | ✓ if still over the hard threshold |
+| `staged` (the default once summaries land) | ✓ first | ✓ if still over the hard threshold |
 
-- History is split into a **preamble** (system + first task, always verbatim), a **recent window** (verbatim) and the **middle**.
-- Above `soft`, bulky tool outputs in the middle become a stub: `[tool output elided: {N} lines / {M} chars. Re-read or re-run to get it again.]`. Elision is free, so it should absorb most of the pressure before the paid summary call runs.
-- Above `hard`, the oldest middle events are summarized by a separate tool-free call and inserted as `<context-summary>` right after the preamble. The summary is **updated incrementally**, not regenerated. Headings: `Goal / Files touched / Done / Pending / Errors & fixes / Current state / Next step`, keeping exact paths, function names and error strings.
-- No recall tool: the stub tells the model to re-read or re-run instead. Elided originals are still written to the session directory for debugging and telemetry.
+The design is in [ADR 0004](adr/0004-context-management.md). Summaries aren't written yet: until they are, `elide` is the default, and `summarize` and `staged` act as `elide`, with a warning. For a session that was trimmed, turn this off with `strategy = "none"`, which keeps rendering the earlier trims; disabling the plugin sends the raw history, which new accounts reject.
 
-**Planning:** an `update_plan(plan)` tool. Each item has `content`, `status` (`pending | in_progress | completed`) and `activeForm`. The complete list is re-sent on every update and exactly one item is `in_progress`. The current plan is kept outside the history (the `PlanStore` service, saved as `plan.json` next to the session) and injected as a `<system-reminder>` on the first model call of each turn; while no step is open, that reminder is a one-line nudge to plan multi-step work instead. The tool result is only a count, but each `update_plan` call stays in the history with its full list, so superseded calls are something context management (6.4) should elide first.
+- The history is never changed. The view is computed from it and a small, append-only compaction log, so between compactions each request extends the last one and the prompt cache and signed thinking stay valid.
+- The view is split into a **preamble** (the first user message, whose blocks are never edited), a **recent window** (verbatim) and the **middle**.
+- Above `soft`, the middle is trimmed in one large batch: superseded `update_plan` inputs first, then long tool results, long tool inputs and old reminders. A trim rewrites the cache from its first edit, so it is rare and large, not a little on every step. A result's stub names a file the model can read back with `read_file` or `grep_text`: spill's file, or a copy in `<session dir>/context/elided/`.
+- Above `hard`, the middle is summarized by the agent's own model, replaying its cached prefix; a separate `[model.summarizer]` gets it as a transcript instead. `/compact [instructions]` and an overflow trim under `elide` and summarize under `summarize` and `staged`. Each summary is **appended** to the first user message as a new `<context-summary>` block, never rewritten. Headings: `Goal / Files touched / Done / Pending / Errors & fixes / Current state / Next step`, keeping exact paths, function names and error strings. The user's messages and the latest plan are copied next to it word for word.
+- A compaction drops the signed thinking blocks it invalidates, the same way every time.
+- On overflow before any output, the session compacts once and sends the step again with only the view recomputed. A second overflow, or a compaction that changes nothing, ends the turn.
+- No recall tool: the existing file tools read the elided output.
+
+**Planning:** an `update_plan(plan)` tool. Each item has `content`, `status` (`pending | in_progress | completed`) and `activeForm`. The complete list is re-sent on every update and exactly one item is `in_progress`. The current plan is kept outside the history (the `PlanStore` service, saved as `plan.json` next to the session) and injected as a `<system-reminder>` on the first model call of each turn. Like every reminder, it is then kept in the history, so later requests repeat it unchanged; while no step is open, that reminder is a one-line nudge to plan multi-step work instead. The tool result is only a count, but each `update_plan` call stays in the history with its full list, so superseded calls are the first thing context management (6.4) elides when it compacts. Eliding rewrites earlier messages, so it happens only at a compaction, never on every step.
 
 **Tools:**
 

@@ -27,12 +27,6 @@ pub struct ModelRequest {
     /// Free-form tag for telemetry, e.g. "agent" or "context.summarize".
     #[serde(default)]
     pub purpose: String,
-    /// How many content blocks at the end of the last message were added for this call
-    /// only (reminders, hook notes) and won't be in the next request. Providers that set
-    /// prompt-cache breakpoints should put them before these blocks, or the next call
-    /// can't reuse the cache.
-    #[serde(default)]
-    pub volatile_tail: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -124,4 +118,19 @@ pub async fn complete(
     Err(ModelError::Other(anyhow::anyhow!(
         "provider stream ended without a Completed event"
     )))
+}
+
+pub(crate) fn specs_chars(specs: &[ToolSpec]) -> usize {
+    specs
+        .iter()
+        .map(|t| t.name.len() + t.description.len() + t.input_schema.to_string().len())
+        .sum()
+}
+
+/// Raw token estimate of a whole request.
+pub(crate) fn estimate_request_tokens(req: &ModelRequest) -> u64 {
+    let chars = req.system.iter().map(String::len).sum::<usize>()
+        + req.messages.iter().map(Message::char_len).sum::<usize>()
+        + specs_chars(&req.tools);
+    crate::tokens::estimate_tokens(chars)
 }

@@ -40,7 +40,6 @@ fn request() -> ModelRequest {
         temperature: None,
         thinking_budget: None,
         purpose: "agent".into(),
-        volatile_tail: 0,
     }
 }
 
@@ -72,6 +71,35 @@ fn ok_body() -> ResponseTemplate {
 fn error_body(status: u16, kind: &str, message: &str) -> ResponseTemplate {
     ResponseTemplate::new(status)
         .set_body_json(json!({"type":"error","error":{"type":kind,"message":message}}))
+}
+
+#[tokio::test]
+async fn block_binding_is_sent_with_its_beta() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ok_body())
+        .mount(&server)
+        .await;
+    let p = AnthropicProvider::new(AnthropicConfig {
+        base_url: server.uri(),
+        prefix_mismatch_behavior: "error".into(),
+        ..Default::default()
+    })
+    .unwrap()
+    .with_api_key("test-key");
+    complete(&p, request(), CancellationToken::new())
+        .await
+        .unwrap();
+    let sent: Vec<Request> = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&sent[0].body).unwrap();
+    assert_eq!(
+        body["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+        "error"
+    );
+    assert_eq!(
+        sent[0].headers.get("anthropic-beta").unwrap(),
+        ch_provider_anthropic::BINDING_BETA
+    );
 }
 
 #[tokio::test]

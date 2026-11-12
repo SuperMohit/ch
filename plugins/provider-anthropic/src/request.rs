@@ -20,12 +20,27 @@ pub struct BodyOptions {
     /// `fallbacks` value for models that support server-side refusal fallback; empty
     /// means off.
     pub fallbacks: String,
+    /// `thinking.block_binding.prefix_mismatch_behavior`; empty means "don't send".
+    pub prefix_mismatch_behavior: String,
 }
 
 impl BodyOptions {
     /// Whether the request for `model` uses the refusal-fallback beta.
     pub fn uses_fallbacks(&self, model: &str) -> bool {
         !self.fallbacks.is_empty() && caps(model).refusal_fallback
+    }
+
+    /// The betas a request for `model` needs.
+    /// The betas `body`, a request for `model`, needs.
+    pub fn betas(&self, model: &str, body: &Value) -> Vec<&'static str> {
+        let mut betas = Vec::new();
+        if self.uses_fallbacks(model) {
+            betas.push(crate::FALLBACK_BETA);
+        }
+        if body.pointer("/thinking/block_binding").is_some() {
+            betas.push(crate::BINDING_BETA);
+        }
+        betas
     }
 }
 
@@ -41,10 +56,7 @@ pub fn build_body(req: &ModelRequest, opts: &BodyOptions) -> Value {
     if !system.is_empty() {
         body.insert("system".into(), Value::Array(system));
     }
-    body.insert(
-        "messages".into(),
-        Value::Array(messages(&req.messages, req.volatile_tail)),
-    );
+    body.insert("messages".into(), Value::Array(messages(&req.messages)));
     if !req.tools.is_empty() {
         let tools = req
             .tools
@@ -54,9 +66,18 @@ pub fn build_body(req: &ModelRequest, opts: &BodyOptions) -> Value {
         body.insert("tools".into(), Value::Array(tools));
     }
 
-    let thinking = thinking(req, &caps, opts);
+    let mut thinking = thinking(req, &caps, opts);
+    // The binding control goes on the thinking config; a model that always thinks gets
+    // its default one to carry it.
+    if thinking.is_none() && caps.always_thinks && !opts.prefix_mismatch_behavior.is_empty() {
+        thinking = Some(json!({ "type": "adaptive" }));
+    }
     let thinking_on = thinking.is_some() || caps.always_thinks;
-    if let Some(t) = thinking {
+    if let Some(mut t) = thinking {
+        if !opts.prefix_mismatch_behavior.is_empty() {
+            t["block_binding"] =
+                json!({ "prefix_mismatch_behavior": opts.prefix_mismatch_behavior });
+        }
         body.insert("thinking".into(), t);
     }
     if let Some(temp) = req.temperature
@@ -126,30 +147,24 @@ fn tool(spec: &ToolSpec, eager: bool) -> Value {
     t
 }
 
-fn messages(history: &[Message], volatile_tail: usize) -> Vec<Value> {
+fn messages(history: &[Message]) -> Vec<Value> {
     let mut out: Vec<Value> = history.iter().map(message).collect();
-    // Cache breakpoint on the last block that the next request will also contain: skip
-    // the `volatile_tail` per-call blocks (reminders) at the end, which are never empty
-    // and so are never dropped by `message`, and blocks that can't carry one (thinking).
-    let mut skip = volatile_tail;
-    for msg in out.iter_mut().rev() {
-        let Some(blocks) = msg.get_mut("content").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        if skip >= blocks.len() {
-            skip -= blocks.len();
-            continue;
-        }
-        let keep = blocks.len() - skip;
-        if let Some(block) = blocks[..keep].iter_mut().rev().find(|b| {
-            !matches!(
-                b["type"].as_str(),
-                Some("thinking") | Some("redacted_thinking")
-            )
-        }) {
-            block["cache_control"] = ephemeral();
-        }
-        break;
+    // Cache breakpoint on the last block that can carry one (not thinking). The kernel
+    // only ever appends to the conversation, so the next request starts with all of it.
+    if let Some(block) = out
+        .last_mut()
+        .and_then(|msg| msg.get_mut("content"))
+        .and_then(Value::as_array_mut)
+        .and_then(|blocks| {
+            blocks.iter_mut().rev().find(|b| {
+                !matches!(
+                    b["type"].as_str(),
+                    Some("thinking") | Some("redacted_thinking")
+                )
+            })
+        })
+    {
+        block["cache_control"] = ephemeral();
     }
     out
 }
@@ -260,7 +275,6 @@ mod tests {
             temperature: Some(0.2),
             thinking_budget: None,
             purpose: "agent".into(),
-            volatile_tail: 0,
         }
     }
 
@@ -270,7 +284,28 @@ mod tests {
             thinking_display: "summarized".into(),
             effort: "high".into(),
             fallbacks: "default".into(),
+            prefix_mismatch_behavior: String::new(),
         }
+    }
+
+    #[test]
+    fn block_binding_goes_on_the_thinking_config_with_its_beta() {
+        let binding = |model: &str, o: &BodyOptions| {
+            let mut r = req(model);
+            r.thinking_budget = None;
+            let body = build_body(&r, o);
+            let sent = body["thinking"]["block_binding"]["prefix_mismatch_behavior"].clone();
+            (sent, o.betas(model, &body).contains(&crate::BINDING_BETA))
+        };
+        let mut o = opts();
+        assert_eq!(binding("claude-opus-5-5", &o), (Value::Null, false));
+        o.prefix_mismatch_behavior = "error".into();
+        assert_eq!(binding("claude-opus-5-5", &o), (json!("error"), true));
+        // With no display setting the model's default thinking config carries it.
+        o.thinking_display = String::new();
+        assert_eq!(binding("claude-opus-5-5", &o), (json!("error"), true));
+        // A model that isn't thinking has nothing to bind: no field and no beta.
+        assert_eq!(binding("claude-sonnet-4-5", &o), (Value::Null, false));
     }
 
     #[test]
@@ -318,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_breakpoint_skips_per_call_reminders() {
+    fn cache_breakpoint_is_on_the_last_block() {
         let mut r = req("claude-opus-5-5");
         r.messages = vec![
             Message::user("task"),
@@ -328,30 +363,21 @@ mod tests {
                 content: vec![
                     ContentBlock::text("result"),
                     ContentBlock::text("<system-reminder>a</system-reminder>"),
-                    ContentBlock::text("<system-reminder>b</system-reminder>"),
                 ],
             },
         ];
-        let marked = |r: &ModelRequest| -> Vec<String> {
-            let body = build_body(r, &BodyOptions::default());
-            body["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .flat_map(|m| m["content"].as_array().unwrap().clone())
-                .filter(|b| b.get("cache_control").is_some())
-                .map(|b| b["text"].as_str().unwrap().to_string())
-                .collect()
-        };
-        r.volatile_tail = 0;
-        assert_eq!(marked(&r), ["<system-reminder>b</system-reminder>"]);
-        r.volatile_tail = 2;
-        assert_eq!(marked(&r), ["result"]);
-        // A message made only of reminders: the breakpoint moves to the one before.
-        r.volatile_tail = 3;
-        assert_eq!(marked(&r), ["working"]);
-        r.volatile_tail = 99;
-        assert!(marked(&r).is_empty());
+        let body = build_body(&r, &BodyOptions::default());
+        let marked: Vec<&str> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["content"].as_array().unwrap())
+            .filter(|b| b.get("cache_control").is_some())
+            .map(|b| b["text"].as_str().unwrap())
+            .collect();
+        // Reminders stay in the history, so the next request repeats them: the
+        // breakpoint can cover them.
+        assert_eq!(marked, ["<system-reminder>a</system-reminder>"]);
     }
 
     #[test]

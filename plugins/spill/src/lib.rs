@@ -32,7 +32,8 @@ use ch_kernel::{Cx, Hook, HookDecision, HookEvent, HookPoint, Plugin, PluginMani
 use serde::Deserialize;
 use serde_json::json;
 
-use preview::{Hint, preview};
+use ch_kernel::util::ReadTools;
+use preview::preview;
 
 /// Plugin id, also the hook id.
 pub const ID: &str = "spill";
@@ -163,7 +164,7 @@ impl Hook for SpillHook {
         match preview(
             &output.content,
             &path.display().to_string(),
-            hint(cx),
+            ReadTools::of(cx),
             self.max_inline_chars,
         ) {
             Some(text) => HookDecision::Rewrite { input: json!(text) },
@@ -189,19 +190,6 @@ async fn save(
         store::save(&session_dir, &call_id, &tool, &content, max_bytes)
     });
     Ok(task.await??)
-}
-
-/// How the notice tells the model to read the file, from the tools that exist.
-fn hint(cx: &Cx) -> Hint {
-    if cx.has_tool("read_file") && cx.has_tool("grep_text") {
-        Hint::FileTools {
-            bash: cx.has_tool("bash"),
-        }
-    } else if cx.has_tool("bash") {
-        Hint::Bash
-    } else {
-        Hint::None
-    }
 }
 
 #[cfg(test)]
