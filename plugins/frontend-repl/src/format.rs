@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use ch_kernel::util::{diff_counts, first_line};
+use ch_kernel::util::{diff_counts, first_line, printable, terminal_text};
 use ch_kernel::{ApprovalRequest, TerminationReason, Usage};
 use nu_ansi_term::{Color, Style};
 use serde_json::Value;
@@ -40,40 +40,12 @@ pub fn cyan(s: &str) -> String {
     Color::Cyan.paint(s).to_string()
 }
 
-/// Removes ANSI escape sequences (CSI `ESC [ ... letter` and OSC `ESC ] ... BEL`).
-pub fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\u{1b}' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('[') => {
-                for c in chars.by_ref() {
-                    if c.is_ascii_alphabetic() || c == '~' {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                for c in chars.by_ref() {
-                    if c == '\u{7}' {
-                        break;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
+pub use ch_kernel::util::strip_ansi;
 
 /// `● read_file src/main.rs`
 pub fn tool_start_line(name: &str, summary: &str) -> String {
-    let summary = first_line(summary);
-    let head = format!("{} {}", cyan("●"), bold(name));
+    let summary = terminal_text(first_line(summary));
+    let head = format!("{} {}", cyan("●"), bold(&printable(name)));
     if summary.is_empty() {
         head
     } else {
@@ -94,10 +66,10 @@ pub fn tool_end_lines(
     header: Option<&str>,
 ) -> Vec<String> {
     let prefix = match header {
-        Some(h) => format!("  ⎿ {h}: "),
+        Some(h) => format!("  ⎿ {}: ", printable(h)),
         None => "  ⎿ ".to_string(),
     };
-    let summary = result_summary(name, content, is_error, metadata);
+    let summary = terminal_text(&result_summary(name, content, is_error, metadata));
     let mut lines = vec![if is_error {
         format!("{}{}", dim(&prefix), red(&summary))
     } else {
@@ -182,6 +154,8 @@ pub fn color_diff(diff: &str, max_lines: usize) -> Vec<String> {
         .iter()
         .take(max_lines)
         .map(|line| {
+            // File content: shown exactly, with control characters escaped.
+            let line = &printable(line);
             if line.starts_with("@@") {
                 cyan(line)
             } else if line.starts_with('+') {
@@ -230,7 +204,7 @@ pub fn fmt_duration(d: Duration) -> String {
 
 /// What to say about a turn that didn't finish normally, if anything.
 pub fn reason_text(reason: &TerminationReason) -> Option<String> {
-    match reason {
+    let text = match reason {
         TerminationReason::Done => None,
         TerminationReason::Cancelled => Some("interrupted".into()),
         TerminationReason::StepLimit => {
@@ -244,7 +218,8 @@ pub fn reason_text(reason: &TerminationReason) -> Option<String> {
         }
         TerminationReason::PromptDenied { reason } => Some(format!("prompt blocked: {reason}")),
         TerminationReason::Error { message } => Some(format!("error: {message}")),
-    }
+    };
+    text.map(|t| terminal_text(&t))
 }
 
 /// The dim line printed after each turn, preceded by the reason when it wasn't `done`.
@@ -275,18 +250,20 @@ pub fn footer(reason: &TerminationReason, usage: &Usage, cost: f64, elapsed: Dur
 /// The approval prompt: what is being run, why it needs approval, a preview of the
 /// change, and the keys.
 pub fn approval_prompt(req: &ApprovalRequest) -> String {
+    // What is being approved is shown exactly: control characters are escaped, not
+    // removed, so a command can't redraw its own line or hide part of itself.
     let mut lines = vec![format!(
         "{} {} {}",
         yellow("?"),
-        bold(&req.tool),
-        first_line(&req.summary)
+        bold(&printable(&req.tool)),
+        printable(first_line(&req.summary))
     )];
     if !req.reason.trim().is_empty() {
-        lines.push(dim(&format!("  {}", first_line(&req.reason))));
+        lines.push(dim(&format!("  {}", printable(first_line(&req.reason)))));
     }
     lines.extend(approval_preview(req).into_iter().map(|l| format!("  {l}")));
     let always = match &req.key {
-        Some(k) => format!("{} always allow `{k}`", bold("a")),
+        Some(k) => format!("{} always allow `{}`", bold("a"), printable(k)),
         None => format!("{} always (this session)", bold("a")),
     };
     lines.push(format!(
@@ -307,7 +284,7 @@ pub fn approval_preview(req: &ApprovalRequest) -> Vec<String> {
             .map(|c| {
                 c.lines()
                     .take(MAX_PREVIEW_LINES)
-                    .map(|l| format!("$ {l}"))
+                    .map(|l| format!("$ {}", printable(l)))
                     .collect()
             })
             .unwrap_or_default(),
@@ -317,14 +294,14 @@ pub fn approval_preview(req: &ApprovalRequest) -> Vec<String> {
                 out.extend(
                     old.lines()
                         .take(MAX_PREVIEW_LINES)
-                        .map(|l| red(&format!("-{l}"))),
+                        .map(|l| red(&format!("-{}", printable(l)))),
                 );
             }
             if let Some(new) = s("new_text") {
                 out.extend(
                     new.lines()
                         .take(MAX_PREVIEW_LINES)
-                        .map(|l| green(&format!("+{l}"))),
+                        .map(|l| green(&format!("+{}", printable(l)))),
                 );
             }
             out
@@ -335,7 +312,7 @@ pub fn approval_preview(req: &ApprovalRequest) -> Vec<String> {
                 let mut out: Vec<String> = c
                     .lines()
                     .take(MAX_PREVIEW_LINES)
-                    .map(|l| green(&format!("+{l}")))
+                    .map(|l| green(&format!("+{}", printable(l))))
                     .collect();
                 if total > MAX_PREVIEW_LINES {
                     out.push(dim(&format!("… {} more lines", total - MAX_PREVIEW_LINES)));
@@ -545,6 +522,39 @@ mod tests {
         assert!(p.contains("  not a read-only command"), "{p}");
         assert!(p.contains("$ git commit -m wip"), "{p}");
         assert!(p.contains("a always allow `bash:git commit *`"), "{p}");
+    }
+
+    #[test]
+    fn approval_prompts_show_hidden_characters() {
+        // `\r` and "erase line" would redraw the command's line as `$ ls`.
+        let command = "rm -rf ~/x #\r\u{1b}[2K$ ls";
+        let req = ApprovalRequest {
+            tool: "bash".into(),
+            input: json!({ "command": command }),
+            summary: command.into(),
+            reason: "not read-only\u{1b}[8m".into(),
+            key: Some("bash:rm *\u{202e}".into()),
+        };
+        let p = approval_prompt(&req);
+        assert_eq!(crate::terminal::guard(&p), p);
+        let plain = strip_ansi(&p);
+        assert!(
+            plain.contains("$ rm -rf ~/x #\\u{d}\\u{1b}[2K$ ls"),
+            "{plain}"
+        );
+        assert!(plain.contains("not read-only\\u{1b}[8m"), "{plain}");
+        assert!(plain.contains("`bash:rm *\\u{202e}`"), "{plain}");
+
+        let req = ApprovalRequest {
+            tool: "edit_file".into(),
+            input: json!({"path": "a", "old_text": "x\u{1b}[1A", "new_text": "y\u{8}"}),
+            summary: "a".into(),
+            reason: String::new(),
+            key: None,
+        };
+        let p = approval_prompt(&req);
+        assert_eq!(crate::terminal::guard(&p), p);
+        assert!(strip_ansi(&p).contains("-x\\u{1b}[1A"), "{p}");
     }
 
     #[test]
