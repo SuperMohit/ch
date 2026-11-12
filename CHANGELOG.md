@@ -7,6 +7,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 ### Breaking
 
 - An unknown key under `[model]`, `[agent]` or `[select]` (including `[model.pricing]` and `[model.summarizer]`) stops `ch` with an error that lists the valid keys. Before, a misspelled setting such as `agent.max_step` was silently ignored. Top-level keys and `[plugins.*]` tables are unchanged.
+- A `[model.summarizer]` that names a provider with no default model, such as `openai`, now needs `model.summarizer.id`, or `ch` stops at startup.
 
 ### New
 
@@ -32,6 +33,8 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 ### Improved
 
 - `ch --config-path` also shows where trusted projects are recorded (`trusted-projects.toml`).
+- Groundwork for context management: when the provider rejects a request as too long before answering, the context strategy gets one chance to compact the conversation and the step is sent again; a second rejection still ends the turn (exit code 3 in `ch -p`). `/compact` takes instructions for the summary, as in `/compact focus on the parser work`, and saves the session. The tokens of model calls the strategy makes, such as summaries, always count in `/cost` and the saved session; their cost counts when the call's model is the one `[model.pricing]` is for. With `[model.summarizer]` unset, summaries use the model picked with `/model`; with only its `provider` set, that provider's default model. None of this changes anything until the `context` plugin lands: without it, an overflow ends the turn as before.
+
 ### Fixed
 
 - Reminders and hook notes (the plan reminder, `before_model` and `after_model` notes) are kept in the session history after they are sent. Before, they were added to one request and missing from the next, which on Claude Opus 5.5 and other models with signed thinking invalidated the model's earlier reasoning: accounts created on or after 2026-08-31 got a 400 ("bound to a different conversation") on any model call after the first in a session. Each request now repeats the previous one exactly and only adds to it. Sessions saved before this change don't hold the reminders that were sent, so on such accounts they can't be continued; start a new session.

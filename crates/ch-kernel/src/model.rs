@@ -119,3 +119,18 @@ pub async fn complete(
         "provider stream ended without a Completed event"
     )))
 }
+
+pub(crate) fn specs_chars(specs: &[ToolSpec]) -> usize {
+    specs
+        .iter()
+        .map(|t| t.name.len() + t.description.len() + t.input_schema.to_string().len())
+        .sum()
+}
+
+/// Raw token estimate of a whole request.
+pub(crate) fn estimate_request_tokens(req: &ModelRequest) -> u64 {
+    let chars = req.system.iter().map(String::len).sum::<usize>()
+        + req.messages.iter().map(Message::char_len).sum::<usize>()
+        + specs_chars(&req.tools);
+    crate::tokens::estimate_tokens(chars)
+}

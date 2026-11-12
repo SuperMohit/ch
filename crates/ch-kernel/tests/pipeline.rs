@@ -1,6 +1,7 @@
 //! Kernel tests with fake plugins only.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -27,11 +28,30 @@ impl ModelProvider for ScriptedProvider {
     async fn stream(
         &self,
         request: ModelRequest,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
     ) -> Result<ModelStream, ModelError> {
         self.0.requests.lock().unwrap().push(request);
         let next = self.0.responses.lock().unwrap().pop_front();
+        let overflow = || ModelError::ContextOverflow("too long".into());
         match next {
+            // The turn is cancelled just as the provider rejects the request.
+            Some(Err(e)) if e == "overflow after cancel" => {
+                cancel.cancel();
+                Err(overflow())
+            }
+            // The rejection comes after some text, thinking or a tool call.
+            Some(Err(e)) if e.starts_with("overflow after ") => {
+                let first = match e.as_str() {
+                    "overflow after text" => ModelEvent::TextDelta("partial".into()),
+                    "overflow after thinking" => ModelEvent::ThinkingDelta("hmm".into()),
+                    "overflow after a tool call" => ModelEvent::ToolUseStart {
+                        id: "t1".into(),
+                        name: "echo".into(),
+                    },
+                    other => panic!("unknown script entry `{other}`"),
+                };
+                Ok(Box::pin(stream::iter(vec![Ok(first), Err(overflow())])))
+            }
             Some(Ok(resp)) => {
                 let mut evs = Vec::new();
                 let text = resp.message.text();
@@ -41,7 +61,7 @@ impl ModelProvider for ScriptedProvider {
                 evs.push(Ok(ModelEvent::Completed(resp)));
                 Ok(Box::pin(stream::iter(evs)))
             }
-            Some(Err(e)) if e == "overflow" => Err(ModelError::ContextOverflow("too long".into())),
+            Some(Err(e)) if e == "overflow" => Err(overflow()),
             Some(Err(e)) => Err(ModelError::Unavailable(e)),
             None => Ok(Box::pin(stream::iter(vec![Ok(ModelEvent::Completed(
                 text_reply("(script exhausted)"),
@@ -894,15 +914,732 @@ async fn step_limit_ends_turn() {
 
 #[tokio::test]
 async fn context_overflow_and_provider_errors_end_turn() {
-    let mut h = harness(vec![Err("overflow".into())], vec![], config());
+    // The passthrough strategy can't compact, so nothing is sent again.
+    let mut h = harness(
+        vec![Err("overflow".into()), Ok(text_reply("never"))],
+        vec![],
+        config(),
+    );
     let r = h.session.run_turn("go").await;
     assert!(matches!(
         r.reason,
         TerminationReason::ContextOverflow { .. }
     ));
+    assert_eq!(h.script.requests.lock().unwrap().len(), 1);
     let mut h = harness(vec![Err("down".into())], vec![], config());
     let r = h.session.run_turn("go").await;
     assert!(matches!(r.reason, TerminationReason::Error { .. }));
+}
+
+/// What `TestContext::compact` was asked, and what its `ContextCx` held.
+#[derive(Debug, Clone)]
+struct SeenCompaction {
+    request: CompactRequest,
+    provider: String,
+    model: String,
+    summarizer: Option<(String, String)>,
+}
+
+/// The block a compacted view starts with.
+const COMPACTED: &str = "[compacted]";
+
+/// Sends the whole history, and once a compaction changed something, starts the first
+/// message with `COMPACTED` (when it isn't also the last). A compaction is recorded,
+/// and can summarize first (through `ContextCx::complete`), then cancel the turn or
+/// fail. A view can summarize or cancel the turn too.
+#[derive(Clone, Default)]
+struct TestContext {
+    changes: bool,
+    summarizes: bool,
+    cancels: bool,
+    fails: bool,
+    view_summarizes: bool,
+    view_cancels: bool,
+    compacted: Arc<AtomicBool>,
+    asked: Arc<Mutex<Vec<SeenCompaction>>>,
+}
+
+impl TestContext {
+    fn plugin(&self) -> Arc<dyn Plugin> {
+        let ctx = self.clone();
+        plugin("test-context", move |cx| {
+            cx.add_context(ctx.clone());
+            Ok(())
+        })
+    }
+
+    fn reasons(&self) -> Vec<CompactReason> {
+        let asked = self.asked.lock().unwrap();
+        asked.iter().map(|a| a.request.reason).collect()
+    }
+
+    /// Sends a summary request the way a real strategy would.
+    async fn summarize(&self, h: &History, budget: &Budget, cx: &ContextCx) -> anyhow::Result<()> {
+        let (provider, model) = match &cx.summarizer {
+            Some((p, m)) => (p.clone(), m.clone()),
+            None => (cx.provider.clone(), cx.agent_request.model.clone()),
+        };
+        let mut messages = h.messages();
+        messages.push(Message::user("Summarize the conversation."));
+        let request = ModelRequest {
+            model,
+            messages,
+            purpose: "context.summarize".into(),
+            ..cx.agent_request.clone()
+        };
+        cx.complete(&*provider, request, budget).await?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ContextStrategy for TestContext {
+    fn id(&self) -> &str {
+        "test-context"
+    }
+    async fn view(&self, h: &History, b: Budget, cx: &ContextCx) -> anyhow::Result<View> {
+        if self.view_summarizes {
+            self.summarize(h, &b, cx).await?;
+        }
+        if self.view_cancels {
+            cx.cx.cancel.cancel();
+        }
+        let mut messages = h.messages();
+        if self.compacted.load(Ordering::SeqCst) && messages.len() > 1 {
+            messages[0].content.insert(0, ContentBlock::text(COMPACTED));
+        }
+        Ok(View { messages })
+    }
+    async fn compact(
+        &self,
+        h: &History,
+        b: Budget,
+        request: &CompactRequest,
+        cx: &ContextCx,
+    ) -> anyhow::Result<CompactOutcome> {
+        self.asked.lock().unwrap().push(SeenCompaction {
+            request: request.clone(),
+            provider: cx.provider.id().to_string(),
+            model: cx.agent_request.model.clone(),
+            summarizer: cx
+                .summarizer
+                .as_ref()
+                .map(|(p, m)| (p.id().to_string(), m.clone())),
+        });
+        if self.summarizes {
+            self.summarize(h, &b, cx).await?;
+        }
+        if self.cancels {
+            cx.cx.cancel.cancel();
+        }
+        if self.fails {
+            anyhow::bail!("the disk is full");
+        }
+        self.compacted.store(self.changes, Ordering::SeqCst);
+        Ok(CompactOutcome {
+            changed: self.changes,
+            message: "compacted".into(),
+        })
+    }
+}
+
+fn changes() -> TestContext {
+    TestContext {
+        changes: true,
+        ..Default::default()
+    }
+}
+
+fn is_overflow(r: &TurnResult) -> bool {
+    matches!(r.reason, TerminationReason::ContextOverflow { .. })
+}
+
+/// Drains the events received so far.
+fn received(rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>) -> Vec<AgentEvent> {
+    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+fn usage_purposes(events: &[AgentEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Usage { purpose, .. } => Some(purpose.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn an_overflow_compacts_and_sends_the_step_again_once() {
+    // Each step may compact once.
+    let ctx = changes();
+    let mut h = harness(
+        vec![
+            Err("overflow".into()),
+            Ok(tool_reply(&[("a", "echo", json!({"text": "1"}))])),
+            Err("overflow".into()),
+            Ok(text_reply("done")),
+        ],
+        vec![ctx.plugin()],
+        config(),
+    );
+    let r = h.session.run_turn("go").await;
+    assert_eq!((r.reason, r.steps), (TerminationReason::Done, 2));
+    assert_eq!(ctx.reasons(), [CompactReason::Overflow; 2]);
+    assert_eq!(h.script.requests.lock().unwrap().len(), 4);
+
+    // A second overflow in the same step ends the turn.
+    let ctx = changes();
+    let mut h = harness(
+        vec![
+            Err("overflow".into()),
+            Err("overflow".into()),
+            Ok(text_reply("never")),
+        ],
+        vec![ctx.plugin()],
+        config(),
+    );
+    let r = h.session.run_turn("go").await;
+    assert!(is_overflow(&r), "{r:?}");
+    assert_eq!(h.script.requests.lock().unwrap().len(), 2);
+    assert_eq!(ctx.reasons(), [CompactReason::Overflow]);
+}
+
+#[tokio::test]
+async fn an_overflow_ends_the_turn_when_compacting_changes_nothing() {
+    let ctx = TestContext::default();
+    let mut h = harness(
+        vec![Err("overflow".into()), Ok(text_reply("never"))],
+        vec![ctx.plugin()],
+        config(),
+    );
+    let r = h.session.run_turn("go").await;
+    assert!(is_overflow(&r), "{r:?}");
+    assert_eq!(ctx.reasons(), [CompactReason::Overflow]);
+    assert_eq!(h.script.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn an_overflow_retry_sends_the_compacted_view_and_stores_nothing_twice() {
+    let log: Log = Default::default();
+    let l = log.clone();
+    let ctx = changes();
+    let plugins = vec![
+        plugin("prompt", |cx| {
+            cx.add_prompt(Reminder);
+            Ok(())
+        }),
+        plugin("noter", move |cx| {
+            cx.add_hook(ScriptedHook {
+                id: "noter",
+                priority: 0,
+                points: vec![HookPoint::BeforeModel],
+                log: l.clone(),
+                decide: Box::new(|_| HookDecision::note("check the build")),
+            });
+            Ok(())
+        }),
+        ctx.plugin(),
+    ];
+    let mut h = harness(
+        vec![
+            Ok(tool_reply(&[("a", "echo", json!({"text": "1"}))])),
+            Err("overflow".into()),
+            Ok(text_reply("done")),
+        ],
+        plugins,
+        config(),
+    );
+    let r = h.session.run_turn("task").await;
+    assert_eq!(r.reason, TerminationReason::Done);
+    // The hooks ran once per step, not for the retry.
+    assert_eq!(*log.lock().unwrap(), ["noter:before_model"; 2]);
+    let reqs = h.script.requests.lock().unwrap();
+    assert_eq!(reqs.len(), 3);
+    let (rejected, retry) = (&reqs[1], &reqs[2]);
+    // The retry is the compacted view, with the rest of the request unchanged.
+    assert_ne!(retry, rejected);
+    assert_eq!(retry.messages[0].content[0], ContentBlock::text(COMPACTED));
+    assert_eq!(
+        retry.messages[0].content[1..],
+        rejected.messages[0].content[..]
+    );
+    assert_eq!(retry.messages[1..], rejected.messages[1..]);
+    assert_eq!(
+        (&retry.model, &retry.system, &retry.tools),
+        (&rejected.model, &rejected.system, &rejected.tools)
+    );
+    // It ends with the step's results, reminder and note, stored once.
+    let results = &h.session.history().events()[2].message;
+    assert_eq!(retry.messages.last(), Some(results));
+    let sent = format!("{results:?}");
+    assert_eq!(sent.matches("remember the plan").count(), 1);
+    assert_eq!(sent.matches("check the build").count(), 1);
+    let stored = format!("{:?}", h.session.history().messages());
+    assert_eq!(stored.matches("remember the plan").count(), 2);
+    assert_eq!(stored.matches("check the build").count(), 2);
+}
+
+#[tokio::test]
+async fn an_overflow_after_output_streamed_ends_the_turn() {
+    // The partial answer was shown already, so it isn't sent again.
+    for script in [
+        "overflow after text",
+        "overflow after thinking",
+        "overflow after a tool call",
+    ] {
+        let ctx = changes();
+        let mut h = harness(
+            vec![Err(script.into()), Ok(text_reply("never"))],
+            vec![ctx.plugin()],
+            config(),
+        );
+        let r = h.session.run_turn("go").await;
+        assert!(is_overflow(&r), "{script}: {r:?}");
+        assert!(ctx.reasons().is_empty(), "{script}");
+        assert_eq!(h.script.requests.lock().unwrap().len(), 1, "{script}");
+    }
+}
+
+#[tokio::test]
+async fn a_cancel_before_or_during_the_overflow_compaction_ends_the_turn() {
+    let cancels = |ctx: TestContext| TestContext {
+        cancels: true,
+        ..ctx
+    };
+    let failing = TestContext {
+        fails: true,
+        ..Default::default()
+    };
+    let overflow = vec![CompactReason::Overflow];
+    for (name, ctx, script, reasons) in [
+        ("changed", cancels(changes()), "overflow", overflow.clone()),
+        (
+            "unchanged",
+            cancels(Default::default()),
+            "overflow",
+            overflow.clone(),
+        ),
+        ("failed", cancels(failing), "overflow", overflow),
+        ("before", changes(), "overflow after cancel", vec![]),
+    ] {
+        let mut h = harness(
+            vec![Err(script.into()), Ok(text_reply("never"))],
+            vec![ctx.plugin()],
+            config(),
+        );
+        let r = h.session.run_turn("go").await;
+        assert_eq!(r.reason, TerminationReason::Cancelled, "{name}");
+        assert_eq!(ctx.reasons(), reasons, "{name}");
+        assert_eq!(h.script.requests.lock().unwrap().len(), 1, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn a_failed_overflow_compaction_warns_and_ends_the_turn() {
+    let ctx = TestContext {
+        fails: true,
+        ..changes()
+    };
+    let mut h = harness(
+        vec![Err("overflow".into()), Ok(text_reply("never"))],
+        vec![ctx.plugin()],
+        config(),
+    );
+    let mut rx = h.session.events().subscribe();
+    let r = h.session.run_turn("go").await;
+    assert!(is_overflow(&r), "{r:?}");
+    assert_eq!(h.script.requests.lock().unwrap().len(), 1);
+    let warned = received(&mut rx).into_iter().any(
+        |e| matches!(e, AgentEvent::Warning { message } if message.contains("the disk is full")),
+    );
+    assert!(warned);
+}
+
+#[tokio::test]
+async fn a_cancel_during_the_view_ends_the_turn_before_anything_is_stored() {
+    let ctx = TestContext {
+        view_cancels: true,
+        ..Default::default()
+    };
+    let prompt = plugin("prompt", |cx| {
+        cx.add_prompt(Reminder);
+        Ok(())
+    });
+    let mut h = harness(
+        vec![Ok(text_reply("never"))],
+        vec![prompt, ctx.plugin()],
+        config(),
+    );
+    let mut rx = h.session.events().subscribe();
+    let r = h.session.run_turn("go").await;
+    assert_eq!(r.reason, TerminationReason::Cancelled);
+    // The call's reminder wasn't stored, and nothing was sent.
+    assert_eq!(h.session.history().events()[0].message.content.len(), 1);
+    let requested = received(&mut rx)
+        .into_iter()
+        .any(|e| matches!(e, AgentEvent::ModelRequest { .. }));
+    assert!(!requested);
+}
+
+#[tokio::test]
+async fn a_strategy_s_model_calls_count_however_the_compaction_ends() {
+    // Each call uses 100 input tokens; the rejected call reports none.
+    let summarizes = || TestContext {
+        summarizes: true,
+        ..changes()
+    };
+    let fails = TestContext {
+        fails: true,
+        ..summarizes()
+    };
+    let cancels = TestContext {
+        cancels: true,
+        ..summarizes()
+    };
+    for (name, ctx, input) in [
+        ("compacts", summarizes(), 200),
+        ("fails", fails, 100),
+        ("cancels", cancels, 100),
+    ] {
+        let mut h = harness(
+            vec![
+                Err("overflow".into()),
+                Ok(text_reply("a summary")),
+                Ok(text_reply("done")),
+            ],
+            vec![ctx.plugin()],
+            config(),
+        );
+        let mut rx = h.session.events().subscribe();
+        h.session.run_turn("go").await;
+        assert_eq!(h.session.usage().input_tokens, input, "{name}");
+        let purposes = usage_purposes(&received(&mut rx));
+        assert_eq!(purposes[0], "context.summarize", "{name}");
+    }
+
+    // A view's own calls count too, before the agent's.
+    let ctx = TestContext {
+        view_summarizes: true,
+        ..Default::default()
+    };
+    let mut h = harness(
+        vec![Ok(text_reply("a summary")), Ok(text_reply("done"))],
+        vec![ctx.plugin()],
+        config(),
+    );
+    let mut rx = h.session.events().subscribe();
+    h.session.run_turn("go").await;
+    assert_eq!(h.session.usage().input_tokens, 200);
+    let purposes = usage_purposes(&received(&mut rx));
+    assert_eq!(purposes, ["context.summarize", "agent"]);
+
+    // Also when the turn is cancelled while the view is built.
+    let ctx = TestContext {
+        view_summarizes: true,
+        view_cancels: true,
+        ..Default::default()
+    };
+    let mut h = harness(
+        vec![Ok(text_reply("a summary")), Ok(text_reply("never"))],
+        vec![ctx.plugin()],
+        config(),
+    );
+    let mut rx = h.session.events().subscribe();
+    let r = h.session.run_turn("go").await;
+    assert_eq!(r.reason, TerminationReason::Cancelled);
+    assert_eq!(h.session.usage().input_tokens, 100);
+    let purposes = usage_purposes(&received(&mut rx));
+    assert_eq!(purposes, ["context.summarize"]);
+}
+
+#[tokio::test]
+async fn a_strategy_s_model_calls_carry_the_turn_and_step() {
+    let ctx = TestContext {
+        view_summarizes: true,
+        ..Default::default()
+    };
+    let mut h = harness(
+        vec![
+            Ok(text_reply("a summary")),
+            Ok(text_reply("first")),
+            Ok(text_reply("a summary")),
+            Ok(tool_reply(&[("a", "echo", json!({"text": "1"}))])),
+            Ok(text_reply("a summary")),
+            Ok(text_reply("done")),
+        ],
+        vec![ctx.plugin()],
+        config(),
+    );
+    h.session.run_turn("one").await;
+    let mut rx = h.session.events().subscribe();
+    h.session.run_turn("two").await;
+    let requests: Vec<_> = received(&mut rx)
+        .into_iter()
+        .filter_map(|e| match e {
+            AgentEvent::ModelRequest {
+                purpose,
+                turn,
+                step,
+                ..
+            } => Some((purpose, turn, step)),
+            _ => None,
+        })
+        .collect();
+    let summary = || "context.summarize".to_string();
+    let agent = || "agent".to_string();
+    assert_eq!(
+        requests,
+        [
+            (summary(), 2, 0),
+            (agent(), 2, 0),
+            (summary(), 2, 1),
+            (agent(), 2, 1)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_strategy_s_own_model_calls_count_in_the_totals() {
+    let cfg = Config::parse(
+        r#"
+        [model]
+        provider = "scripted"
+        id = "test-model"
+        [model.pricing]
+        input = 10000.0
+        output = 10000.0
+        "#,
+    )
+    .unwrap();
+    let ctx = TestContext {
+        summarizes: true,
+        ..changes()
+    };
+    let prompt = plugin("prompt", |cx| {
+        cx.add_prompt(Reminder);
+        Ok(())
+    });
+    let mut h = harness(
+        vec![Ok(text_reply("hi")), Ok(text_reply("a summary"))],
+        vec![prompt, ctx.plugin()],
+        cfg,
+    );
+    let mut rx = h.session.events().subscribe();
+    h.session.run_turn("task").await;
+    assert!(h.session.compact(None).await.unwrap().changed);
+    {
+        // The summary replays the agent's request: the same model, system and tools.
+        let reqs = h.script.requests.lock().unwrap();
+        let (agent, summary) = (&reqs[0], &reqs[1]);
+        assert_eq!(summary.purpose, "context.summarize");
+        assert_eq!(
+            (&summary.model, &summary.system, &summary.tools),
+            (&agent.model, &agent.system, &agent.tools)
+        );
+    }
+    // Each call uses 100 input and 10 output tokens, at $0.01 a token.
+    assert_eq!(h.session.usage().input_tokens, 200);
+    let cost = h.session.cost();
+    assert!((cost - 2.2).abs() < 1e-9, "{cost}");
+    let saved = h.session.snapshot();
+    assert_eq!((saved.usage, saved.cost), (h.session.usage(), cost));
+
+    let events = received(&mut rx);
+    let requested: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ModelRequest { purpose, model, .. } => {
+                Some((purpose.as_str(), model.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        requested,
+        [("agent", "test-model"), ("context.summarize", "test-model")]
+    );
+    assert_eq!(usage_purposes(&events), ["agent", "context.summarize"]);
+}
+
+#[tokio::test]
+async fn pricing_goes_by_each_call_s_model() {
+    let priced = |summarizer: &str| {
+        Config::parse(&format!(
+            "[model]\nprovider = \"scripted\"\nid = \"test-model\"\n\
+             [model.pricing]\ninput = 10000.0\noutput = 10000.0\n\
+             [model.summarizer]\nid = \"{summarizer}\""
+        ))
+        .unwrap()
+    };
+    let summarizes = || TestContext {
+        summarizes: true,
+        ..Default::default()
+    };
+    // A summary by another model costs nothing, though the agent's model is priced.
+    let mut h = harness(
+        vec![Ok(text_reply("hi")), Ok(text_reply("a summary"))],
+        vec![summarizes().plugin()],
+        priced("small-model"),
+    );
+    h.session.run_turn("task").await;
+    h.session.compact(None).await.unwrap();
+    assert_eq!(h.session.usage().input_tokens, 200);
+    assert!(
+        (h.session.cost() - 1.1).abs() < 1e-9,
+        "{}",
+        h.session.cost()
+    );
+
+    // A summary by the configured model is priced, though the agent switched away.
+    let mut h = harness(
+        vec![Ok(text_reply("hi")), Ok(text_reply("a summary"))],
+        vec![summarizes().plugin()],
+        priced("test-model"),
+    );
+    h.session.set_model("picked-model");
+    h.session.run_turn("task").await;
+    h.session.compact(None).await.unwrap();
+    assert_eq!(h.session.usage().input_tokens, 200);
+    assert!(
+        (h.session.cost() - 1.1).abs() < 1e-9,
+        "{}",
+        h.session.cost()
+    );
+}
+
+#[tokio::test]
+async fn a_compaction_s_cost_is_saved_even_without_a_turn_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path());
+    let ctx = TestContext {
+        summarizes: true,
+        ..changes()
+    };
+    let purposes: Arc<Mutex<Vec<String>>> = Default::default();
+    let p = purposes.clone();
+    let sink = plugin("usage-sink", move |cx| {
+        cx.add_sink(UsageSink(p.clone()));
+        Ok(())
+    });
+    let h = harness(
+        vec![Ok(text_reply("hi")), Ok(text_reply("a summary"))],
+        vec![ctx.plugin(), sink],
+        config(),
+    );
+    let (registry, cfg) = (h.session.registry().clone(), h.session.config().clone());
+    let open = |snap: Option<SessionSnapshot>| {
+        let b = Session::builder(registry.clone(), cfg.clone()).store(store.clone());
+        let b = match snap {
+            Some(s) => b.restore(s),
+            None => b,
+        };
+        b.build().unwrap()
+    };
+    let mut s = open(None);
+    s.run_turn("task").await;
+    s.end().await;
+    let id = s.id().to_string();
+    drop(s);
+    purposes.lock().unwrap().clear();
+
+    // As after `ch --continue`: the first thing in the session is `/compact`.
+    let mut s = open(Some(store.load(&id).unwrap()));
+    s.compact(None).await.unwrap();
+    assert_eq!(store.load(&id).unwrap().usage.input_tokens, 200);
+    s.end().await;
+    assert_eq!(*purposes.lock().unwrap(), ["context.summarize"]);
+}
+
+/// Records the purpose of each `Usage` event.
+struct UsageSink(Arc<Mutex<Vec<String>>>);
+
+#[async_trait::async_trait]
+impl EventSink for UsageSink {
+    fn id(&self) -> &str {
+        "usage"
+    }
+    async fn handle(&self, event: &AgentEvent) {
+        if let AgentEvent::Usage { purpose, .. } = event {
+            self.0.lock().unwrap().push(purpose.clone());
+        }
+    }
+}
+
+/// Two more providers, one with a default model and one without.
+fn other_providers() -> Arc<dyn Plugin> {
+    plugin("others", |cx| {
+        cx.add_provider(Named("other", Some("other-default")));
+        cx.add_provider(Named("plain", None));
+        Ok(())
+    })
+}
+
+/// The summarizer a strategy is given under the config `table`, before and after
+/// `/model`.
+async fn summarizer_for(table: &str) -> Option<(String, String)> {
+    let cfg = Config::parse(&format!(
+        "[model]\nprovider = \"scripted\"\nid = \"test-model\"\n{table}"
+    ))
+    .unwrap();
+    let ctx = TestContext::default();
+    let mut h = harness(vec![], vec![other_providers(), ctx.plugin()], cfg);
+    h.session.compact(None).await.unwrap();
+    h.session.set_model("picked-model");
+    h.session.compact(None).await.unwrap();
+    let asked = ctx.asked.lock().unwrap().clone();
+    // The agent's provider and current model are there either way.
+    let agent: Vec<_> = asked
+        .iter()
+        .map(|a| (a.provider.as_str(), a.model.as_str()))
+        .collect();
+    assert_eq!(
+        agent,
+        [("scripted", "test-model"), ("scripted", "picked-model")]
+    );
+    assert_eq!(asked[0].summarizer, asked[1].summarizer, "{table}");
+    asked[0].summarizer.clone()
+}
+
+#[tokio::test]
+async fn the_summarizer_is_set_only_by_its_config() {
+    let named = |p: &str, m: &str| Some((p.to_string(), m.to_string()));
+
+    assert_eq!(summarizer_for("").await, None);
+    assert_eq!(summarizer_for("[model.summarizer]").await, None);
+    assert_eq!(
+        summarizer_for("[model.summarizer]\nid = \"small-model\"").await,
+        named("scripted", "small-model")
+    );
+    // A provider without an id means that provider's default model.
+    assert_eq!(
+        summarizer_for("[model.summarizer]\nprovider = \"other\"").await,
+        named("other", "other-default")
+    );
+    assert_eq!(
+        summarizer_for("[model.summarizer]\nprovider = \"other\"\nid = \"m\"").await,
+        named("other", "m")
+    );
+
+    // One with no default model needs an id.
+    let cfg = Config::parse(
+        "[model]\nprovider = \"scripted\"\nid = \"test-model\"\n\
+         [model.summarizer]\nprovider = \"plain\"",
+    )
+    .unwrap();
+    let scripted = plugin("scripted", |cx| {
+        cx.add_provider(ScriptedProvider(Default::default()));
+        Ok(())
+    });
+    let registry = Arc::new(build(vec![scripted, other_providers()], &cfg).unwrap());
+    let err = Session::builder(registry, Arc::new(cfg))
+        .build()
+        .err()
+        .unwrap();
+    assert!(
+        format!("{err:#}").contains("`plain` has no default model; set model.summarizer.id"),
+        "{err:#}"
+    );
 }
 
 /// Signed thinking stays valid only while everything before it is unchanged, so each

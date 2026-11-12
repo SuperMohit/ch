@@ -1,8 +1,10 @@
 //! Where spilled output goes: `<session dir>/spill/`.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+
+use ch_kernel::util::{anchored, create_private, restrict};
 
 /// Attempts at a fresh random file name before saving gives up.
 const NAME_TRIES: usize = 3;
@@ -73,18 +75,6 @@ fn spill_dir(session_dir: &Path) -> io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// `dir` with its parent canonicalized and its own name kept; fails if `dir` is a
-/// symlink.
-fn anchored(dir: &Path) -> io::Result<PathBuf> {
-    if fs::symlink_metadata(dir)?.file_type().is_symlink() {
-        return Err(io::Error::other(format!("{} is a symlink", dir.display())));
-    }
-    let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
-        return Err(io::Error::other(format!("{} has no parent", dir.display())));
-    };
-    Ok(fs::canonicalize(parent)?.join(name))
-}
-
 /// Bytes in the regular files directly in `dir`.
 fn used_bytes(dir: &Path) -> io::Result<u64> {
     let mut used = 0u64;
@@ -113,27 +103,6 @@ fn safe(s: &str) -> String {
     } else {
         cleaned
     }
-}
-
-/// Creates `path`, failing if anything (a file or a symlink) is already there, readable
-/// only by the user.
-fn create_private(path: &Path) -> io::Result<fs::File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)
-}
-
-#[cfg(unix)]
-fn restrict(dir: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-}
-
-#[cfg(not(unix))]
-fn restrict(_dir: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

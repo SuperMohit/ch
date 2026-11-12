@@ -93,8 +93,12 @@ base_url = "https://example.invalid"
 "#;
 
 fn session(cfg: &str, store: Option<SessionStore>) -> Session {
+    session_with(cfg, store, Vec::new())
+}
+
+fn session_with(cfg: &str, store: Option<SessionStore>, extra: Vec<Arc<dyn Plugin>>) -> Session {
     let config = Config::parse(cfg).unwrap();
-    let plugins = vec![
+    let mut plugins = vec![
         fn_plugin(
             PluginManifest::new("provider-fake", "fake provider"),
             |cx| {
@@ -112,6 +116,7 @@ fn session(cfg: &str, store: Option<SessionStore>) -> Session {
         ),
         ch_commands_core::plugin(),
     ];
+    plugins.extend(extra);
     let registry = Arc::new(RegistryBuilder::build(plugins, &config, Path::new("/tmp")).unwrap());
     let mut b = Session::builder(registry, Arc::new(config)).workspace("/tmp");
     if let Some(s) = store {
@@ -178,6 +183,50 @@ async fn compact_reports_strategy_result() {
     s.run_turn("hello").await;
     let out = message(&mut s, "/compact").await;
     assert!(out.contains("does not support manual compaction"), "{out}");
+}
+
+/// Reports the compaction it was asked for.
+struct EchoCompaction;
+
+#[async_trait::async_trait]
+impl ContextStrategy for EchoCompaction {
+    fn id(&self) -> &str {
+        "echo"
+    }
+    async fn view(&self, h: &History, _b: Budget, _cx: &ContextCx) -> anyhow::Result<View> {
+        Ok(View {
+            messages: h.messages(),
+        })
+    }
+    async fn compact(
+        &self,
+        _h: &History,
+        _b: Budget,
+        request: &CompactRequest,
+        _cx: &ContextCx,
+    ) -> anyhow::Result<CompactOutcome> {
+        Ok(CompactOutcome {
+            changed: true,
+            message: format!("{:?} {:?}", request.reason, request.instructions),
+        })
+    }
+}
+
+#[tokio::test]
+async fn compact_passes_its_instructions_to_the_strategy() {
+    let echo = fn_plugin(PluginManifest::new("context-echo", "test"), |cx| {
+        cx.add_context(EchoCompaction);
+        Ok(())
+    });
+    let mut s = session_with(CONFIG, None, vec![echo]);
+    s.run_turn("hello").await;
+    let out = message(&mut s, "/compact   focus on the parser work ").await;
+    assert_eq!(
+        out,
+        r#"Compaction: Manual Some("focus on the parser work")"#
+    );
+    let out = message(&mut s, "/compact").await;
+    assert_eq!(out, "Compaction: Manual None");
 }
 
 #[tokio::test]

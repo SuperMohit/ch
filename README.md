@@ -43,7 +43,7 @@ While the agent works, you see its text streamed as it arrives, one line per too
 
 When an action needs approval, answer `y` (yes), `n` (no, optionally with a reason) or `a` (always allow this for the session). After `a`, you can also save the rule to `.ch/config.toml`.
 
-**Slash commands:** `/help`, `/clear`, `/compact`, `/model [id]`, `/cost`, `/tools`, `/plugins`, `/config`, `/resume [id]`, `/exit`.
+**Slash commands:** `/help`, `/clear`, `/compact [instructions]`, `/model [id]`, `/cost`, `/tools`, `/plugins`, `/config`, `/resume [id]`, `/exit`.
 
 ### Headless mode
 
