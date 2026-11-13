@@ -6,11 +6,22 @@
 //! the model wrote; the tool result is only a count, so it adds no further copy. The
 //! first model call of each turn gets a reminder: the current plan while some step is
 //! open, or else a one-line nudge that planning exists. Later steps of the turn rely on
-//! the model's own latest `update_plan` call.
+//! the model's own latest `update_plan` call, until `refresh_after_steps` model calls
+//! pass without one while a step is open: then the plan is shown again, so it doesn't
+//! fade in a long turn (in `ch -p` the whole task is one turn). Each refresh the model
+//! doesn't follow with an update doubles the wait for the next (10, 30, 70, 150 calls
+//! with the default), since like every reminder each copy stays in the history.
 //!
 //! Each update is saved as `plan.json` in the session directory, so a resumed session
 //! keeps its plan, and emitted as a `Custom { source: "planning", name: "plan_updated" }`
-//! event. The tool result carries the plan in its metadata for frontends.
+//! event. The tool result carries the plan in its metadata for frontends. A refresh
+//! emits `plan_refreshed` with the number of model calls since the plan was last
+//! shown, when the reminder is added; a turn can still end before that request is sent.
+//!
+//! ```toml
+//! [plugins.planning]
+//! refresh_after_steps = 10    # 0 shows the plan only at the start of a turn; not 1
+//! ```
 
 mod plan;
 mod store;
@@ -18,8 +29,11 @@ mod tool;
 
 use std::sync::Arc;
 
+use anyhow::bail;
 use ch_kernel::reexports::async_trait;
 use ch_kernel::{Cx, Plugin, PluginManifest, PromptContributor, RegisterCx};
+use serde::Deserialize;
+use serde_json::json;
 
 pub use plan::{Plan, PlanItem, Status};
 pub use store::PlanStore;
@@ -35,6 +49,36 @@ pub const PLANNING_PROMPT: &str = include_str!("../../../prompts/planning.md");
 pub const NO_PLAN_REMINDER: &str = "There is no open plan. If this task takes three or \
      more steps, call update_plan with the steps before starting; otherwise ignore this.";
 
+/// `[plugins.planning]`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PlanningConfig {
+    /// Model calls in a turn without the plan before it is first shown again; each
+    /// refresh the model doesn't follow with an update doubles the wait. 0 never.
+    pub refresh_after_steps: u32,
+}
+
+impl PlanningConfig {
+    /// Rejects a refresh on every call.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.refresh_after_steps == 1 {
+            bail!(
+                "plugins.planning.refresh_after_steps = 1 would add the plan to every call; \
+                 use 2 or more, or 0 to turn it off"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Default for PlanningConfig {
+    fn default() -> Self {
+        Self {
+            refresh_after_steps: 10,
+        }
+    }
+}
+
 /// Registers the tool, the service and the prompt contributor.
 pub struct PlanningPlugin;
 
@@ -47,24 +91,31 @@ impl Plugin for PlanningPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest::new(
             ID,
-            "The `update_plan` tool, with the plan shown to the model on every step",
+            "The `update_plan` tool, with the plan shown to the model at the start of each turn",
         )
         .version(env!("CARGO_PKG_VERSION"))
         .provides(&["tool:update_plan", "service:PlanStore", "prompt"])
+        .project_settings(&["refresh_after_steps"])
     }
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
+        let config: PlanningConfig = cx.config()?;
+        config.validate()?;
         let store = Arc::new(PlanStore::default());
         cx.provide_service(store.clone())?;
         cx.add_tool(UpdatePlan::new(store.clone()));
-        cx.add_prompt(PlanningPrompt { store });
+        cx.add_prompt(PlanningPrompt {
+            store,
+            refresh_after_steps: config.refresh_after_steps,
+        });
         Ok(())
     }
 }
 
-/// The system block and the per-step plan reminder.
+/// The system block and the plan reminders.
 pub struct PlanningPrompt {
     store: Arc<PlanStore>,
+    refresh_after_steps: u32,
 }
 
 #[async_trait]
@@ -82,14 +133,22 @@ impl PromptContributor for PlanningPrompt {
     }
 
     async fn turn_reminders(&self, cx: &Cx) -> Vec<String> {
-        if cx.step > 0 {
+        let open = self.store.get(cx).filter(|plan| plan::is_open(plan));
+        if cx.step == 0 {
+            self.store.turn_started(cx);
+            return vec![open.map_or_else(|| NO_PLAN_REMINDER.to_string(), |p| plan::render(&p))];
+        }
+        let Some(plan) = open else {
+            return Vec::new();
+        };
+        if self.refresh_after_steps == 0 {
             return Vec::new();
         }
-        let reminder = match self.store.get(cx) {
-            Some(plan) if plan::is_open(&plan) => plan::render(&plan),
-            _ => NO_PLAN_REMINDER.to_string(),
+        let Some(since) = self.store.refresh_due(cx, self.refresh_after_steps) else {
+            return Vec::new();
         };
-        vec![reminder]
+        cx.emit_custom(ID, "plan_refreshed", json!({ "steps_since": since }));
+        vec![plan::render_refresh(&plan)]
     }
 }
 
@@ -110,6 +169,7 @@ mod tests {
         let tool = UpdatePlan::new(store.clone());
         let prompt = PlanningPrompt {
             store: store.clone(),
+            refresh_after_steps: 10,
         };
         (store, tool, prompt, Cx::detached("/ws"))
     }
@@ -199,6 +259,84 @@ mod tests {
         assert_eq!(prompt.turn_reminders(&cx).await, [NO_PLAN_REMINDER]);
         tool.call(json!({"plan": []}), &cx).await;
         assert_eq!(prompt.turn_reminders(&cx).await, [NO_PLAN_REMINDER]);
+    }
+
+    #[tokio::test]
+    async fn the_plan_is_shown_again_after_steps_without_it() {
+        let (_, tool, mut prompt, cx) = setup();
+        let at = |turn, step| {
+            let mut cx = cx.clone();
+            (cx.turn, cx.step) = (turn, step);
+            cx
+        };
+        let refreshes = |r: Vec<String>| {
+            r.iter()
+                .filter(|r| r.starts_with("Your plan, shown again"))
+                .count()
+        };
+        // No open plan, no refresh.
+        assert_eq!(prompt.turn_reminders(&at(1, 0)).await, [NO_PLAN_REMINDER]);
+        assert!(prompt.turn_reminders(&at(1, 12)).await.is_empty());
+
+        // The request after an update is the first to hold it.
+        let open = json!({"plan": [step("Read", "in_progress"), step("Fix", "pending")]});
+        tool.call(open, &at(1, 2)).await;
+        let mut rx = cx.events.subscribe();
+        assert!(prompt.turn_reminders(&at(1, 12)).await.is_empty());
+        let reminders = prompt.turn_reminders(&at(1, 13)).await;
+        assert!(
+            reminders[0].ends_with("1. [in_progress] Read\n2. [pending] Fix"),
+            "{reminders:?}"
+        );
+        match rx.try_recv().unwrap() {
+            AgentEvent::Custom { source, name, data } => {
+                assert_eq!((source.as_str(), name.as_str()), (ID, "plan_refreshed"));
+                assert_eq!(data, json!({"steps_since": 10}));
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+        // Each refresh without an update doubles the wait for the next.
+        assert_eq!(refreshes(prompt.turn_reminders(&at(1, 32)).await), 0);
+        assert_eq!(refreshes(prompt.turn_reminders(&at(1, 33)).await), 1);
+        match rx.try_recv().unwrap() {
+            AgentEvent::Custom { data, .. } => assert_eq!(data, json!({"steps_since": 20})),
+            other => panic!("unexpected event {other:?}"),
+        }
+        assert_eq!(refreshes(prompt.turn_reminders(&at(1, 72)).await), 0);
+        assert_eq!(refreshes(prompt.turn_reminders(&at(1, 73)).await), 1);
+        // An update starts over.
+        let next = json!({"plan": [step("Read", "completed"), step("Fix", "in_progress")]});
+        tool.call(next, &at(1, 75)).await;
+        assert_eq!(refreshes(prompt.turn_reminders(&at(1, 85)).await), 0);
+        assert_eq!(refreshes(prompt.turn_reminders(&at(1, 86)).await), 1);
+        assert_eq!(refreshes(prompt.turn_reminders(&at(1, 105)).await), 0);
+
+        // So does a new turn, whose first request shows the plan.
+        assert_eq!(prompt.turn_reminders(&at(2, 0)).await.len(), 1);
+        assert_eq!(refreshes(prompt.turn_reminders(&at(2, 9)).await), 0);
+        assert_eq!(refreshes(prompt.turn_reminders(&at(2, 10)).await), 1);
+
+        prompt.refresh_after_steps = 0;
+        assert!(prompt.turn_reminders(&at(2, 90)).await.is_empty());
+        prompt.refresh_after_steps = 10;
+        let done = json!({"plan": [step("Read", "completed"), step("Fix", "completed")]});
+        tool.call(done, &at(2, 91)).await;
+        assert!(prompt.turn_reminders(&at(2, 200)).await.is_empty());
+    }
+
+    #[test]
+    fn a_refresh_on_every_call_and_unknown_keys_are_rejected() {
+        let build = |toml: &str| {
+            let tmp = tempfile::tempdir().unwrap();
+            let config = ch_kernel::Config::parse(toml).unwrap();
+            ch_kernel::RegistryBuilder::build(vec![plugin()], &config, tmp.path()).map(|_| ())
+        };
+        assert!(build("").is_ok());
+        assert!(build("[plugins.planning]\nrefresh_after_steps = 0").is_ok());
+        assert!(build("[plugins.planning]\nrefresh_after_steps = 2").is_ok());
+        let err = build("[plugins.planning]\nrefresh_after_steps = 1").unwrap_err();
+        assert!(format!("{err:#}").contains("every call"), "{err:#}");
+        assert!(build("[plugins.planning]\nrefresh_after_step = 3").is_err());
     }
 
     #[tokio::test]

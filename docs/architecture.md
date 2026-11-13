@@ -133,7 +133,7 @@ Not doing: Rust dynamic libraries (`dlopen`), because Rust has no stable ABI and
 | Component | Plugin(s) | Switch |
 |---|---|---|
 | Action space: full tools vs bash-only | `tools-fs` + `tool-web-fetch` on or off; `prompt-base` variant | `plugins.disable = ["tools-fs","tool-web-fetch"]` |
-| Planning | `planning` (tool + system block + per-turn plan reminder) | enable or disable `planning` |
+| Planning | `planning` (tool + system block + plan reminders) | enable or disable `planning` |
 | Context management | `context` with `strategy = "staged"` and so on | `[plugins.context] strategy = ...` |
 | Safety gates | `safety` (path guard, read-before-write, permission policy) | always on |
 | Post-edit diagnostics | `diagnostics` (pre_tool, post_tool, before_model and turn_end hooks; [ADR 0003](adr/0003-diagnostics-new-findings-only.md)) | enable or disable |
@@ -271,7 +271,7 @@ The design is in [ADR 0004](adr/0004-context-management.md), with notes on where
 - On overflow before any output, the session compacts once and sends the step again with only the view recomputed. A second overflow, or a compaction that changes nothing, ends the turn.
 - No recall tool: the existing file tools read the elided output.
 
-**Planning:** an `update_plan(plan)` tool. Each item has `content`, `status` (`pending | in_progress | completed`) and `activeForm`. The complete list is re-sent on every update and exactly one item is `in_progress`. The current plan is kept outside the history (the `PlanStore` service, saved as `plan.json` next to the session) and injected as a `<system-reminder>` on the first model call of each turn. Like every reminder, it is then kept in the history, so later requests repeat it unchanged; while no step is open, that reminder is a one-line nudge to plan multi-step work instead. The tool result is only a count, but each `update_plan` call stays in the history with its full list, so superseded calls are the first thing context management (6.4) elides when it compacts. Eliding rewrites earlier messages, so it happens only at a compaction, never on every step.
+**Planning:** an `update_plan(plan)` tool. Each item has `content`, `status` (`pending | in_progress | completed`) and `activeForm`. The complete list is re-sent on every update and exactly one item is `in_progress`. The current plan is kept outside the history (the `PlanStore` service, saved as `plan.json` next to the session) and injected as a `<system-reminder>` on the first model call of each turn. Like every reminder, it is then kept in the history, so later requests repeat it unchanged; while no step is open, that reminder is a one-line nudge to plan multi-step work instead. Within a turn, the model's own latest `update_plan` call carries the plan, but while a step is open, the plan is added again as a reminder `refresh_after_steps` model calls (default 10) after the model last saw it, so a long turn (a whole `ch -p` task is one) doesn't lose it. Each refresh the model doesn't follow with an update doubles the wait for the next, because every copy stays in the history until context management trims old reminders. The refresh only appends, so the prompt cache and signed thinking are unaffected. The tool result is only a count, but each `update_plan` call stays in the history with its full list, so superseded calls are the first thing context management (6.4) elides when it compacts. Eliding rewrites earlier messages, so it happens only at a compaction, never on every step.
 
 **Tools:**
 

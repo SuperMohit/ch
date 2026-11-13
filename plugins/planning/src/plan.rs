@@ -123,11 +123,26 @@ pub fn summary(plan: &[PlanItem]) -> String {
 
 /// The plan as the model sees it in the reminder at the start of a turn.
 pub fn render(plan: &[PlanItem]) -> String {
-    let mut s = String::from(
+    list(
         "The current plan. Call update_plan with the whole list when a step starts or \
          finishes, or when the plan changes. If the user's latest message is about \
          something else, replace the plan, or send an empty list to clear it:",
-    );
+        plan,
+    )
+}
+
+/// The plan again, partway through a long turn.
+pub fn render_refresh(plan: &[PlanItem]) -> String {
+    list(
+        "Your plan, shown again during a long turn. If a step has started or finished, or \
+         the plan no longer matches your work, call update_plan with the whole list (or \
+         an empty list to clear it). Otherwise ignore this and carry on:",
+        plan,
+    )
+}
+
+fn list(header: &str, plan: &[PlanItem]) -> String {
+    let mut s = String::from(header);
     for (i, item) in plan.iter().enumerate() {
         s.push_str(&format!(
             "\n{}. [{}] {}",

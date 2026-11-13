@@ -16,32 +16,82 @@ const FILE: &str = "plan.json";
 /// matches the session that was loaded.
 #[derive(Default)]
 pub struct PlanStore {
-    /// The session id and its plan, `None` if it has none.
-    slot: Mutex<Option<(String, Option<Plan>)>>,
+    slot: Mutex<Option<Slot>>,
+}
+
+struct Slot {
+    session: String,
+    /// `None` if the session has no plan.
+    plan: Option<Plan>,
+    /// The turn and step of the first request that showed the model the current plan:
+    /// the one after its latest `update_plan` call, or one with a plan reminder. Only in
+    /// memory, since each turn starts with a reminder.
+    shown: Option<(u32, u32)>,
+    /// Refreshes since the model last updated the plan or a turn began. Each one doubles
+    /// the wait for the next.
+    ignored: u32,
 }
 
 impl PlanStore {
     /// The plan of `cx`'s session, if `update_plan` was ever called in it.
     pub fn get(&self, cx: &Cx) -> Option<Plan> {
-        self.current(cx).as_ref().and_then(|(_, plan)| plan.clone())
+        self.current(cx).as_ref().and_then(|slot| slot.plan.clone())
     }
 
     /// Replaces the plan of `cx`'s session and saves it next to the session.
     pub(crate) fn set(&self, cx: &Cx, plan: Plan) {
         let mut slot = self.lock();
         save(cx, &plan);
-        *slot = Some((cx.session_id.to_string(), Some(plan)));
+        *slot = Some(Slot {
+            session: cx.session_id.to_string(),
+            plan: Some(plan),
+            shown: Some((cx.turn, cx.step + 1)),
+            ignored: 0,
+        });
     }
 
-    fn current(&self, cx: &Cx) -> MutexGuard<'_, Option<(String, Option<Plan>)>> {
+    /// Records that the first request of a turn shows the plan.
+    pub(crate) fn turn_started(&self, cx: &Cx) {
+        if let Some(slot) = self.current(cx).as_mut() {
+            slot.shown = Some((cx.turn, cx.step));
+            slot.ignored = 0;
+        }
+    }
+
+    /// Whether `cx`'s request should show the plan again: `every` requests after it was
+    /// last shown, doubled for each earlier refresh the model didn't follow with an
+    /// update. If so, records the refresh and returns the requests since the plan was
+    /// shown.
+    pub(crate) fn refresh_due(&self, cx: &Cx, every: u32) -> Option<u32> {
+        let mut guard = self.current(cx);
+        let slot = guard.as_mut()?;
+        let since = match slot.shown {
+            Some((turn, step)) if turn == cx.turn => cx.step.saturating_sub(step),
+            _ => cx.step,
+        };
+        let wait = u64::from(every) << slot.ignored.min(32);
+        if u64::from(since) < wait {
+            return None;
+        }
+        slot.shown = Some((cx.turn, cx.step));
+        slot.ignored += 1;
+        Some(since)
+    }
+
+    fn current(&self, cx: &Cx) -> MutexGuard<'_, Option<Slot>> {
         let mut slot = self.lock();
-        if slot.as_ref().is_none_or(|(id, _)| **id != *cx.session_id) {
-            *slot = Some((cx.session_id.to_string(), load(cx)));
+        if slot.as_ref().is_none_or(|s| *s.session != *cx.session_id) {
+            *slot = Some(Slot {
+                session: cx.session_id.to_string(),
+                plan: load(cx),
+                shown: None,
+                ignored: 0,
+            });
         }
         slot
     }
 
-    fn lock(&self) -> MutexGuard<'_, Option<(String, Option<Plan>)>> {
+    fn lock(&self) -> MutexGuard<'_, Option<Slot>> {
         // Every update is a single assignment, so a poisoned lock is still consistent.
         self.slot
             .lock()
