@@ -98,6 +98,7 @@ sequenceDiagram
 |---|---|---|---|
 | **ModelProvider** | 1 per role (agent, summarizer) | `stream(req, cancel) -> Stream<ModelEvent>` | `provider-anthropic`, `provider-openai` |
 | **Tool** | many | `spec() -> ToolSpec`, `call(input, &ToolCx) -> ToolOutput` | `tools-fs`, `tool-bash`, `tool-web-fetch`, `planning` (`update_plan`) |
+| **ToolSource** | many | `start(ToolSink, &Cx)`, `stop()`; reports tools through the sink then and whenever they change ([ADR 0006](adr/0006-outside-plugins-and-changing-tools.md)) | `mcp-bridge`, `external-host` (planned) |
 | **Hook** | many, ordered by priority | `on(&HookEvent, &Cx) -> HookDecision` | `safety` (permissions), `stuck`, `diagnostics`, `hooks-shell` |
 | **PromptContributor** | many, ordered | `system_blocks(cx)`, `turn_reminders(cx)` | `prompt-base`, `project-instructions`, `planning` |
 | **ContextStrategy** | 1 | `view(&History, Budget, cx) -> View`, `compact(&History, Budget, &CompactRequest, cx) -> CompactOutcome` | `context` (`none` / `elide` / `summarize` / `staged`) |

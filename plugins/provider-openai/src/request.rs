@@ -1,5 +1,6 @@
 //! Kernel request → chat-completions request body.
 
+use ch_kernel::util::system_reminder;
 use ch_kernel::{ContentBlock, Message, ModelRequest, Role, ToolSpec};
 use serde_json::{Map, Value, json};
 
@@ -79,7 +80,7 @@ fn messages(req: &ModelRequest) -> Vec<Value> {
 /// Tool results become `role: "tool"` messages (they must directly follow the assistant
 /// message that called them); any text goes in a user message after them.
 fn user(msg: &Message, out: &mut Vec<Value>) {
-    let mut text = Vec::new();
+    let mut text: Vec<String> = Vec::new();
     for block in &msg.content {
         match block {
             ContentBlock::ToolResult {
@@ -98,7 +99,10 @@ fn user(msg: &Message, out: &mut Vec<Value>) {
                     "content": content,
                 }));
             }
-            ContentBlock::Text { text: t } if !t.is_empty() => text.push(t.as_str()),
+            ContentBlock::Text { text: t } if !t.is_empty() => text.push(t.clone()),
+            ContentBlock::ToolsChanged { added, removed } => {
+                text.push(system_reminder(&ch_kernel::ledger::note(added, removed)));
+            }
             _ => {}
         }
     }
@@ -218,6 +222,7 @@ mod tests {
             temperature: Some(0.5),
             thinking_budget: Some(1000),
             purpose: String::new(),
+            tool_ledger: None,
         };
         let body = build_body(
             &req,

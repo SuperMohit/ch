@@ -14,6 +14,7 @@ workspace = true
 anyhow.workspace = true
 ch-kernel.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

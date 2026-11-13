@@ -21,6 +21,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+ch-testkit.workspace = true
 tempfile.workspace = true
 ch-provider-scripted.workspace = true
 ch-safety.workspace = true

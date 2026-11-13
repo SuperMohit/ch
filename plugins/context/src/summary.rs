@@ -408,6 +408,7 @@ fn plain(model: &str, agent: &ModelRequest, text: String) -> ModelRequest {
         temperature: agent.temperature,
         thinking_budget: None,
         purpose: PURPOSE.into(),
+        tool_ledger: None,
     }
 }
 
@@ -491,6 +492,10 @@ fn entries(message: &Message, first: bool) -> String {
             ContentBlock::ToolResult { content, .. } => {
                 ("[tool result]".to_string(), content.clone())
             }
+            ContentBlock::ToolsChanged { added, removed } => (
+                "[harness]".to_string(),
+                ch_kernel::ledger::note(added, removed),
+            ),
             ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => continue,
         };
         out.push_str(&label);
@@ -774,6 +779,7 @@ mod tests {
                 temperature: None,
                 thinking_budget: None,
                 purpose: "agent".into(),
+                tool_ledger: None,
             },
             &first,
             &[],

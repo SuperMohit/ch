@@ -237,6 +237,9 @@ fn describe(requests: &[ModelRequest]) -> String {
                         if *is_error { "error: " } else { "" },
                         first_line(content)
                     ),
+                    ContentBlock::ToolsChanged { added, removed } => {
+                        format!("tools_changed(+{} -{})", added.join(","), removed.join(","))
+                    }
                 })
                 .collect();
             out.push_str(&format!("{:?}: {}\n", m.role, blocks.join(" | ")));

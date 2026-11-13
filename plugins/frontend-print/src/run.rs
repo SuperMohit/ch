@@ -4,7 +4,7 @@ use std::io::Write;
 use std::time::Instant;
 
 use ch_kernel::util::{printable, strip_ansi, terminal_text};
-use ch_kernel::{AgentEvent, Session, TerminationReason, Usage};
+use ch_kernel::{AgentEvent, Session, SourceStatus, TerminationReason, Usage};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
@@ -112,6 +112,21 @@ impl<O: Write, E: Write> Printer<'_, O, E> {
             AgentEvent::AssistantMessage { .. } => self.block_ended = true,
             AgentEvent::Warning { message } => {
                 let _ = writeln!(self.err, "warning: {}", terminal_text(message));
+            }
+            AgentEvent::ToolSource { source, status } => {
+                let gone = match status {
+                    SourceStatus::Failed { reason } => Some(("failed", reason)),
+                    SourceStatus::Exited { reason } => Some(("exited", reason)),
+                    _ => None,
+                };
+                if let Some((what, reason)) = gone {
+                    let _ = writeln!(
+                        self.err,
+                        "warning: {} {what}: {}",
+                        printable(source),
+                        terminal_text(reason)
+                    );
+                }
             }
             other if self.verbose => {
                 if let Some(line) = verbose_line(other) {

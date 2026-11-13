@@ -18,6 +18,7 @@ use crate::model::ModelProvider;
 use crate::prompt::PromptContributor;
 use crate::registry::RegistryBuilder;
 use crate::tool::Tool;
+use crate::tool_source::ToolSource;
 
 /// Bumped on breaking changes to the plugin traits.
 pub const API_VERSION: u32 = 1;
@@ -133,6 +134,12 @@ impl RegisterCx<'_> {
 
     pub fn add_tool_arc(&mut self, t: Arc<dyn Tool>) {
         self.builder.tools.push((self.plugin_id.clone(), t));
+    }
+
+    /// Adds a source of tools known only at run time (an MCP server, an external
+    /// plugin). The session starts it; see [`crate::tool_source`].
+    pub fn add_tool_source(&mut self, s: Arc<dyn ToolSource>) {
+        self.builder.sources.push((self.plugin_id.clone(), s));
     }
 
     pub fn add_hook(&mut self, h: impl Hook + 'static) {

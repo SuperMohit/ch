@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
+use crate::tool_source::SourceStatus;
 use crate::types::{Message, TerminationReason, Usage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +118,17 @@ pub enum AgentEvent {
     /// Something went wrong that the user should know about but that didn't end the turn.
     Warning {
         message: String,
+    },
+    /// The model was told about tools added or withdrawn since its last call.
+    ToolsChanged {
+        added: Vec<String>,
+        removed: Vec<String>,
+    },
+    /// A tool source (an MCP server, an external plugin) started, failed, exited or
+    /// reported a new list of tools.
+    ToolSource {
+        source: String,
+        status: SourceStatus,
     },
     /// Plugin-defined events (plan updates, diagnostics results, ...).
     Custom {

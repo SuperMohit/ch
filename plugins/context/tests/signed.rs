@@ -11,8 +11,9 @@ use ch_kernel::{
     Role, SessionStore, TerminationReason,
 };
 use ch_provider_scripted::{ScriptStep, ScriptedProvider};
+use ch_testkit::{ScriptedSource, echo_tool};
 use serde_json::{Value, json};
-use sessions::{Dirs, Signed, dirs, received, signed_session};
+use sessions::{Dirs, Signed, dirs, received, signed_session, signed_session_with};
 
 /// `count` calls to `big` with `lines` lines each, then a reply. Replies differ, so
 /// `Signed` tells them apart without their thinking.
@@ -64,6 +65,7 @@ async fn send(p: &Signed, messages: Vec<Message>) -> Result<Message, String> {
         temperature: None,
         thinking_budget: Some(1000),
         purpose: "agent".into(),
+        tool_ledger: None,
     };
     let stream = (p.stream(request, CancellationToken::new()).await).map_err(|e| e.to_string())?;
     let events: Vec<_> = stream.collect().await;
@@ -433,4 +435,150 @@ async fn plan_reminders_and_summaries_keep_the_reasoning_valid() {
         second.contains("<system-reminder>") && second.contains("Read part"),
         "{second}"
     );
+}
+
+/// `mcp__fake__flip`: each call makes its source offer a new `extra<n>` tool in place of
+/// the last one, so tools are added and withdrawn while the turn runs.
+struct Flip {
+    source: ScriptedSource,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[ch_kernel::reexports::async_trait]
+impl ch_kernel::Tool for Flip {
+    fn spec(&self) -> ch_kernel::ToolSpec {
+        ch_kernel::ToolSpec {
+            name: "mcp__fake__flip".into(),
+            description: "Changes the server's tools.".into(),
+            input_schema: json!({"type": "object"}),
+            read_only: false,
+        }
+    }
+
+    async fn call(&self, _input: Value, _cx: &ch_kernel::Cx) -> ch_kernel::ToolOutput {
+        let n = 1 + self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let flip: std::sync::Arc<dyn ch_kernel::Tool> = std::sync::Arc::new(Flip {
+            source: self.source.clone(),
+            calls: std::sync::atomic::AtomicUsize::new(n),
+        });
+        self.source
+            .set_tools(vec![flip, echo_tool(&format!("mcp__fake__extra{n}"))]);
+        ch_kernel::ToolOutput::ok(format!("flipped {n}"))
+    }
+}
+
+/// Lets the fake server's tools run without asking.
+const ALLOW_FAKE: &str = "[plugins.safety]\nallow = [\"mcp__fake__*\"]\n";
+
+fn flipping_source() -> ScriptedSource {
+    let source = ScriptedSource::new("mcp:fake", "mcp__fake__");
+    let flip = std::sync::Arc::new(Flip {
+        source: source.clone(),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    source.with_tools(vec![flip])
+}
+
+/// Every fifth step changes the tools; the rest read logs big enough for trims and
+/// summaries. The model also calls a tool that was withdrawn by then.
+fn flipping_script(from: u64, count: u64) -> Vec<ScriptStep> {
+    let mut steps: Vec<ScriptStep> = (from..from + count)
+        .map(|n| match n % 5 {
+            0 => ScriptStep::tool("mcp__fake__flip", json!({})),
+            3 => ScriptStep::tool("mcp__fake__extra1", json!({ "x": n.to_string() })),
+            _ => ScriptStep::tool(
+                "big",
+                json!({ "n": n, "lines": if n % 2 == 0 { 100 } else { 12 } }),
+            ),
+        })
+        .collect();
+    steps.push(ScriptStep::text(format!("done {from}")));
+    steps
+}
+
+/// Tools added and withdrawn mid-turn, across trims, summaries, `/compact`, an overflow
+/// and a resume, never invalidate the model's signed reasoning: earlier definitions are
+/// never changed, and deferred ones count only once announced.
+#[tokio::test]
+async fn tools_coming_and_going_keep_the_reasoning_valid() {
+    let d = dirs();
+    let p = Signed::new(ScriptedProvider::new(flipping_script(1, 80)).with_context_window(12_000));
+    let mut s = signed_session_with(
+        &p,
+        &d,
+        "s1",
+        ALLOW_FAKE,
+        vec![ScriptedSource::plugin("sources", vec![flipping_source()])],
+    );
+    let mut rx = s.events().subscribe();
+    let r = s.run_turn("read the logs").await;
+    assert_eq!(r.reason, TerminationReason::Done, "{r:?}");
+    assert_signed(&p);
+
+    let events = received(&mut rx);
+    let changes = (events.iter())
+        .filter(|e| matches!(e, AgentEvent::ToolsChanged { .. }))
+        .count();
+    assert!(changes >= 10, "{changes} tool changes");
+    let summarized = (events.iter()).any(|e| {
+        matches!(
+            e,
+            AgentEvent::ContextCompacted {
+                kind: CompactionKind::Summarized,
+                ..
+            }
+        )
+    });
+    assert!(summarized, "the run should have been summarized");
+
+    // The ledger only grew: each request's definitions start with the last one's.
+    let requests = p.inner.requests();
+    let defs = |r: &ModelRequest| -> Vec<ch_kernel::ToolSpec> {
+        r.tool_ledger
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| e.spec.clone())
+            .collect()
+    };
+    for pair in requests.windows(2) {
+        let (a, b) = (defs(&pair[0]), defs(&pair[1]));
+        assert_eq!(b[..a.len()], a[..]);
+    }
+    let last = requests.last().unwrap();
+    let ledger = last.tool_ledger.as_ref().unwrap();
+    assert!(ledger.iter().filter(|e| e.deferred).count() >= 10);
+    assert_eq!(ledger.iter().filter(|e| e.deferred && e.active).count(), 1);
+
+    // `/compact`, then another turn.
+    let out = s.compact(None).await.unwrap();
+    assert!(out.changed, "{}", out.message);
+    s.end().await;
+    drop(s);
+
+    // Another process, with a server that now offers other tools.
+    let q = p.then(ScriptedProvider::new(flipping_script(81, 12)).with_context_window(12_000));
+    let mut resumed = signed_session_with(
+        &q,
+        &d,
+        "new",
+        ALLOW_FAKE,
+        vec![ScriptedSource::plugin(
+            "sources",
+            vec![
+                ScriptedSource::new("mcp:fake", "mcp__fake__").with_tools(vec![
+                    echo_tool("mcp__fake__extra1"),
+                    echo_tool("mcp__fake__fresh"),
+                ]),
+            ],
+        )],
+    );
+    resumed
+        .restore(SessionStore::new(&d.sessions).load("s1").unwrap())
+        .unwrap();
+    assert_eq!(
+        resumed.run_turn("go on").await.reason,
+        TerminationReason::Done
+    );
+    assert_signed(&q);
 }

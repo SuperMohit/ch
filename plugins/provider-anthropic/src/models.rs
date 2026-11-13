@@ -26,6 +26,12 @@ pub struct ModelCaps {
     pub always_thinks: bool,
     /// Supports the server-side refusal fallback (`fallbacks: "default"`).
     pub refusal_fallback: bool,
+    /// Accepts mid-conversation tool changes (`defer_loading`, `tool_addition`,
+    /// `tool_removal`).
+    pub tool_changes: bool,
+    /// Checks its replayed thinking against the system prompt, tools and messages it was
+    /// written after (preserved thinking), so changing the tool list breaks it.
+    pub checks_thinking: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +84,8 @@ pub fn caps(model: &str) -> ModelCaps {
         thinking_display: false,
         always_thinks: false,
         refusal_fallback: false,
+        tool_changes: false,
+        checks_thinking: false,
     };
     let modern = ModelCaps {
         thinking: ThinkingStyle::Adaptive,
@@ -85,6 +93,8 @@ pub fn caps(model: &str) -> ModelCaps {
         thinking_display: true,
         always_thinks: true,
         refusal_fallback: false,
+        tool_changes: false,
+        checks_thinking: false,
     };
     let Some((family, v)) = parse(model) else {
         return legacy;
@@ -96,6 +106,23 @@ pub fn caps(model: &str) -> ModelCaps {
             | (Family::Sonnet, (5, 5))
             | (Family::Fable, (5, 1))
     );
+    // Mid-conversation tool changes: every Fable and Mythos model, Opus 4.8 and later,
+    // Sonnet 5.5 and Haiku 5.5 (not Sonnet 5).
+    let tool_changes = match family {
+        Family::Fable | Family::Mythos => true,
+        Family::Opus => v >= (4, 8),
+        Family::Sonnet | Family::Haiku => v >= (5, 5),
+    };
+    // Preserved thinking: Fable and Mythos from 5.1, Opus, Sonnet and Haiku from 5.5.
+    let checks_thinking = match family {
+        Family::Fable | Family::Mythos => v >= (5, 1),
+        Family::Opus | Family::Sonnet | Family::Haiku => v >= (5, 5),
+    };
+    let modern = ModelCaps {
+        tool_changes,
+        checks_thinking,
+        ..modern
+    };
     match family {
         Family::Fable | Family::Mythos => ModelCaps {
             refusal_fallback: fallback,
@@ -182,6 +209,23 @@ mod tests {
         assert!(caps("claude-fable-5-1").refusal_fallback);
         assert!(!caps("claude-fable-5").refusal_fallback);
         assert_eq!(caps("my-proxy-model").thinking, ThinkingStyle::Budget);
+    }
+
+    #[test]
+    fn tool_changes_and_preserved_thinking_by_model() {
+        let both = |m: &str| (caps(m).tool_changes, caps(m).checks_thinking);
+        assert_eq!(both("claude-opus-5-5"), (true, true));
+        assert_eq!(both("claude-sonnet-5-5"), (true, true));
+        assert_eq!(both("claude-haiku-5-5"), (true, true));
+        assert_eq!(both("claude-fable-5-2"), (true, true));
+        assert_eq!(both("claude-mythos-5-1"), (true, true));
+        assert_eq!(both("claude-fable-5"), (true, false));
+        assert_eq!(both("claude-opus-5"), (true, false));
+        assert_eq!(both("claude-opus-4-8"), (true, false));
+        assert_eq!(both("claude-sonnet-5"), (false, false));
+        assert_eq!(both("claude-opus-4-7"), (false, false));
+        assert_eq!(both("claude-haiku-4-5"), (false, false));
+        assert_eq!(both("my-proxy-model"), (false, false));
     }
 
     #[test]

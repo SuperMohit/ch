@@ -37,6 +37,15 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    /// Tools that became available or stopped being available before this model call
+    /// (ADR 0006). Stored on a user message; providers render it natively (a
+    /// mid-conversation tool change) or as a short note.
+    ToolsChanged {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        added: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        removed: Vec<String>,
+    },
 }
 
 impl ContentBlock {
@@ -52,6 +61,7 @@ impl ContentBlock {
             Self::RedactedThinking { data } => data.len(),
             Self::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
             Self::ToolResult { content, .. } => content.len(),
+            Self::ToolsChanged { added, removed } => crate::ledger::note(added, removed).len(),
         }
     }
 }

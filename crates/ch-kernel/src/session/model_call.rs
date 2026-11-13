@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
@@ -9,10 +10,13 @@ use crate::context::{Budget, CompactReason, CompactRequest, ContextCx, View};
 use crate::cx::Cx;
 use crate::events::AgentEvent;
 use crate::hook::{HookEvent, Verdict, run_hooks};
+use crate::ledger::{MAX_LEDGER, Staged, ToolLedger};
 use crate::model::{
-    ModelError, ModelEvent, ModelRequest, ModelResponse, estimate_request_tokens, specs_chars,
+    ModelError, ModelEvent, ModelRequest, ModelResponse, ToolChanges, estimate_request_tokens,
+    specs_chars,
 };
 use crate::tokens::estimate_tokens;
+use crate::tool::ToolSpec;
 use crate::types::{ContentBlock, Message, Role, TerminationReason, Usage};
 use crate::util::system_reminder;
 
@@ -22,7 +26,17 @@ use super::Session;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
 impl Session {
-    pub(super) async fn system_blocks(&self, cx: &Cx) -> Vec<String> {
+    /// The conversation's system prompt: the one its first request was sent with, or,
+    /// before that, what the prompt contributors give now. It is rendered once per
+    /// conversation because a model's signed reasoning is checked against it.
+    pub(super) async fn system_prompt(&self, cx: &Cx) -> Vec<String> {
+        match &self.system {
+            Some(system) => system.clone(),
+            None => self.render_system(cx).await,
+        }
+    }
+
+    async fn render_system(&self, cx: &Cx) -> Vec<String> {
         let mut blocks = Vec::new();
         for (_, p) in &self.registry.prompts {
             blocks.extend(
@@ -35,10 +49,15 @@ impl Session {
         blocks
     }
 
-    pub(super) fn budget(&self, system: &[String], reminders: &[String]) -> Budget {
+    pub(super) fn budget(
+        &self,
+        system: &[String],
+        reminders: &[String],
+        tools: &[ToolSpec],
+    ) -> Budget {
         let fixed_chars: usize = system.iter().map(String::len).sum::<usize>()
             + reminders.iter().map(String::len).sum::<usize>()
-            + specs_chars(&self.tool_specs);
+            + specs_chars(tools);
         Budget {
             window: self.context_window(),
             reserved_output: u64::from(self.kcfg.model.max_output_tokens),
@@ -47,17 +66,89 @@ impl Session {
         }
     }
 
-    /// The agent's request without its messages.
-    pub(super) fn agent_request(&self, system: Vec<String>) -> ModelRequest {
+    /// The agent's request without its messages, sending `ledger`'s tools.
+    pub(super) fn agent_request(
+        &self,
+        system: Vec<String>,
+        ledger: &ToolLedger,
+        mode: ToolChanges,
+    ) -> ModelRequest {
         ModelRequest {
             model: self.model.clone(),
             system,
             messages: Vec::new(),
-            tools: self.tool_specs.to_vec(),
+            tools: ledger.active_specs(),
             max_tokens: self.kcfg.model.max_output_tokens,
             temperature: self.kcfg.model.temperature,
             thinking_budget: self.kcfg.model.thinking_budget,
             purpose: "agent".into(),
+            tool_ledger: (mode == ToolChanges::Native).then(|| ledger.entries().to_vec()),
+        }
+    }
+
+    /// The tool ledger the next model call sends, with what changed since the last one.
+    /// Warns once per tool about what the model isn't told.
+    fn stage_tools(&mut self, mode: ToolChanges) -> Staged {
+        let (offered, shadowed) = self.catalog.offered();
+        for s in shadowed {
+            self.warn_once(
+                format!("shadowed {} {}", s.name, s.source),
+                format!(
+                    "`{}` also offers a tool named `{}`; the one registered first keeps the name",
+                    s.source, s.name
+                ),
+            );
+        }
+        let staged = self.ledger.stage(&offered, mode != ToolChanges::Frozen);
+        for name in &staged.changed {
+            self.warn_once(
+                format!("changed {name}"),
+                format!(
+                    "`{name}` changed its definition; the model keeps the first one until \
+                     /clear or a new session"
+                ),
+            );
+        }
+        let waiting: Vec<String> = (staged.waiting.iter())
+            .filter(|n| !self.tool_warnings.contains(&format!("waiting {n}")))
+            .cloned()
+            .collect();
+        if !waiting.is_empty() {
+            self.tool_warnings
+                .extend(waiting.iter().map(|n| format!("waiting {n}")));
+            let why = match mode {
+                ToolChanges::Frozen => {
+                    "this model can't take new tools in a running conversation".to_string()
+                }
+                _ => format!("the conversation already has {MAX_LEDGER} tool definitions"),
+            };
+            self.events.emit(AgentEvent::Warning {
+                message: format!(
+                    "{why}; these tools are available after /clear: {}",
+                    waiting.join(", ")
+                ),
+            });
+        }
+        staged
+    }
+
+    fn warn_once(&mut self, key: String, message: String) {
+        if self.tool_warnings.insert(key) {
+            self.events.emit(AgentEvent::Warning { message });
+        }
+    }
+
+    /// Makes `staged` the conversation's tools and `system` its system prompt, once a
+    /// call's additions are stored in history.
+    fn commit_prompt(&mut self, staged: Staged, system: &[String]) {
+        if let Some(ContentBlock::ToolsChanged { added, removed }) = staged.block() {
+            self.events
+                .emit(AgentEvent::ToolsChanged { added, removed });
+        }
+        self.ledger = staged.ledger;
+        self.tool_specs = Arc::new(self.ledger.active_specs());
+        if self.system.is_none() {
+            self.system = Some(system.to_vec());
         }
     }
 
@@ -67,7 +158,15 @@ impl Session {
         step: u32,
         after_model_notes: &mut Vec<String>,
     ) -> Result<ModelResponse, TerminationReason> {
-        let system = self.system_blocks(cx).await;
+        // The tools this call sends. They become the conversation's only when the call's
+        // additions are stored below, so a call that stops early leaves them pending.
+        let mode = self.provider.tool_changes(&self.model);
+        let staged = self.stage_tools(mode);
+        let cx = &Cx {
+            tools: Arc::new(staged.ledger.active_specs()),
+            ..cx.clone()
+        };
+        let system = self.system_prompt(cx).await;
         let mut reminders = Vec::new();
         for (_, p) in &self.registry.prompts {
             reminders.extend(
@@ -79,13 +178,16 @@ impl Session {
         }
         reminders.append(after_model_notes);
 
-        let budget = self.budget(&system, &reminders);
-        let ccx = self.context_cx(cx.clone(), self.agent_request(system));
+        let request = self.agent_request(system, &staged.ledger, mode);
+        let budget = self.budget(&request.system, &reminders, &sent_tools(&request));
+        let ccx = self.context_cx(cx.clone(), request);
         let mut messages = self.view(budget, &ccx).await?.messages;
-        let mut added: Vec<ContentBlock> = reminders
-            .iter()
-            .map(|r| ContentBlock::text(system_reminder(r)))
-            .collect();
+        let mut added: Vec<ContentBlock> = staged.block().into_iter().collect();
+        added.extend(
+            reminders
+                .iter()
+                .map(|r| ContentBlock::text(system_reminder(r))),
+        );
         append_to_last_user(&mut messages, added.clone());
 
         let request = ModelRequest {
@@ -115,7 +217,9 @@ impl Session {
         // thinking, a block is valid only while everything before it stays the same, so
         // text that is in one request and missing from the next invalidates the model's
         // later reasoning. The view ends with the newest history message, so after this
-        // the request's last message is the history's.
+        // the request's last message is the history's. The tools and system prompt
+        // the request carries become the conversation's at the same point.
+        self.commit_prompt(staged, &ccx.agent_request.system);
         if !added.is_empty() {
             self.history.append_to_last_user(self.turn, added);
         }
@@ -148,7 +252,11 @@ impl Session {
             return Err(TerminationReason::Cancelled);
         }
         // The call's reminders are in the history now, not on top of it.
-        let budget = self.budget(&ccx.agent_request.system, &[]);
+        let budget = self.budget(
+            &ccx.agent_request.system,
+            &[],
+            &sent_tools(&ccx.agent_request),
+        );
         let request = CompactRequest {
             reason: CompactReason::Overflow,
             instructions: None,
@@ -338,6 +446,15 @@ fn termination(e: ModelError) -> TerminationReason {
         e => TerminationReason::Error {
             message: e.to_string(),
         },
+    }
+}
+
+/// The tool definitions `request` sends: the whole ledger when the provider renders tool
+/// changes natively, the active tools otherwise.
+pub(super) fn sent_tools(request: &ModelRequest) -> Vec<ToolSpec> {
+    match &request.tool_ledger {
+        Some(ledger) => ledger.iter().map(|e| e.spec.clone()).collect(),
+        None => request.tools.clone(),
     }
 }
 

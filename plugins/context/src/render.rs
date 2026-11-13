@@ -68,6 +68,12 @@ pub fn render(history: &History, records: &[Record]) -> Rendered {
             });
         }
     }
+    let start = applied.start(history);
+    // Tool changes announced inside the summarized span, combined into one: without it
+    // a tool added there would stay hidden from the model, and one withdrawn there
+    // would look available again.
+    let span = &messages[1.min(messages.len())..start.min(messages.len())];
+    let changes = ch_kernel::ledger::net(span.iter().flat_map(|m| &m.content));
     if let Some(first) = messages.first_mut() {
         first.content.extend(
             applied
@@ -75,11 +81,9 @@ pub fn render(history: &History, records: &[Record]) -> Rendered {
                 .iter()
                 .map(|s| ContentBlock::text(s.block())),
         );
+        first.content.extend(changes);
     }
-    Rendered {
-        start: applied.start(history),
-        messages,
-    }
+    Rendered { start, messages }
 }
 
 pub fn is_thinking(block: &ContentBlock) -> bool {
