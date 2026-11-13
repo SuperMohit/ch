@@ -17,7 +17,7 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 |---|---|---|---|
 | **M1 — Usable CLI agent** | `ch` REPL with streaming, the file/bash tools, approvals, slash commands, Ctrl-C to interrupt, sessions with resume, and `ch -p` headless mode. All of it built as plugins on the kernel | 0–5 | Done except 5.2 expandable output and 5.9–5.11 |
 | **M2 — Long-session harness** | Planning, staged context management, stuck detection and post-edit diagnostics as plugins. Long sessions never overflow the context window | 6 | In progress: 6.1–6.3 and 6.6 done |
-| **M3 — Open to outside plugins** | External JSON-RPC plugins, MCP tools, shell hooks, markdown commands, and a `ch plugins` command to manage them | 7 | Not started |
+| **M3 — Open to outside plugins** | External JSON-RPC plugins, MCP tools, shell hooks, markdown commands, and a `ch plugins` command to manage them | 7 | In progress: design in [ADR 0006](docs/adr/0006-outside-plugins-and-changing-tools.md) |
 | **M4 — Observable & measurable** | Langfuse telemetry, an eval runner and ablation matrices | 8–9 | Not started |
 | **M5 — Polish** | Docker executor, TUI frontend, per-model tuned profiles | 10 | Not started |
 
@@ -116,7 +116,7 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [ ] **7.1** `ch-plugin-protocol`: JSON-RPC 2.0 over stdio with newline-delimited framing and a versioned protocol.
   - Host → plugin: `initialize` (the plugin returns its capabilities: tools, hooks with matchers, commands, prompt contributions, event subscriptions), `tool/call`, `hook/invoke`, `prompt/system`, `prompt/turn`, `command/run`, `event/notify`, `shutdown`.
   - Plugin → host: `log` and `ui/notify`.
-- [ ] **7.2** `external-host` plugin: reads `plugin.toml` manifests, spawns plugin processes lazily, and wraps their capabilities as kernel Tool/Hook/Command/PromptContributor/EventSink adapters. Per-call timeouts. If a plugin crashes, disable it and warn; never crash the agent.
+- [ ] **7.2** `external-host` plugin: reads `plugin.toml` manifests, starts plugin processes with the session (a plugin added mid-session is picked up by `/plugins reload`, without a restart; [ADR 0006](docs/adr/0006-outside-plugins-and-changing-tools.md)), and wraps their capabilities as kernel Tool/Hook/Command/PromptContributor/EventSink adapters. Per-call timeouts. If a plugin crashes, disable it and warn; never crash the agent.
 - [ ] **7.3** `ch-plugin-sdk` (Rust) and a Python example in `examples/plugins/`, for example a `todo-scanner` tool and a `block-secrets` pre_tool hook.
 - [ ] **7.4** `mcp-bridge`: connects to configured MCP servers (stdio and streamable HTTP) with `rmcp` and registers their tools as `mcp__<server>__<tool>`.
   - Servers from a project's `.mcp.json` or `.ch/config.toml` stay off until you trust them, through the same trust store as project config, and are asked about again when their command, URL or env changes.
