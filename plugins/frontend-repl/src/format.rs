@@ -110,7 +110,8 @@ fn plan_line(item: &Value) -> String {
     }
 }
 
-/// A one-line description of a tool result: `120 lines`, `exit 1 · 3 lines`, `+3 -1`,
+/// A one-line description of a tool result: `120 lines`, `exit 1 · 3 lines`, `+3 -1`
+/// (`+3 -1 (whitespace adjusted)` for an edit applied only after adjusting whitespace),
 /// or for an error its first line (`exit 1: …` for bash, `timed out: …`).
 pub fn result_summary(name: &str, content: &str, is_error: bool, metadata: &Value) -> String {
     let exit = metadata.get("exit_code").and_then(Value::as_i64);
@@ -125,7 +126,7 @@ pub fn result_summary(name: &str, content: &str, is_error: bool, metadata: &Valu
     }
     if let Some(diff) = metadata.get("diff").and_then(Value::as_str) {
         let (added, removed) = diff_counts(diff);
-        return format!("+{added} -{removed}");
+        return format!("+{added} -{removed}{}", whitespace_note(metadata));
     }
     if name == "update_plan" {
         return first_line(content).to_string();
@@ -139,6 +140,15 @@ pub fn result_summary(name: &str, content: &str, is_error: bool, metadata: &Valu
     match exit {
         Some(code) => format!("exit {code} · {lines}"),
         None => lines,
+    }
+}
+
+/// ` (whitespace adjusted)` for an edit applied only after adjusting whitespace.
+fn whitespace_note(metadata: &Value) -> &'static str {
+    if metadata.get("whitespace_adjusted") == Some(&Value::Bool(true)) {
+        " (whitespace adjusted)"
+    } else {
+        ""
     }
 }
 
@@ -429,6 +439,15 @@ mod tests {
             tool_end_lines("edit_file", "no match", true, &json!({"diff": diff}), None).len(),
             1
         );
+        // An edit applied after adjusting whitespace says so.
+        let lines = tool_end_lines(
+            "edit_file",
+            "Edited x.rs",
+            false,
+            &json!({"path": "x.rs", "diff": diff, "whitespace_adjusted": true}),
+            None,
+        );
+        assert_eq!(strip_ansi(&lines[0]), "  ⎿ +1 -1 (whitespace adjusted)");
     }
 
     #[test]

@@ -56,7 +56,8 @@ pub fn tool_start(name: &str, summary: &str) -> String {
     }
 }
 
-/// A one-line description of a tool result: `120 lines`, `exit 1 · 3 lines`, `+3 -1`,
+/// A one-line description of a tool result: `120 lines`, `exit 1 · 3 lines`, `+3 -1`
+/// (with ` (whitespace adjusted)` for an edit applied only after adjusting whitespace),
 /// or `error: <first line>`.
 pub fn result_summary(name: &str, content: &str, is_error: bool, metadata: &Value) -> String {
     if is_error {
@@ -64,7 +65,7 @@ pub fn result_summary(name: &str, content: &str, is_error: bool, metadata: &Valu
     }
     if let Some(diff) = metadata.get("diff").and_then(Value::as_str) {
         let (added, removed) = diff_counts(diff);
-        return format!("+{added} -{removed}");
+        return format!("+{added} -{removed}{}", whitespace_note(metadata));
     }
     let lines = content.lines().count();
     let lines = format!("{lines} line{}", if lines == 1 { "" } else { "s" });
@@ -74,6 +75,15 @@ pub fn result_summary(name: &str, content: &str, is_error: bool, metadata: &Valu
             format!("timed out · {lines}")
         }
         _ => lines,
+    }
+}
+
+/// ` (whitespace adjusted)` for an edit applied only after adjusting whitespace.
+fn whitespace_note(metadata: &Value) -> &'static str {
+    if metadata.get("whitespace_adjusted") == Some(&Value::Bool(true)) {
+        " (whitespace adjusted)"
+    } else {
+        ""
     }
 }
 
@@ -116,6 +126,15 @@ mod tests {
                 &json!({"diff": "--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y\n+z"})
             ),
             "+2 -1"
+        );
+        assert_eq!(
+            result_summary(
+                "edit_file",
+                "ok",
+                false,
+                &json!({"diff": "--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y", "whitespace_adjusted": true})
+            ),
+            "+1 -1 (whitespace adjusted)"
         );
         assert_eq!(
             result_summary("bash", "hi", false, &json!({"exit_code": 0})),

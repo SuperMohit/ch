@@ -467,6 +467,489 @@ async fn edit_keeps_crlf_line_endings() {
     assert_eq!(ws.read("w.txt"), "one\r\n1.5\r\ntwo\r\nthree\r\n");
 }
 
+#[tokio::test]
+async fn edit_reindents_a_unique_whitespace_match() {
+    let ws = Ws::new();
+    ws.write(
+        "a.txt",
+        "block:\n        item one\n            detail = 1\n\n        item two\n            detail = 2\n",
+    );
+    ws.ok("read_file", json!({"path": "a.txt"})).await;
+    // Copied with 4 spaces where the file has 8; nested lines keep their extra 4.
+    let out = ws
+        .ok(
+            "edit_file",
+            json!({
+                "path": "a.txt",
+                "old_text": "    item one\n        detail = 1\n\n    item two\n",
+                "new_text": "    item one\n        detail = 10\n        extra = 3\n\n    item two\n",
+            }),
+        )
+        .await;
+    assert_eq!(
+        ws.read("a.txt"),
+        "block:\n        item one\n            detail = 10\n            extra = 3\n\n        \
+         item two\n            detail = 2\n"
+    );
+    assert!(
+        out.content.starts_with(
+            "Edited `a.txt` (+2 -1). old_text matched lines 2–5 only after adjusting whitespace \
+             (indentation `4 spaces` → `8 spaces`); new_text was re-indented the same way. \
+             Check the diff.\n"
+        ),
+        "{}",
+        out.content
+    );
+    assert!(
+        out.content.contains("+            extra = 3"),
+        "{}",
+        out.content
+    );
+    assert_eq!(out.metadata["whitespace_adjusted"], true);
+    assert_eq!(out.metadata["path"], "a.txt");
+    // Our own write is known, so the next edit needs no re-read.
+    ws.ok(
+        "edit_file",
+        json!({"path": "a.txt", "old_text": "extra = 3", "new_text": "extra = 4"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn edit_reindents_spaces_to_a_tab() {
+    let ws = Ws::new();
+    ws.write("m.txt", "start {\n\tlet x = 1;\n\tlet y = 2;\n}\n");
+    ws.ok("read_file", json!({"path": "m.txt"})).await;
+    let out = ws
+        .ok(
+            "edit_file",
+            json!({
+                "path": "m.txt",
+                "old_text": "    let x = 1;\n    let y = 2;\n",
+                "new_text": "    let x = 1;\n    let y = 3;\n",
+            }),
+        )
+        .await;
+    assert_eq!(ws.read("m.txt"), "start {\n\tlet x = 1;\n\tlet y = 3;\n}\n");
+    assert!(
+        out.content.contains("(indentation `4 spaces` → `1 tab`)"),
+        "{}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn edit_ignores_trailing_whitespace_in_the_file() {
+    let ws = Ws::new();
+    ws.write("t.txt", "def:\n    x = 1   \n    y = 2\n");
+    ws.ok("read_file", json!({"path": "t.txt"})).await;
+    let out = ws
+        .ok(
+            "edit_file",
+            json!({"path": "t.txt", "old_text": "    x = 1\n    y = 2", "new_text": "    x = 5\n    y = 2"}),
+        )
+        .await;
+    assert_eq!(ws.read("t.txt"), "def:\n    x = 5\n    y = 2\n");
+    assert!(
+        out.content.contains(
+            "old_text matched lines 2–3 only after adjusting whitespace (trailing whitespace \
+             ignored). Check the diff."
+        ),
+        "{}",
+        out.content
+    );
+    assert!(!out.content.contains("re-indented"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn edit_reindents_in_a_crlf_file() {
+    let ws = Ws::new();
+    ws.write(
+        "w.txt",
+        "class A:\r\n    def f(self):\r\n        return 1\r\nend\r\n",
+    );
+    ws.ok("read_file", json!({"path": "w.txt"})).await;
+    let out = ws
+        .ok(
+            "edit_file",
+            json!({
+                "path": "w.txt",
+                "old_text": "def f(self):\n    return 1\n",
+                "new_text": "def f(self):\n    return 2\n",
+            }),
+        )
+        .await;
+    assert_eq!(
+        ws.read("w.txt"),
+        "class A:\r\n    def f(self):\r\n        return 2\r\nend\r\n"
+    );
+    assert!(
+        out.content.contains("(indentation `none` → `4 spaces`)"),
+        "{}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn edit_refuses_ambiguous_or_unsafe_whitespace_matches() {
+    let ws = Ws::new();
+    let cases = [
+        // Two places match once whitespace is ignored.
+        (
+            "two.txt",
+            "a:\n    x = 1\n    y = 2\nb:\n    x = 1\n    y = 2\n",
+            json!({"old_text": "x = 1\ny = 2", "new_text": "x = 1\ny = 3"}),
+            "whitespace_ambiguous",
+            "Ignoring whitespace it matches 2 places (lines 2–3, 5–6), so nothing was changed.",
+        ),
+        // Only the method matches with a consistent shift, but either could be meant.
+        (
+            "align.txt",
+            "def a():\n    return f(1,\n             2)\n\nclass C:\n    def a(self):\n        \
+             return f(1,\n            2)\n",
+            json!({"old_text": "  return f(1,\n      2)", "new_text": "  return f(1,\n      3)"}),
+            "whitespace_ambiguous",
+            "matches 2 places (lines 2–3, 7–8)",
+        ),
+        // A new_text line indented less than old_text's base can't be re-indented.
+        (
+            "less.txt",
+            "list:\n        a = 1\n        b = 2\n",
+            json!({"old_text": "    a = 1\n    b = 2", "new_text": "    a = 1\n  b = 3"}),
+            "not_reindentable",
+            "It matches lines 2–3 with the indentation changed (`4 spaces` → `8 spaces`), but \
+             new_text line 2 doesn't start with old_text's indentation `4 spaces`",
+        ),
+        // Re-indenting would put spaces after the file's tabs.
+        (
+            "tabs.txt",
+            "start {\n\tif x {\n\t\ty();\n\t}\n}\n",
+            json!({
+                "old_text": "    if x {\n    \ty();\n    }",
+                "new_text": "    if x {\n    \ty();\n        w = 0;\n    }",
+            }),
+            "not_reindentable",
+            "but the file indents these lines with tabs and new_text line 3 is indented further \
+             with spaces, so re-indenting it would mix them.",
+        ),
+        // Nested lines must keep the same indentation after the base: here spaces vs tabs.
+        (
+            "nested.txt",
+            "start {\n\tif x {\n\t\ty();\n\t}\n}\n",
+            json!({
+                "old_text": "    if x {\n        y();\n    }",
+                "new_text": "    if x {\n        z();\n    }",
+            }),
+            "not_reindentable",
+            "Ignoring whitespace it matches lines 2–4, but no single change of indentation turns \
+             it into those lines, which read:\n\tif x {\n\t\ty();\n\t}\n",
+        ),
+        // Changing only indentation would be shifted as well.
+        (
+            "indent.txt",
+            "list:\n        a = 1\n        b = 2\n",
+            json!({"old_text": "    a = 1\n    b = 2", "new_text": "        a = 1\n        b = 2"}),
+            "indentation_only",
+            "new_text changes only indentation",
+        ),
+    ];
+    for (name, text, mut input, reason, message) in cases {
+        ws.write(name, text);
+        ws.ok("read_file", json!({ "path": name })).await;
+        input["path"] = json!(name);
+        let out = ws.call("edit_file", input).await;
+        assert!(out.is_error, "{name}: {}", out.content);
+        assert!(out.content.contains(message), "{name}: {}", out.content);
+        assert_eq!(out.metadata["failure"], reason, "{name}");
+        assert_eq!(ws.read(name), text, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn replace_all_never_adjusts_whitespace() {
+    let ws = Ws::new();
+    let text = "start {\n\tlet x = 1;\n\tlet y = 2;\n}\n";
+    ws.write("m.txt", text);
+    ws.ok("read_file", json!({"path": "m.txt"})).await;
+    let err = ws
+        .err(
+            "edit_file",
+            json!({
+                "path": "m.txt",
+                "old_text": "    let x = 1;\n    let y = 2;",
+                "new_text": "    let x = 1;\n    let y = 3;",
+                "replace_all": true,
+            }),
+        )
+        .await;
+    assert!(
+        err.contains(
+            "Ignoring whitespace, it matches lines 2–3, which read:\n\tlet x = 1;\n\tlet y = \
+             2;\nreplace_all only replaces exact matches. Re-read"
+        ),
+        "{err}"
+    );
+    assert_eq!(ws.read("m.txt"), text);
+}
+
+#[tokio::test]
+async fn edit_not_found_shows_the_closest_lines() {
+    let ws = Ws::new();
+    ws.write(
+        "s.txt",
+        "steps:\n    one()\n    two()\n    three()\nend\n\nagain:\n    one()\n    two()\n    three()\n",
+    );
+    ws.ok("read_file", json!({"path": "s.txt"})).await;
+    let err = ws
+        .err(
+            "edit_file",
+            json!({"path": "s.txt", "old_text": "    one()\n    TWO()\n    three()", "new_text": "x"}),
+        )
+        .await;
+    assert!(
+        err.starts_with(
+            "old_text was not found in `s.txt`. The closest part of the file is lines 2–4 (2 of \
+             old_text's 3 non-blank lines appear there). Diff from old_text (-) to the file \
+             (+):\n     one()\n-    TWO()\n+    two()\n     three()\nAs close: lines 8–10.\n\
+             Re-read the file with read_file"
+        ),
+        "{err}"
+    );
+    // Nothing close: just the advice.
+    let err = ws
+        .err(
+            "edit_file",
+            json!({"path": "s.txt", "old_text": "unrelated\ntext here", "new_text": "x"}),
+        )
+        .await;
+    assert_eq!(
+        err,
+        "old_text was not found in `s.txt`. Re-read the file with read_file and copy the text \
+         exactly; whitespace and indentation must match, and line-number prefixes are not part \
+         of the file."
+    );
+}
+
+#[tokio::test]
+async fn edit_failures_carry_a_reason() {
+    let ws = Ws::new();
+    ws.write("a.txt", "x = 1\nx = 1\n");
+    ws.write("unread.txt", "hello\n");
+    ws.write("latin1.txt", b"caf\xe9\n");
+    ws.write("t.txt", "k:\n    a  \n    b\n");
+    std::fs::create_dir_all(ws.path("dir")).unwrap();
+    for p in ["a.txt", "latin1.txt", "t.txt"] {
+        ws.ok("read_file", json!({ "path": p })).await;
+    }
+    ws.ok(
+        "write_file",
+        json!({"path": "nul.txt", "content": "a\u{0}b\n"}),
+    )
+    .await;
+    let cases = [
+        (json!({"path": "a.txt"}), "bad_input", None),
+        (
+            json!({"path": "a.txt", "old_text": "", "new_text": "y"}),
+            "empty_old_text",
+            None,
+        ),
+        (
+            json!({"path": "a.txt", "old_text": "y", "new_text": "y"}),
+            "identical",
+            None,
+        ),
+        (
+            json!({"path": "../x", "old_text": "a", "new_text": "b"}),
+            "bad_path",
+            None,
+        ),
+        (
+            json!({"path": "dir", "old_text": "a", "new_text": "b"}),
+            "is_dir",
+            Some("dir"),
+        ),
+        (
+            json!({"path": "missing.txt", "old_text": "a", "new_text": "b"}),
+            "missing",
+            Some("missing.txt"),
+        ),
+        (
+            json!({"path": "unread.txt", "old_text": "hello", "new_text": "b"}),
+            "unread_or_stale",
+            Some("unread.txt"),
+        ),
+        (
+            json!({"path": "nul.txt", "old_text": "a", "new_text": "b"}),
+            "binary",
+            Some("nul.txt"),
+        ),
+        (
+            json!({"path": "latin1.txt", "old_text": "caf", "new_text": "b"}),
+            "not_utf8",
+            Some("latin1.txt"),
+        ),
+        (
+            json!({"path": "a.txt", "old_text": "nope", "new_text": "b"}),
+            "not_found",
+            Some("a.txt"),
+        ),
+        (
+            json!({"path": "a.txt", "old_text": "x = 1", "new_text": "b"}),
+            "not_unique",
+            Some("a.txt"),
+        ),
+        // Matches once trailing whitespace is ignored, but changes nothing.
+        (
+            json!({"path": "t.txt", "old_text": "    a\n    b", "new_text": "    a  \n    b"}),
+            "identical",
+            Some("t.txt"),
+        ),
+    ];
+    for (input, reason, path) in cases {
+        let out = ws.call("edit_file", input.clone()).await;
+        assert!(out.is_error, "{input}: {}", out.content);
+        assert_eq!(out.metadata["failure"], reason, "{input}: {}", out.content);
+        assert_eq!(
+            out.metadata.get("path").and_then(Value::as_str),
+            path,
+            "{input}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn edit_write_failure_carries_a_reason() {
+    use std::os::unix::fs::PermissionsExt;
+    let ws = Ws::new();
+    ws.write("ro.txt", "a\n");
+    ws.ok("read_file", json!({"path": "ro.txt"})).await;
+    std::fs::set_permissions(ws.path("ro.txt"), std::fs::Permissions::from_mode(0o444)).unwrap();
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open(ws.path("ro.txt"))
+        .is_ok()
+    {
+        return; // Running as root: read-only files are still writable.
+    }
+    let out = ws
+        .call(
+            "edit_file",
+            json!({"path": "ro.txt", "old_text": "a", "new_text": "b"}),
+        )
+        .await;
+    assert!(out.content.contains("Could not write"), "{}", out.content);
+    assert_eq!(out.metadata["failure"], "write_failed");
+    assert_eq!(out.metadata["path"], "ro.txt");
+}
+
+#[tokio::test]
+async fn edit_hints_stay_fast_on_big_files() {
+    let ws = Ws::new();
+    let text: String = (0..20_000)
+        .map(|i| format!("    entry {i} = value {}\n", i % 7))
+        .collect();
+    ws.ok("write_file", json!({"path": "big.txt", "content": text}))
+        .await;
+    let start = std::time::Instant::now();
+    let err = ws
+        .err(
+            "edit_file",
+            json!({
+                "path": "big.txt",
+                "old_text": "    entry 19990 = value 5\n    entry 19991 = CHANGED\n    entry 19992 = value 0\n",
+                "new_text": "x",
+            }),
+        )
+        .await;
+    assert!(
+        err.contains("The closest part of the file is lines 19991–19993"),
+        "{err}"
+    );
+    let out = ws
+        .ok(
+            "edit_file",
+            json!({
+                "path": "big.txt",
+                "old_text": "entry 19998 = value 6\nentry 19999 = value 0\n",
+                "new_text": "entry 19998 = six\nentry 19999 = value 0\n",
+            }),
+        )
+        .await;
+    assert!(out.content.contains("lines 19999–20000"), "{}", out.content);
+    assert!(ws.read("big.txt").ends_with(
+        "    entry 19997 = value 5\n    entry 19998 = six\n    entry 19999 = value 0\n"
+    ));
+    let took = start.elapsed();
+    assert!(took < Duration::from_secs(2), "took {took:?}");
+}
+
+#[tokio::test]
+async fn edit_search_is_linear_on_repetitive_files() {
+    // 100k windows of `x` lines each agree with old_text up to its last line, so
+    // comparing old_text with each window in turn takes 10^10 line comparisons.
+    let ws = Ws::new();
+    let (lines, n) = (200_000, 100_000);
+    let mut text = "  x\n".repeat(lines);
+    text.push_str("  y\n");
+    ws.ok("write_file", json!({"path": "big.txt", "content": text}))
+        .await;
+    let start = std::time::Instant::now();
+    let mut old_text = "x\n".repeat(n - 1);
+    old_text.push('y');
+    let new_text = old_text.replace('y', "z");
+    let out = ws
+        .ok(
+            "edit_file",
+            json!({"path": "big.txt", "old_text": old_text, "new_text": new_text}),
+        )
+        .await;
+    assert!(out.content.contains("(+1 -1)"), "{}", out.content);
+    assert!(ws.read("big.txt").ends_with("  x\n  x\n  z\n"));
+    // Nearly matching everywhere, but not at all: the hint is cheap too.
+    let mut old_text = "x\n".repeat(n - 1);
+    old_text.push('q');
+    let err = ws
+        .err(
+            "edit_file",
+            json!({"path": "big.txt", "old_text": old_text, "new_text": "x"}),
+        )
+        .await;
+    assert!(
+        err.contains("The closest part of the file is lines"),
+        "{err}"
+    );
+    let took = start.elapsed();
+    assert!(took < Duration::from_secs(5), "took {took:?}");
+}
+
+#[tokio::test]
+async fn cancelled_edits_write_nothing() {
+    let ws = Ws::new();
+    let text = "a:\n        x = 1\n        y = 2\n";
+    ws.write("c.txt", text);
+    ws.ok("read_file", json!({"path": "c.txt"})).await;
+    let mut cx = ws.cx.clone();
+    cx.cancel = ch_kernel::reexports::CancellationToken::new();
+    cx.cancel.cancel();
+    // An exact match, then one found by the whitespace fallback.
+    for (old_text, new_text) in [
+        ("x = 1", "x = 2"),
+        ("    x = 1\n    y = 2", "    x = 1\n    y = 3"),
+    ] {
+        let out = ws
+            .tool("edit_file")
+            .call(
+                json!({"path": "c.txt", "old_text": old_text, "new_text": new_text}),
+                &cx,
+            )
+            .await;
+        assert_eq!(out.content, "Cancelled.");
+        assert_eq!(out.metadata["failure"], "cancelled");
+        assert_eq!(ws.read("c.txt"), text);
+    }
+}
+
 // --------------------------------------------------------------- safety integration
 
 #[tokio::test]
