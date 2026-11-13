@@ -20,7 +20,7 @@
 
 mod capture;
 mod executor;
-mod group;
+pub mod group;
 
 use std::sync::Arc;
 
