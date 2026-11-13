@@ -55,6 +55,11 @@ pub struct Cli {
     #[arg(long)]
     pub trust_project: bool,
 
+    /// Start the project's MCP servers (from `.mcp.json` or `.ch/config.toml`) for this
+    /// run without asking. `--trust-project` doesn't start them.
+    #[arg(long)]
+    pub trust_project_servers: bool,
+
     /// Approver for `-p`: what happens when a call needs approval.
     #[arg(long, value_enum, default_value_t = ApproverArg::AutoDeny)]
     pub approver: ApproverArg,

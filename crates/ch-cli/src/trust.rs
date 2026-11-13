@@ -213,6 +213,14 @@ pub fn take_list(table: &mut Table, path: &str) -> Option<Vec<Value>> {
     }
 }
 
+fn server_key(workspace: &Path, source: &Path, name: &str) -> (String, String, String) {
+    (
+        workspace.to_string_lossy().to_string(),
+        source.to_string_lossy().to_string(),
+        name.to_string(),
+    )
+}
+
 /// The projects whose restricted settings the user trusted, in `<ch home>/trusted-projects.toml`.
 #[derive(Debug, Clone)]
 pub struct TrustStore {
@@ -223,6 +231,20 @@ pub struct TrustStore {
 struct TrustFile {
     #[serde(default, rename = "project")]
     projects: Vec<TrustEntry>,
+    /// One per project MCP server or plugin, apart from the settings' record, so
+    /// trusting one never replaces another (ADR 0006 §8).
+    #[serde(default, rename = "server", skip_serializing_if = "Vec::is_empty")]
+    servers: Vec<ServerEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ServerEntry {
+    path: String,
+    /// The file the entry is in (`.mcp.json`, `.ch/config.toml`).
+    file: String,
+    name: String,
+    /// The entry's trust hash (`ch_mcp_bridge::launch::trust_hash`).
+    hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -277,10 +299,58 @@ impl TrustStore {
             path,
             settings: hash.to_string(),
         });
+        self.write(&file)
+    }
+
+    /// Whether the server `name` from `source` (a file in `workspace`) is trusted with
+    /// exactly this `hash`. An unreadable store counts as "not trusted".
+    pub fn is_server_trusted(
+        &self,
+        workspace: &Path,
+        source: &Path,
+        name: &str,
+        hash: &str,
+    ) -> bool {
+        let key = server_key(workspace, source, name);
+        match self.read() {
+            Ok(file) => file.servers.iter().any(|e| {
+                (e.path.as_str(), e.file.as_str(), e.name.as_str()) == (&key.0, &key.1, &key.2)
+                    && e.hash == hash
+            }),
+            Err(e) => {
+                tracing::warn!("{e:#}");
+                false
+            }
+        }
+    }
+
+    /// Records trust in one server, replacing an earlier record for the same workspace,
+    /// file and name.
+    pub fn trust_server(
+        &self,
+        workspace: &Path,
+        source: &Path,
+        name: &str,
+        hash: &str,
+    ) -> anyhow::Result<()> {
+        let mut file = self.read()?;
+        let (path, src, name) = server_key(workspace, source, name);
+        file.servers
+            .retain(|e| !(e.path == path && e.file == src && e.name == name));
+        file.servers.push(ServerEntry {
+            path,
+            file: src,
+            name,
+            hash: hash.to_string(),
+        });
+        self.write(&file)
+    }
+
+    fn write(&self, file: &TrustFile) -> anyhow::Result<()> {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
-        let body = toml::to_string(&file)?;
+        let body = toml::to_string(file)?;
         let text = format!(
             "# Projects whose .ch/config.toml settings you trusted. Managed by ch.\n\n{body}"
         );
@@ -523,5 +593,31 @@ mod tests {
         store.trust(ws, "h2").unwrap();
         assert!(store.is_trusted(ws, "h2"));
         assert!(!store.is_trusted(ws, "h1"));
+    }
+
+    #[test]
+    fn server_records_are_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TrustStore::new(dir.path());
+        let ws = Path::new("/work/proj");
+        let json = ws.join(".mcp.json");
+        let toml = ws.join(".ch/config.toml");
+        store.trust(ws, "settings").unwrap();
+        store.trust_server(ws, &json, "gh", "a").unwrap();
+        store.trust_server(ws, &json, "fs", "b").unwrap();
+        assert!(store.is_server_trusted(ws, &json, "gh", "a"));
+        assert!(
+            !store.is_server_trusted(ws, &toml, "gh", "a"),
+            "keyed by file"
+        );
+        assert!(!store.is_server_trusted(ws, &json, "gh", "b"));
+        // Trusting the settings again keeps the servers, and the other way round.
+        store.trust(ws, "settings2").unwrap();
+        assert!(store.is_server_trusted(ws, &json, "fs", "b"));
+        store.trust_server(ws, &json, "gh", "c").unwrap();
+        assert!(store.is_trusted(ws, "settings2"));
+        assert!(store.is_server_trusted(ws, &json, "gh", "c"));
+        assert!(!store.is_server_trusted(ws, &json, "gh", "a"), "replaced");
+        assert!(store.is_server_trusted(ws, &json, "fs", "b"));
     }
 }

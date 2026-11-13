@@ -29,7 +29,7 @@ The sandbox wraps the `Executor`, so it covers `bash` and any later tool that ru
 | Requirement | What it takes over from the agent |
 |---|---|
 | Only the workspace is mounted; no home directory | Bash reading files outside the workspace (`cat ~/.ssh/id_rsa`) |
-| `.git/config`, `.git/hooks/` and `.ch/` are mounted read-only | Nothing today; closes the escape path described below |
+| `.git/config`, `.git/hooks/`, `.ch/` and `.mcp.json` are mounted read-only | Nothing today; closes the escape path described below |
 | A clean environment: no provider API keys or other secrets | `printenv` showing keys to the model |
 | No git credentials (SSH keys, credential helpers, tokens) | The `git push` deny rule |
 | Network egress blocked, or limited to an allowlist | The `curl \| sh` deny rule, and data leaving through commands |

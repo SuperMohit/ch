@@ -166,9 +166,17 @@ soft = 0.60
 hard = 0.85
 recent = 0.30
 
+[[mcp_servers]]                  # handled by the mcp-bridge plugin; also read from .mcp.json
+name = "github"                  # tools become mcp__github__<tool>
+command = "github-mcp-server"
+args = ["stdio"]
+env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }   # the only variables it gets besides PATH, HOME, ...
+read_only_tools = ["get_issue"]  # exact names; the server's own hints are ignored
+
 [[mcp_servers]]
-name = "github"
-command = "github-mcp"
+name = "docs"
+url = "https://docs.example.com/mcp"
+headers = { Authorization = "Bearer ${DOCS_TOKEN}" }
 
 [[hooks]]                        # handled by the hooks-shell plugin
 event = "post_tool"
