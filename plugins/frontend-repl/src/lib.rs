@@ -52,7 +52,7 @@ pub const PLUGIN_ID: &str = "frontend-repl";
 
 /// `[plugins.frontend-repl]`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ReplConfig {
     /// History file; `~` is expanded. Defaults to `<ch home>/history`.
     pub history_file: Option<String>,

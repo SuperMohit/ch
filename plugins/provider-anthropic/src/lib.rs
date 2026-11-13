@@ -35,7 +35,7 @@ const OFFICIAL_HOST: &str = "api.anthropic.com";
 
 /// `[plugins.provider-anthropic]`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AnthropicConfig {
     /// Environment variable holding the API key. Read on each call, not at startup.
     pub api_key_env: String,

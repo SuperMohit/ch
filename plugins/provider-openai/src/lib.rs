@@ -28,7 +28,7 @@ const OFFICIAL_HOST: &str = "api.openai.com";
 
 /// `[plugins.provider-openai]`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct OpenAiConfig {
     /// Environment variable holding the API key. Read on each call. May be unset when
     /// `base_url` is not api.openai.com (local vLLM/SGLang servers).

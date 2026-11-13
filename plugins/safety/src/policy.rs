@@ -55,7 +55,7 @@ impl Mode {
 
 /// `[plugins.safety]`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SafetyConfig {
     pub mode: Mode,
     /// Rules that run without asking (`"edit_file"`, `"bash:npm test *"`).
