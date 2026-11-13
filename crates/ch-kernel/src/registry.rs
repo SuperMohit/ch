@@ -1,5 +1,6 @@
 //! Collects what plugins register and validates it.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -96,15 +97,24 @@ impl RegistryBuilder {
                 bail!("two plugins have the id `{}`", m.id);
             }
         }
+        let known = || {
+            manifests
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         for id in kcfg.plugins.enable.iter().chain(&kcfg.plugins.disable) {
             if !seen.contains(id) {
+                bail!("config mentions unknown plugin `{id}` (known: {})", known());
+            }
+        }
+        for (id, _) in config.plugin_tables() {
+            if !seen.contains(id) {
                 bail!(
-                    "config mentions unknown plugin `{id}` (known: {})",
-                    manifests
-                        .iter()
-                        .map(|m| m.id.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    "config has a [plugins.{id}] table, but there is no plugin `{id}` \
+                     (known: {})",
+                    known()
                 );
             }
         }
@@ -179,10 +189,25 @@ impl RegistryBuilder {
                 config,
                 builder: &mut builder,
                 workspace,
+                config_read: Cell::new(false),
             };
             plugin
                 .register(&mut cx)
                 .with_context(|| format!("registering plugin `{id}`"))?;
+            // A plugin that reads its section checks its own keys; one that doesn't
+            // would ignore them all.
+            let unread = config
+                .plugin_tables()
+                .find(|(table, keys)| table == id && !keys.is_empty());
+            if let Some((_, keys)) = unread.filter(|_| !cx.config_read.get()) {
+                bail!(
+                    "plugin `{id}` has no settings, but [plugins.{id}] sets {}",
+                    keys.keys()
+                        .map(|k| format!("`{k}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
         }
 
         // Keep the status list in registration order for display.

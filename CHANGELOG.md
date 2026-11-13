@@ -6,7 +6,8 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 ### Breaking
 
-- An unknown key under `[model]`, `[agent]` or `[select]` (including `[model.pricing]` and `[model.summarizer]`) stops `ch` with an error that lists the valid keys. Before, a misspelled setting such as `agent.max_step` was silently ignored. Top-level keys and `[plugins.*]` tables are unchanged.
+- An unknown key under `[model]`, `[agent]` or `[select]` (including `[model.pricing]` and `[model.summarizer]`) stops `ch` with an error that lists the valid keys. Before, a misspelled setting such as `agent.max_step` was silently ignored. Top-level keys are unchanged.
+- An unknown key in a `[plugins.<id>]` table stops `ch` with an error naming the key, as an unknown key under `[model]` does. So does a table for a plugin that has no settings (such as `[plugins.tools-fs]`), and a table whose id is no plugin's (such as `[plugins.planing]`). Before, all three were silently ignored for most plugins, so a misspelled setting did nothing. A disabled plugin's table is checked when the plugin is enabled.
 - A `[model.summarizer]` that names a provider with no default model, such as `openai`, now needs `model.summarizer.id`, or `ch` stops at startup.
 
 ### New

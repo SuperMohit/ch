@@ -144,6 +144,7 @@ Not doing: Rust dynamic libraries (`dlopen`), because Rust has no stable ABI and
 - Config merges in this order: built-in defaults → `~/.ch/config.toml` → `.ch/config.toml` (project) → `--profile <name>` → CLI flags.
 - Project config settings that could loosen permissions, run commands, read paths or pick endpoints and credentials apply only after the user trusts them; trust is recorded per workspace for the exact values (`crates/ch-cli/src/trust.rs`, [ADR 0001](adr/0001-sandbox-and-agent-security-responsibilities.md)).
 - *(Planned, roadmap 7.2 and 7.6)* Plugins load from `~/.ch/plugins/*/plugin.toml` and `.ch/plugins/*/plugin.toml`. Project plugins need a one-time trust prompt.
+- Each plugin reads its own `[plugins.<id>]` table with `cx.config::<T>()`, and `T` rejects unknown keys (`#[serde(deny_unknown_fields)]`). The registry rejects a non-empty table for an enabled plugin that never reads its config, and a table whose id is no plugin's, so a misspelled setting is an error instead of silently doing nothing. `crates/ch-cli/tests/config.rs` checks this for every built-in plugin.
 - Project instructions are read from `CH.md` / `AGENTS.md` in the repo root, and in parent directories up to the git root.
 - Sessions are stored in `~/.ch/sessions/<project-hash>/<session-id>.jsonl`.
 

@@ -1,6 +1,7 @@
 //! The plugin trait and the registration context.
 
 use std::any::Any;
+use std::cell::Cell;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -93,6 +94,9 @@ pub struct RegisterCx<'a> {
     pub(crate) config: &'a Config,
     pub(crate) builder: &'a mut RegistryBuilder,
     pub(crate) workspace: &'a Path,
+    /// Whether [`RegisterCx::config`] was called, so a plugin with no settings can be
+    /// told apart from one that read its section.
+    pub(crate) config_read: Cell<bool>,
 }
 
 impl RegisterCx<'_> {
@@ -100,8 +104,11 @@ impl RegisterCx<'_> {
         &self.plugin_id
     }
 
-    /// This plugin's `[plugins.<id>]` section, or `T::default()`.
+    /// This plugin's `[plugins.<id>]` section, or `T::default()`. A plugin that never
+    /// calls this has no settings, and a non-empty section for it is an error. Give `T`
+    /// `#[serde(deny_unknown_fields)]`, so a misspelled key is an error too.
     pub fn config<T: DeserializeOwned + Default>(&self) -> anyhow::Result<T> {
+        self.config_read.set(true);
         self.config.plugin_section(&self.plugin_id)
     }
 

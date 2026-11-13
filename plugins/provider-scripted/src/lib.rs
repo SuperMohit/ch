@@ -315,7 +315,7 @@ impl ModelProvider for ScriptedProvider {
 
 /// `[plugins.provider-scripted]`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ScriptedConfig {
     /// Path to the JSON script; relative to the workspace.
     pub script: Option<String>,

@@ -2217,6 +2217,49 @@ fn duplicate_tool_names_are_rejected() {
     );
 }
 
+#[test]
+fn plugin_tables_must_belong_to_a_plugin_that_reads_them() {
+    let plugins = || {
+        vec![
+            plugin("quiet", |_| Ok(())),
+            plugin("reads", |cx| {
+                let _: Value = cx.config()?;
+                Ok(())
+            }),
+            Arc::new(TestPlugin {
+                manifest: PluginManifest::new("off", "test").default_enabled(false),
+                register: Box::new(|_| Ok(())),
+            }) as Arc<dyn Plugin>,
+        ]
+    };
+    let build_with = |toml: &str| build(plugins(), &Config::parse(toml).unwrap());
+
+    assert!(build_with("").is_ok());
+    // An empty table, a plugin that reads its table, and a disabled plugin's table are
+    // fine: the last is checked when the plugin is enabled.
+    assert!(build_with("[plugins.quiet]").is_ok());
+    assert!(build_with("[plugins.reads]\nx = 1").is_ok());
+    assert!(build_with("[plugins.off]\nx = 1").is_ok());
+
+    let err = build_with("[plugins.quiet]\nlevel = 2\nmode = 1")
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.contains("plugin `quiet` has no settings, but [plugins.quiet] sets `level`, `mode`"),
+        "{err}"
+    );
+    let err = build_with("[plugins.reds]\nx = 1")
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.contains("[plugins.reds] table, but there is no plugin `reds`")
+            && err.contains("known: quiet, reads, off"),
+        "{err}"
+    );
+}
+
 /// A tool whose spec is given; never called.
 struct SpecTool(ToolSpec);
 

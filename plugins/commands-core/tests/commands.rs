@@ -102,6 +102,8 @@ fn session_with(cfg: &str, store: Option<SessionStore>, extra: Vec<Arc<dyn Plugi
         fn_plugin(
             PluginManifest::new("provider-fake", "fake provider"),
             |cx| {
+                // Its settings are only there for `/config` to show.
+                let _: serde_json::Value = cx.config()?;
                 cx.add_provider(FakeProvider);
                 Ok(())
             },
