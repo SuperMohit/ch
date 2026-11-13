@@ -406,6 +406,7 @@ mod tests {
                 temperature: None,
                 thinking_budget: None,
                 purpose: "agent".into(),
+                tool_ledger: None,
             },
             summarizer: None,
             usage: UsageLog::default(),

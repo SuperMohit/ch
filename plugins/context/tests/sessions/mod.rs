@@ -14,7 +14,7 @@ use ch_kernel::reexports::{CancellationToken, async_trait};
 use ch_kernel::{
     AgentEvent, Config, ContentBlock, Cx, Message, ModelError, ModelEvent, ModelProvider,
     ModelRequest, ModelResponse, ModelStream, Plugin, PluginManifest, RegisterCx, RegistryBuilder,
-    Role, Session, SessionStore, StopReason, Tool, ToolOutput, ToolSpec, Usage,
+    Role, Session, SessionStore, StopReason, Tool, ToolChanges, ToolOutput, ToolSpec, Usage,
 };
 use ch_provider_scripted::{ScriptedProvider, estimate_request_tokens};
 use serde_json::{Value, json};
@@ -65,7 +65,19 @@ pub fn build(
     sessions: &Path,
     toml: &str,
 ) -> Session {
-    let plugins: Vec<Arc<dyn Plugin>> = vec![
+    build_with(id, provider, ws, sessions, toml, Vec::new())
+}
+
+/// [`build`] with `extra` plugins, such as tool sources.
+pub fn build_with(
+    id: &str,
+    provider: Arc<dyn Plugin>,
+    ws: &Path,
+    sessions: &Path,
+    toml: &str,
+    extra: Vec<Arc<dyn Plugin>>,
+) -> Session {
+    let mut plugins: Vec<Arc<dyn Plugin>> = vec![
         provider,
         Arc::new(BigPlugin),
         ch_safety::plugin(),
@@ -73,6 +85,7 @@ pub fn build(
         ch_planning::plugin(),
         ch_context::plugin(),
     ];
+    plugins.extend(extra);
     let config = Arc::new(Config::parse(toml).unwrap());
     let registry = RegistryBuilder::build(plugins, &config, ws).unwrap();
     Session::builder(Arc::new(registry), config)
@@ -225,8 +238,31 @@ fn sign(request: &ModelRequest, before: usize) -> String {
         .collect();
     format!(
         "sig-{}",
-        digest(&(&request.system, &request.tools, messages))
+        digest(&(&request.system, compared_tools(request, before), messages))
     )
+}
+
+/// The tool definitions a block written after `request.messages[..before]` is checked
+/// against. With mid-conversation tool changes, a deferred tool counts only once a
+/// `ToolsChanged` block in those messages announced it, so appending one is safe; every
+/// other definition counts, in order, withdrawn or not.
+fn compared_tools(request: &ModelRequest, before: usize) -> Vec<ToolSpec> {
+    let Some(ledger) = &request.tool_ledger else {
+        return request.tools.clone();
+    };
+    let announced: HashSet<&str> = (request.messages[..before].iter())
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::ToolsChanged { added, .. } => Some(added),
+            _ => None,
+        })
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    (ledger.iter())
+        .filter(|e| !e.deferred || announced.contains(e.spec.name.as_str()))
+        .map(|e| e.spec.clone())
+        .collect()
 }
 
 impl Signing {
@@ -389,6 +425,11 @@ impl ModelProvider for Signed {
     fn default_model(&self) -> Option<&str> {
         Some("scripted")
     }
+
+    // Like Anthropic's API for a model with signed thinking.
+    fn tool_changes(&self, _model: &str) -> ToolChanges {
+        ToolChanges::Native
+    }
 }
 
 pub struct SignedPlugin(pub Signed);
@@ -405,11 +446,23 @@ impl Plugin for SignedPlugin {
 
 /// A session over `provider` under `[plugins.context]` `toml` (`staged` by default).
 pub fn signed_session(provider: &Signed, d: &Dirs, id: &str, toml: &str) -> Session {
-    build(
+    signed_session_with(provider, d, id, toml, Vec::new())
+}
+
+/// [`signed_session`] with `extra` plugins.
+pub fn signed_session_with(
+    provider: &Signed,
+    d: &Dirs,
+    id: &str,
+    toml: &str,
+    extra: Vec<Arc<dyn Plugin>>,
+) -> Session {
+    build_with(
         id,
         Arc::new(SignedPlugin(provider.clone())),
         &d.ws,
         &d.sessions,
         &format!("[model]\nprovider = \"signed\"\nmax_output_tokens = 2000\n{toml}"),
+        extra,
     )
 }

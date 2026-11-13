@@ -408,6 +408,7 @@ fn plain(model: &str, agent: &ModelRequest, text: String) -> ModelRequest {
         temperature: agent.temperature,
         thinking_budget: None,
         purpose: PURPOSE.into(),
+        tool_ledger: None,
     }
 }
 
@@ -491,6 +492,10 @@ fn entries(message: &Message, first: bool) -> String {
             ContentBlock::ToolResult { content, .. } => {
                 ("[tool result]".to_string(), content.clone())
             }
+            ContentBlock::ToolsChanged { added, removed } => (
+                "[harness]".to_string(),
+                ch_kernel::ledger::note(added, removed),
+            ),
             ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => continue,
         };
         out.push_str(&label);
@@ -603,6 +608,43 @@ mod tests {
             }],
             model: "m".into(),
             merged: false,
+        }
+    }
+
+    #[test]
+    fn a_transcript_shows_tool_changes_as_harness_entries() {
+        let span = [Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolsChanged {
+                added: vec!["mcp__gh__a".into()],
+                removed: Vec::new(),
+            }],
+        }];
+        let req = transcript(
+            "m",
+            &dummy(),
+            &Message::user("task"),
+            &span,
+            "sum up".into(),
+        );
+        let text = req.messages[0].text();
+        assert!(
+            text.contains("[harness] Tools now available: mcp__gh__a."),
+            "{text}"
+        );
+    }
+
+    fn dummy() -> ModelRequest {
+        ModelRequest {
+            model: "m".into(),
+            system: Vec::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            max_tokens: 100,
+            temperature: None,
+            thinking_budget: None,
+            purpose: "agent".into(),
+            tool_ledger: None,
         }
     }
 
@@ -774,6 +816,7 @@ mod tests {
                 temperature: None,
                 thinking_budget: None,
                 purpose: "agent".into(),
+                tool_ledger: None,
             },
             &first,
             &[],

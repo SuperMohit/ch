@@ -5,7 +5,7 @@
 //! testable.
 
 use ch_kernel::util::{first_line, printable, terminal_text};
-use ch_kernel::{AgentEvent, CompactionKind};
+use ch_kernel::{AgentEvent, CompactionKind, SourceStatus};
 
 use crate::format::{dim, red, tool_end_lines, tool_start_line, yellow};
 use crate::markdown::MarkdownLines;
@@ -152,6 +152,32 @@ impl TurnView {
                 )));
                 self.last_started = None;
             }
+            AgentEvent::ToolsChanged { added, removed } => {
+                self.end_text(&mut out);
+                out.push(Action::Write(format!(
+                    "{}\n",
+                    dim(&format!(
+                        "  · tools: {}",
+                        tools_changed_text(added, removed)
+                    ))
+                )));
+                self.last_started = None;
+            }
+            AgentEvent::ToolSource { source, status } => {
+                let line = match status {
+                    SourceStatus::Failed { reason } => Some(format!("{source} failed: {reason}")),
+                    SourceStatus::Exited { reason } => Some(format!("{source} exited: {reason}")),
+                    _ => None,
+                };
+                if let Some(line) = line {
+                    self.end_text(&mut out);
+                    out.push(Action::Write(format!(
+                        "{}\n",
+                        yellow(&format!("⚠ {}", terminal_text(first_line(&line))))
+                    )));
+                    self.last_started = None;
+                }
+            }
             AgentEvent::ContextCompacted {
                 kind,
                 tokens_before,
@@ -275,6 +301,25 @@ fn note_line(source: &str, text: &str) -> String {
         printable(source),
         terminal_text(first)
     ))
+}
+
+/// `+ a, b · − c`, safe to print.
+fn tools_changed_text(added: &[String], removed: &[String]) -> String {
+    let list = |names: &[String]| {
+        names
+            .iter()
+            .map(|n| printable(n))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut parts = Vec::new();
+    if !added.is_empty() {
+        parts.push(format!("+ {}", list(added)));
+    }
+    if !removed.is_empty() {
+        parts.push(format!("− {}", list(removed)));
+    }
+    parts.join(" · ")
 }
 
 #[cfg(test)]
@@ -445,6 +490,37 @@ mod tests {
             screen(&actions),
             "  · diagnostics: 2 warnings (+2 lines)\n⚠ could not save\n"
         );
+    }
+
+    #[test]
+    fn tool_changes_and_failed_sources_get_a_line() {
+        let actions = run(&[
+            AgentEvent::ToolsChanged {
+                added: vec!["mcp__gh__a".into(), "mcp__gh__b".into()],
+                removed: vec!["mcp__gh__c\u{1b}[2J".into()],
+            },
+            AgentEvent::ToolSource {
+                source: "mcp:gh".into(),
+                status: SourceStatus::Ready { tools: 2 },
+            },
+            AgentEvent::ToolSource {
+                source: "mcp:db".into(),
+                status: SourceStatus::Failed {
+                    reason: "exited with status 127\nnpx: not found".into(),
+                },
+            },
+        ]);
+        let shown = screen(&actions);
+        assert!(!shown.contains("\u{1b}[2J"), "{shown:?}");
+        assert!(
+            shown.contains("  · tools: + mcp__gh__a, mcp__gh__b · − mcp__gh__c"),
+            "{shown}"
+        );
+        assert!(
+            shown.ends_with("⚠ mcp:db failed: exited with status 127\n"),
+            "{shown}"
+        );
+        assert!(!shown.contains("mcp:gh"), "{shown}");
     }
 
     #[test]

@@ -8,10 +8,11 @@ use crate::config::Config;
 use crate::context::UsageLog;
 use crate::events::EventBus;
 use crate::history::History;
+use crate::ledger::ToolLedger;
 use crate::registry::Registry;
 use crate::store::{SessionMeta, SessionSnapshot, SessionStore};
 use crate::tokens::TokenCalibrator;
-use crate::tool::Tool;
+use crate::tool_source::Catalog;
 use crate::types::Usage;
 
 use super::{CancelHandle, Session};
@@ -116,17 +117,17 @@ impl SessionBuilder {
         let executor = registry.executor(kcfg.select.executor.as_deref())?;
         let approver_id = self.approver.or(kcfg.select.approver.clone());
         let approver = registry.approver(approver_id.as_deref())?;
-        let tools: HashMap<String, Arc<dyn Tool>> = registry
-            .tools
-            .iter()
-            .map(|(_, t)| (t.spec().name, t.clone()))
-            .collect();
-        let tool_specs = Arc::new(registry.tool_specs());
+        let catalog = Arc::new(Catalog::new(
+            (registry.tools.iter())
+                .map(|(_, t)| (t.spec(), t.clone()))
+                .collect(),
+        ));
+        let sources = registry.sources.iter().map(|(_, s)| s.clone()).collect();
         let hooks = registry.hooks.iter().map(|(_, h)| h.clone()).collect();
         let workspace = Arc::new(self.workspace);
 
         let now = Utc::now();
-        let (id, history, usage, cost, created_at, model, turn) = match self.restore {
+        let (id, history, usage, cost, created_at, model, turn, prompt) = match self.restore {
             Some(snap) => (
                 snap.meta.id.clone(),
                 snap.history,
@@ -135,6 +136,7 @@ impl SessionBuilder {
                 snap.meta.created_at,
                 restored_model(&snap.meta, provider.id(), &configured_model),
                 snap.meta.turns,
+                snap.prompt,
             ),
             None => (
                 self.id.unwrap_or_else(new_session_id),
@@ -144,12 +146,13 @@ impl SessionBuilder {
                 now,
                 configured_model.clone(),
                 0,
+                None,
             ),
         };
         let model = self.model.unwrap_or(model);
         let lock = self.store.as_ref().map(|s| s.lock(&id)).transpose()?;
 
-        Ok(Session {
+        let mut session = Session {
             id,
             registry,
             config: self.config,
@@ -165,8 +168,13 @@ impl SessionBuilder {
             context_usage: UsageLog::default(),
             executor,
             approver,
-            tools,
-            tool_specs,
+            catalog,
+            sources,
+            source_tasks: HashMap::new(),
+            ledger: ToolLedger::default(),
+            system: None,
+            tool_specs: Arc::default(),
+            tool_warnings: HashSet::new(),
             hooks,
             cancel: CancelHandle::default(),
             turn,
@@ -180,7 +188,9 @@ impl SessionBuilder {
             sink_tasks: Vec::new(),
             started: false,
             ended: false,
-        })
+        };
+        session.restore_prompt(prompt);
+        Ok(session)
     }
 }
 

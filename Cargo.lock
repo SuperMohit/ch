@@ -263,8 +263,10 @@ dependencies = [
  "anyhow",
  "ch-kernel",
  "ch-planning",
+ "ch-provider-anthropic",
  "ch-provider-scripted",
  "ch-safety",
+ "ch-testkit",
  "ch-tools-fs",
  "libc",
  "serde",
@@ -382,6 +384,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "ch-testkit",
  "chrono",
  "futures",
  "nix",
