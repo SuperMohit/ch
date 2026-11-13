@@ -3,11 +3,14 @@
 //! into the file's lines there, the edit is applied re-indented. Otherwise nothing is
 //! changed and the refusal says why.
 
+use std::time::{Duration, Instant};
+
 use ch_kernel::reexports::CancellationToken;
+use similar::{Algorithm, DiffOp, capture_diff_slices_deadline};
 
 use super::hints::{self, ADVICE};
 use super::lines::{
-    as_lines, body, describe_chars, describe_indent, find_all, ids, indent, lines_label,
+    as_lines, body, describe_chars, describe_indent, ending, find_all, ids, indent, lines_label,
     places_label,
 };
 
@@ -34,23 +37,7 @@ pub(super) fn edit(
     cancel: &CancellationToken,
 ) -> Result<(String, String), Refusal> {
     let lines: Vec<&str> = file.split_inclusive('\n').collect();
-    let result = fallback(rel, file, &lines, old_text, new_text, replace_all, cancel);
-    if cancel.is_cancelled() {
-        return Err(Refusal::new("cancelled", "Cancelled.".into()));
-    }
-    result
-}
-
-/// [`edit`], before the last check for cancellation.
-fn fallback(
-    rel: &str,
-    file: &str,
-    lines: &[&str],
-    old_text: &str,
-    new_text: &str,
-    replace_all: bool,
-    cancel: &CancellationToken,
-) -> Result<(String, String), Refusal> {
+    let lines = &lines[..];
     let not_found = || {
         let message = hints::not_found(rel, lines, old_text, replace_all, cancel);
         Refusal::new("not_found", message)
@@ -160,9 +147,10 @@ impl<'a> Pattern<'a> {
             .then_some(target)
     }
 
-    /// Replaces the lines `new_text` changes in the window at `start` of `lines` (the
-    /// file's lines with their endings), re-indented the same way and with the file's
-    /// line endings. Lines it leaves as they were keep their bytes.
+    /// Replaces the window at `start` of `lines` (the file's lines with their endings)
+    /// with `new_text`, re-indented the same way. Lines `new_text` leaves as they were in
+    /// old_text keep the file's bytes, and a changed line keeps the line ending of the
+    /// line it replaces.
     fn apply(
         &self,
         rel: &str,
@@ -182,72 +170,74 @@ impl<'a> Pattern<'a> {
             describe_indent(target)
         );
         let refuse = |reason, why: String| {
-            Err(Refusal::new(
+            Refusal::new(
                 reason,
                 format!(
                     "old_text was not found in `{rel}` exactly. It matches {place} with the \
                      indentation changed ({shift}), but {why}"
                 ),
-            ))
+            )
         };
         let new_lines = if new_text.is_empty() {
             Vec::new()
         } else {
             as_lines(new_text)
         };
-        // A new_text that only changes indentation sets it; shifting it as well would be
-        // wrong.
-        if swap
-            && new_lines.len() == n
+        if new_lines.len() == n
             && self
                 .raw
                 .iter()
                 .zip(&new_lines)
-                .all(|(o, l)| o.trim() == l.trim())
+                .all(|(o, l)| o.trim_end() == l.trim_end())
         {
-            return refuse(
+            return Err(Refusal::new(
+                "identical",
+                "Apart from trailing whitespace, new_text is the same as old_text, so nothing \
+                 would change. Put the changed text in new_text."
+                    .into(),
+            ));
+        }
+        // A new_text that only changes indentation (blank lines aside) sets it; shifting
+        // it as well would be wrong.
+        let (old_kept, new_kept) = (non_blank(&self.raw), non_blank(&new_lines));
+        if swap
+            && old_kept.len() == new_kept.len()
+            && old_kept
+                .iter()
+                .zip(&new_kept)
+                .all(|(o, l)| o.trim() == l.trim())
+            && old_kept
+                .iter()
+                .zip(&new_kept)
+                .any(|(o, l)| indent(o) != indent(l))
+        {
+            return Err(refuse(
                 "indentation_only",
                 "new_text changes only indentation, so it isn't clear which indentation you \
                  want. Copy old_text with the file's indentation exactly as read_file shows \
                  it, and put the indentation you want in new_text."
                     .into(),
-            );
+            ));
         }
 
-        // Lines at either end that new_text leaves as they were stay as they are in the
-        // file; only the lines between are replaced.
-        let kept_head = self
-            .raw
-            .iter()
-            .zip(&new_lines)
-            .take_while(|(o, l)| o == l)
-            .count();
-        let kept_tail = self.raw[kept_head..]
-            .iter()
-            .rev()
-            .zip(new_lines[kept_head..].iter().rev())
-            .take_while(|(o, l)| o == l)
-            .count();
-        // Re-indented lines may only use whitespace the file indents with here (or
-        // anywhere, if these lines aren't indented), so tabs and spaces don't mix.
-        let allowed = indent_chars(window).or_else(|| indent_chars(lines));
-        let mut middle = Vec::new();
-        for (i, line) in new_lines
-            .iter()
-            .enumerate()
-            .take(new_lines.len() - kept_tail)
-            .skip(kept_head)
-        {
+        // Re-indented lines may only be indented further with the file's indentation
+        // here (anywhere in the file, if these lines aren't indented), so tabs and spaces
+        // don't mix and alignment spaces aren't taken for indentation.
+        let (allowed, whose) = if target.is_empty() {
+            (indent_chars(lines), "the file indents")
+        } else {
+            (Some(distinct_chars(target)), "the file indents these lines")
+        };
+        let reindent = |i: usize| -> Result<String, Refusal> {
+            let line = new_lines[i];
             if line.trim().is_empty() {
-                middle.push(String::new());
-                continue;
+                return Ok(String::new());
             }
             if !swap {
-                middle.push(line.to_string());
-                continue;
+                return Ok(line.to_string());
             }
             let Some(rest) = line.strip_prefix(self.base) else {
-                return refuse(
+                return Err(refuse(
                     "not_reindentable",
                     format!(
                         "new_text line {} doesn't start with old_text's indentation `{}`, so \
@@ -255,64 +245,88 @@ impl<'a> Pattern<'a> {
                         i + 1,
                         describe_indent(self.base)
                     ),
-                );
+                ));
             };
             if let Some(allowed) = &allowed {
-                let mut foreign: Vec<char> = Vec::new();
-                for c in indent(rest).chars() {
-                    if !allowed.contains(&c) && !foreign.contains(&c) {
-                        foreign.push(c);
-                    }
-                }
+                let foreign: Vec<char> = distinct_chars(indent(rest))
+                    .into_iter()
+                    .filter(|c| !allowed.contains(c))
+                    .collect();
                 if !foreign.is_empty() {
-                    return refuse(
+                    return Err(refuse(
                         "not_reindentable",
                         format!(
-                            "the file indents these lines with {} and new_text line {} is \
-                             indented further with {}, so re-indenting it would mix them. \
-                             Copy the lines exactly as read_file shows them and indent \
-                             new_text the same way.",
+                            "{whose} with {} and new_text line {} is indented further with \
+                             {}, so re-indenting it would mix them. Copy the lines exactly as \
+                             read_file shows them and indent new_text the same way.",
                             describe_chars(allowed),
                             i + 1,
                             describe_chars(&foreign)
                         ),
-                    );
+                    ));
                 }
             }
-            middle.push(format!("{target}{rest}"));
+            Ok(format!("{target}{rest}"))
+        };
+
+        // The window's new lines, each with its line ending ("" for the default).
+        let deadline = Instant::now() + Duration::from_millis(200);
+        let ops =
+            capture_diff_slices_deadline(Algorithm::Myers, &self.raw, &new_lines, Some(deadline));
+        let mut out: Vec<(String, &str)> = Vec::new();
+        for op in ops {
+            match op {
+                DiffOp::Equal { old_index, len, .. } => {
+                    for line in &window[old_index..old_index + len] {
+                        out.push((body(line).to_string(), ending(line)));
+                    }
+                }
+                DiffOp::Delete { .. } => {}
+                DiffOp::Insert {
+                    new_index, new_len, ..
+                } => {
+                    for i in new_index..new_index + new_len {
+                        out.push((reindent(i)?, ""));
+                    }
+                }
+                DiffOp::Replace {
+                    old_index,
+                    old_len,
+                    new_index,
+                    new_len,
+                } => {
+                    for k in 0..new_len {
+                        let end = if k < old_len {
+                            ending(window[old_index + k])
+                        } else {
+                            ""
+                        };
+                        out.push((reindent(new_index + k)?, end));
+                    }
+                }
+            }
         }
 
-        let (a, b) = (start + kept_head, start + n - kept_tail);
-        let eol = if window[0].ends_with("\r\n")
-            || (!window[0].ends_with('\n') && file.contains("\r\n"))
-        {
-            "\r\n"
-        } else {
-            "\n"
-        };
+        let eol = window
+            .iter()
+            .map(|l| ending(l))
+            .find(|e| !e.is_empty())
+            .unwrap_or(if file.contains("\r\n") { "\r\n" } else { "\n" });
+        // The window ends the file without a final line break: so does its last new line.
+        let breaks = window[n - 1].ends_with('\n');
+        let mut text = String::new();
+        for (i, (line, end)) in out.iter().enumerate() {
+            text.push_str(line);
+            if i + 1 < out.len() || breaks {
+                text.push_str(if end.is_empty() { eol } else { end });
+            }
+        }
         let offset = |i: usize| -> usize { lines[..i].iter().map(|l| l.len()).sum() };
-        let (mut from, to) = (offset(a), offset(b));
-        let text = if middle.is_empty() {
-            // Only removed lines. If they end the file without a final line break, the
-            // line before loses its break instead.
-            if a < b && a > 0 && !lines[b - 1].ends_with('\n') {
-                from -= lines[a - 1].len() - body(lines[a - 1]).len();
-            }
-            String::new()
-        } else if a == b {
-            // Only inserted lines.
-            if a > 0 && !lines[a - 1].ends_with('\n') {
-                format!("{eol}{}", middle.join(eol))
-            } else {
-                middle.iter().map(|l| format!("{l}{eol}")).collect()
-            }
-        } else {
-            let mut text = middle.join(eol);
-            if lines[b - 1].ends_with('\n') {
-                text.push_str(eol);
-            }
-            text
-        };
+        let (mut from, to) = (offset(start), offset(start + n));
+        if out.is_empty() && !breaks && start > 0 {
+            // All of it removed: the line before now ends the file, without a break.
+            from -= ending(lines[start - 1]).len();
+        }
         let edited = format!("{}{text}{}", &file[..from], &file[to..]);
 
         let trailing = self.raw.iter().zip(window).any(|(p, f)| {
@@ -346,15 +360,29 @@ impl<'a> Pattern<'a> {
 /// The whitespace characters `lines` are indented with, in order of first use; `None`
 /// if no non-blank line is indented.
 fn indent_chars(lines: &[&str]) -> Option<Vec<char>> {
+    let indents: String = lines.iter().map(|l| indent(l.trim_end())).collect();
+    let chars = distinct_chars(&indents);
+    (!chars.is_empty()).then_some(chars)
+}
+
+/// The characters of `s`, each once, in order of first use.
+fn distinct_chars(s: &str) -> Vec<char> {
     let mut chars = Vec::new();
-    for line in lines.iter().map(|l| l.trim_end()).filter(|l| !l.is_empty()) {
-        for c in indent(line).chars() {
-            if !chars.contains(&c) {
-                chars.push(c);
-            }
+    for c in s.chars() {
+        if !chars.contains(&c) {
+            chars.push(c);
         }
     }
-    (!chars.is_empty()).then_some(chars)
+    chars
+}
+
+/// The lines of `lines` that aren't blank.
+fn non_blank<'a>(lines: &[&'a str]) -> Vec<&'a str> {
+    lines
+        .iter()
+        .copied()
+        .filter(|l| !l.trim().is_empty())
+        .collect()
 }
 
 #[cfg(test)]
@@ -472,12 +500,90 @@ mod tests {
             ),
             "Intro:\n    line one  \n    line two  \n    line 3\n"
         );
-        // A form feed on a blank line survives an edit next to it.
+        // Between changed lines, and at the end.
+        let file = "Intro:\n    l1  \n    l2  \n    l3  \n";
+        assert_eq!(
+            applied(file, "  l1\n  l2\n  l3", "  L1\n  l2\n  L3"),
+            "Intro:\n    L1\n    l2  \n    L3\n"
+        );
+        assert_eq!(
+            applied(file, "  l1\n  l2\n  l3", "  L1\n  l2\n  l3"),
+            "Intro:\n    L1\n    l2  \n    l3  \n"
+        );
+        // A form feed on a blank line survives edits next to it.
         let file = "start:\n        a = 1\n\x0c\n        b = 2\n";
         assert_eq!(
             applied(file, "    a = 1\n\n    b = 2", "    a = 1\n\n    b = 3"),
             "start:\n        a = 1\n\x0c\n        b = 3\n"
         );
+        assert_eq!(
+            applied(file, "    a = 1\n\n    b = 2", "    a = 10\n\n    b = 20"),
+            "start:\n        a = 10\n\x0c\n        b = 20\n"
+        );
+    }
+
+    #[test]
+    fn replaced_lines_keep_their_line_endings() {
+        // A file with mixed endings: the replaced line keeps its CRLF, the kept one its LF.
+        assert_eq!(
+            applied("k\r\n    a\n    b\r\n", "a\nb", "a\nc"),
+            "k\r\n    a\n    c\r\n"
+        );
+    }
+
+    #[test]
+    fn alignment_spaces_are_not_indentation() {
+        // The file indents with tabs and aligns with spaces; a new line nested with spaces
+        // would mix them.
+        let file = "def f(a, b):\n\tresult = foo(a,\n\t             b)\n\tif result:\n\t\t\
+                    print(result)\n\treturn result\n";
+        let old = "    result = foo(a,\n                 b)\n    if result:";
+        let r = refused(file, old, &format!("{old}\n        log(result)"));
+        assert_eq!(r.reason, "not_reindentable");
+        assert!(
+            r.message.contains(
+                "the file indents these lines with tabs and new_text line 4 is indented \
+                 further with spaces"
+            ),
+            "{}",
+            r.message
+        );
+        let file = "f() {\n\t/*\n\t * x\n\t */\n\tcode();\n}\n";
+        let old = "    /*\n     * x\n     */\n    code();";
+        let r = refused(file, old, &format!("{old}\n        more();"));
+        assert_eq!(r.reason, "not_reindentable");
+    }
+
+    #[test]
+    fn unindented_lines_use_the_files_indentation() {
+        // old_text is indented, the lines it matches aren't: the rest of the file says
+        // what nested lines are indented with.
+        let file = "x = 1\ny = 2\nblock:\n\tz = 3\n";
+        let old = "  x = 1\n  y = 2";
+        let r = refused(file, old, "  x = 1\n  if y:\n      y = 2");
+        assert_eq!(r.reason, "not_reindentable");
+        assert!(
+            r.message
+                .contains("the file indents with tabs and new_text line 3"),
+            "{}",
+            r.message
+        );
+        assert_eq!(
+            applied(file, old, "  x = 1\n  if y:\n  \ty = 2"),
+            "x = 1\nif y:\n\ty = 2\nblock:\n\tz = 3\n"
+        );
+        // A file indented nowhere doesn't limit it.
+        assert_eq!(
+            applied("x = 1\ny = 2\n", old, "  x = 1\n  if y:\n      y = 2"),
+            "x = 1\nif y:\n    y = 2\n"
+        );
+    }
+
+    #[test]
+    fn trailing_whitespace_only_changes_are_identical() {
+        let file = "list:\n        a = 1\n        b = 2\n";
+        let r = refused(file, "    a = 1\n    b = 2", "    a = 1  \n    b = 2\n");
+        assert_eq!(r.reason, "identical");
     }
 
     #[test]
@@ -522,6 +628,15 @@ mod tests {
         let file = "list:\n        a = 1\n        b = 2\n";
         let r = refused(file, "    a = 1\n    b = 2", "        a = 1\n        b = 2");
         assert_eq!(r.reason, "indentation_only");
+        // Adding a blank line doesn't make it more than an indentation change.
+        let file = "f:\n      a()\n      b()\n";
+        let r = refused(file, "a()\nb()", "    a()\n\n    b()");
+        assert_eq!(r.reason, "indentation_only");
+        // Adding only a blank line is a change, applied.
+        assert_eq!(
+            applied(file, "a()\nb()", "a()\n\nb()"),
+            "f:\n      a()\n\n      b()\n"
+        );
         // Without a shift, new_text's indentation is used as given.
         assert_eq!(
             applied(

@@ -1,7 +1,6 @@
 //! What an `old_text` that wasn't found looks like in the file: the lines where it
 //! matches if whitespace is ignored, or the closest lines with a diff.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use ch_kernel::reexports::CancellationToken;
@@ -84,23 +83,73 @@ fn render(lines: impl Iterator<Item = String>) -> String {
 }
 
 /// The first and last line (0-based) of the first place where `needle`'s words occur
-/// in order as whole words, with any whitespace, line breaks included, between them.
+/// in order, with any whitespace (line breaks included) between them. Words are whole,
+/// except that the first may be the end of a file's word and the last the start of one,
+/// where the cut doesn't split a run of word characters (`x` is not in `max`).
 fn loose_match(lines: &[&str], needle: &str, cancel: &CancellationToken) -> Option<(usize, usize)> {
     let words: Vec<&str> = needle.split_whitespace().collect();
-    if words.is_empty() {
-        return None;
-    }
+    let (&first, &last) = (words.first()?, words.last()?);
     let mut hay = Vec::new();
     let mut line_of = Vec::new();
     for (i, line) in lines.iter().enumerate() {
+        if cancelled_at(i, cancel) {
+            return None;
+        }
         for word in line.split_whitespace() {
             hay.push(word);
             line_of.push(i);
         }
     }
-    let (pattern, text) = ids(&words, &hay);
-    let at = *find_all(&text, &pattern, cancel)?.first()?;
+    let at = match words.len() {
+        1 => hay.iter().position(|w| inside(w, first))?,
+        2 => hay
+            .windows(2)
+            .position(|w| ends_with_cut(w[0], first) && starts_with_cut(w[1], last))?,
+        n => {
+            // Where the whole middle words occur, then the cut words around them.
+            let middle = &words[1..n - 1];
+            let (pattern, text) = ids(middle, &hay);
+            let after = |s: usize| s + middle.len();
+            let s = find_all(&text, &pattern, cancel)?.into_iter().find(|&s| {
+                s >= 1
+                    && after(s) < hay.len()
+                    && ends_with_cut(hay[s - 1], first)
+                    && starts_with_cut(hay[after(s)], last)
+            })?;
+            s - 1
+        }
+    };
     Some((line_of[at], line_of[at + words.len() - 1]))
+}
+
+/// Whether a cut between `before` and `after` leaves words whole: not both are letters,
+/// digits or `_`.
+fn clean_cut(before: Option<char>, after: Option<char>) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    !(before.is_some_and(word) && after.is_some_and(word))
+}
+
+/// Whether `word` ends with `part`, cut cleanly.
+fn ends_with_cut(word: &str, part: &str) -> bool {
+    word.strip_suffix(part)
+        .is_some_and(|rest| clean_cut(rest.chars().next_back(), part.chars().next()))
+}
+
+/// Whether `word` starts with `part`, cut cleanly.
+fn starts_with_cut(word: &str, part: &str) -> bool {
+    word.strip_prefix(part)
+        .is_some_and(|rest| clean_cut(part.chars().next_back(), rest.chars().next()))
+}
+
+/// Whether `part` is in `word`, cut cleanly at both ends.
+fn inside(word: &str, part: &str) -> bool {
+    word.match_indices(part).any(|(i, _)| {
+        clean_cut(word[..i].chars().next_back(), part.chars().next())
+            && clean_cut(
+                part.chars().next_back(),
+                word[i + part.len()..].chars().next(),
+            )
+    })
 }
 
 /// The `needle.len()` file lines most like `needle`, compared without surrounding
@@ -110,22 +159,29 @@ fn loose_match(lines: &[&str], needle: &str, cancel: &CancellationToken) -> Opti
 fn closest_lines(lines: &[&str], needle: &[&str], cancel: &CancellationToken) -> Option<String> {
     let bodies: Vec<&str> = lines.iter().map(|l| l.trim_end()).collect();
     let w = needle.len().min(bodies.len());
-    // An id for each distinct non-blank line of `needle`, and how often each occurs.
-    let mut ids: HashMap<&str, usize> = HashMap::new();
-    let mut need: Vec<usize> = Vec::new();
-    for line in needle.iter().map(|l| l.trim()).filter(|l| !l.is_empty()) {
-        let id = *ids.entry(line).or_insert_with(|| {
-            need.push(0);
-            need.len() - 1
-        });
-        need[id] += 1;
-    }
-    let total: usize = need.iter().sum();
+    // Numbers for `needle`'s non-blank lines and the file's lines, compared trimmed; how
+    // often each of those lines occurs in `needle` and in the file.
+    let kept: Vec<&str> = needle
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let trimmed: Vec<&str> = bodies.iter().map(|l| l.trim()).collect();
+    let (needle_ids, file_ids) = ids(&kept, &trimmed);
+    let total = needle_ids.len();
     if w == 0 || total == 0 {
         return None;
     }
-    let line_ids: Vec<Option<usize>> = bodies.iter().map(|l| ids.get(l.trim()).copied()).collect();
-    let mut in_file = vec![0; need.len()];
+    let line_ids: Vec<Option<usize>> = file_ids
+        .iter()
+        .map(|&id| (id != u32::MAX).then_some(id as usize))
+        .collect();
+    let distinct = needle_ids.iter().max().map_or(0, |&m| m as usize + 1);
+    let mut need = vec![0; distinct];
+    for &id in &needle_ids {
+        need[id as usize] += 1;
+    }
+    let mut in_file = vec![0; distinct];
     for &id in line_ids.iter().flatten() {
         in_file[id] += 1;
     }
@@ -286,6 +342,33 @@ mod tests {
             h.contains("it matches line 2, which read:\n    x = 1\n"),
             "{h}"
         );
+    }
+
+    #[test]
+    fn loose_matches_part_of_a_line() {
+        // old_text may start or end inside a line, next to punctuation.
+        let h = hint("fn f() {\n    x = foo(a, b);\n}\n", "foo(a,  b)");
+        assert!(
+            h.contains("it matches line 2, which read:\n    x = foo(a, b);\n"),
+            "{h}"
+        );
+        let h = hint(
+            "fn f() {\n    let total = price  * qty;\n}\n",
+            "total = price * qty",
+        );
+        assert!(
+            h.contains("it matches line 2, which read:\n    let total = price  * qty;\n"),
+            "{h}"
+        );
+        // One word: inside a file's word, between punctuation.
+        let h = hint("a\n  call(x,y);\n", "\n x,y \n");
+        assert!(
+            h.contains("it matches lines 1–2, which read:\na\n  call(x,y);\n"),
+            "{h}"
+        );
+        // Not between letters.
+        let h = hint("a\n  maximum = 1\n", "\n xim \n");
+        assert_eq!(h, format!("old_text was not found in `a.rs`. {ADVICE}"));
     }
 
     #[test]

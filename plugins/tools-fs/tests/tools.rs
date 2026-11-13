@@ -886,11 +886,11 @@ async fn edit_hints_stay_fast_on_big_files() {
 
 #[tokio::test]
 async fn edit_search_is_linear_on_repetitive_files() {
-    // Every window of `x` lines agrees with old_text up to its last line, the worst case
-    // for comparing old_text with each window in turn.
+    // 100k windows of `x` lines each agree with old_text up to its last line, so
+    // comparing old_text with each window in turn takes 10^10 line comparisons.
     let ws = Ws::new();
-    let n = 200_000;
-    let mut text = "  x\n".repeat(n);
+    let (lines, n) = (200_000, 100_000);
+    let mut text = "  x\n".repeat(lines);
     text.push_str("  y\n");
     ws.ok("write_file", json!({"path": "big.txt", "content": text}))
         .await;

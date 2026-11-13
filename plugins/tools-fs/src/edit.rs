@@ -51,8 +51,9 @@ impl Tool for EditFile {
                  replaces it.\n\
                  Error modes: file not read (or only partly read) yet; file changed on disk \
                  since your last read (read it again); old_text not found (re-read and copy \
-                 exactly; a unique match that differs only in indentation is applied, \
-                 re-indented); old_text found several times (add context or use replace_all); \
+                 exactly; if it matches one place ignoring whitespace and differs there only \
+                 in indentation and trailing whitespace, it is applied re-indented); old_text \
+                 found several times (add context or use replace_all); \
                  old_text equal to new_text; missing file (use write_file to create).\n\
                  Side effects: writes the file."
                 .into(),
@@ -96,6 +97,17 @@ impl Tool for EditFile {
 
 impl EditFile {
     fn edit(&self, input: Input, cancel: &CancellationToken) -> ToolOutput {
+        self.edit_with(input, cancel, || {})
+    }
+
+    /// [`EditFile::edit`], running `before_write` just before the file is re-read and
+    /// written (tests change the file there).
+    fn edit_with(
+        &self,
+        input: Input,
+        cancel: &CancellationToken,
+        before_write: impl FnOnce(),
+    ) -> ToolOutput {
         let ctx = &self.ctx;
         if input.old_text.is_empty() {
             return failed(
@@ -234,6 +246,7 @@ impl EditFile {
         if cancel.is_cancelled() {
             return fail("cancelled", ToolOutput::error("Cancelled."));
         }
+        before_write();
         match write_checked(&path, old.as_bytes(), &new) {
             Ok(()) => {}
             Err(Unwritten::Changed) => {
@@ -303,6 +316,10 @@ fn write_checked(path: &Path, checked: &[u8], new: &str) -> Result<(), Unwritten
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use ch_safety::{FileState, PathGuard};
+
     use super::*;
 
     #[test]
@@ -325,5 +342,28 @@ mod tests {
             Err(Unwritten::Changed)
         ));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn edits_write_only_what_was_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("a.txt");
+        std::fs::write(&path, "x = 1\n").unwrap();
+        let state = Arc::new(FileState::with_root(&root));
+        state.record_read(&path, b"x = 1\n", true);
+        let ctx = FsContext::new(Arc::new(PathGuard::new(&root).unwrap()), state);
+        let input = || Input {
+            path: "a.txt".into(),
+            old_text: "x = 1".into(),
+            new_text: "x = 2".into(),
+            replace_all: false,
+        };
+        // Changed between the check and the write: kept as it is now.
+        let out = EditFile::new(ctx).edit_with(input(), &CancellationToken::new(), || {
+            std::fs::write(&path, "x = 1 # changed\n").unwrap();
+        });
+        assert_eq!(out.metadata["failure"], "changed", "{}", out.content);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x = 1 # changed\n");
     }
 }

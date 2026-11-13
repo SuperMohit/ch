@@ -65,12 +65,7 @@ pub fn result_summary(name: &str, content: &str, is_error: bool, metadata: &Valu
     }
     if let Some(diff) = metadata.get("diff").and_then(Value::as_str) {
         let (added, removed) = diff_counts(diff);
-        let adjusted = if metadata.get("whitespace_adjusted") == Some(&Value::Bool(true)) {
-            " (whitespace adjusted)"
-        } else {
-            ""
-        };
-        return format!("+{added} -{removed}{adjusted}");
+        return format!("+{added} -{removed}{}", whitespace_note(metadata));
     }
     let lines = content.lines().count();
     let lines = format!("{lines} line{}", if lines == 1 { "" } else { "s" });
@@ -80,6 +75,15 @@ pub fn result_summary(name: &str, content: &str, is_error: bool, metadata: &Valu
             format!("timed out · {lines}")
         }
         _ => lines,
+    }
+}
+
+/// ` (whitespace adjusted)` for an edit applied only after adjusting whitespace.
+fn whitespace_note(metadata: &Value) -> &'static str {
+    if metadata.get("whitespace_adjusted") == Some(&Value::Bool(true)) {
+        " (whitespace adjusted)"
+    } else {
+        ""
     }
 }
 

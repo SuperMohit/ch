@@ -22,6 +22,11 @@ pub(super) fn body(line: &str) -> &str {
     line.strip_suffix('\r').unwrap_or(line)
 }
 
+/// The line ending of `line` (`\n`, `\r\n`, or empty for a last line without one).
+pub(super) fn ending(line: &str) -> &str {
+    &line[body(line).len()..]
+}
+
 /// The leading whitespace of `line`.
 pub(super) fn indent(line: &str) -> &str {
     &line[..line.len() - line.trim_start().len()]
@@ -217,6 +222,8 @@ mod tests {
         assert_eq!(as_lines("a\r\nb\r\n"), ["a", "b"]);
         assert_eq!(as_lines("a\n\n"), ["a", ""]);
         assert_eq!(body("x \r\n"), "x ");
+        assert_eq!(ending("x \r\n"), "\r\n");
+        assert_eq!(ending("x"), "");
         assert_eq!(indent("  \tx "), "  \t");
         assert_eq!(lines_label(0, 1), "line 1");
         assert_eq!(lines_label(39, 13), "lines 40–52");
