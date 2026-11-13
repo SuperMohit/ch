@@ -278,7 +278,7 @@ The design is in [ADR 0004](adr/0004-context-management.md), with notes on where
 | Tool | Read-only | Key behavior |
 |---|---|---|
 | `read_file(path, offset, limit)` | ✓ | Line-numbered output. Records a `full_read` only when the whole file was read |
-| `edit_file(path, old_text, new_text, replace_all)` | | Exact-match string replace. Must be unique unless `replace_all`. Returns a diff. Requires a prior full read |
+| `edit_file(path, old_text, new_text, replace_all)` | | Exact-match string replace. Must be unique unless `replace_all`. Without an exact match (and without `replace_all`), a strict whitespace fallback: if `old_text`, its lines trimmed, occurs exactly once and one swap of indentation turns it into the file's lines there, the edit is applied with `new_text` re-indented the same way and only the lines it changes replaced; otherwise the error shows the file's matching or closest lines. Returns a diff. Requires a prior full read |
 | `write_file(path, content, overwrite)` | | New files freely. Overwriting needs `overwrite=true` and a prior full read |
 | `list_files(path, recursive)` | ✓ | Tree with sizes. Caps entries. Filters `.git`, `node_modules`, `.venv`, `__pycache__`, `target` |
 | `glob_files(pattern, path)` | ✓ | Files only. No match returns empty, not an error |

@@ -593,63 +593,76 @@ async fn edit_reindents_in_a_crlf_file() {
 #[tokio::test]
 async fn edit_refuses_ambiguous_or_unsafe_whitespace_matches() {
     let ws = Ws::new();
-    // Two places match once indented.
-    let two = "a:\n    x = 1\n    y = 2\nb:\n    x = 1\n    y = 2\n";
-    ws.write("two.txt", two);
-    ws.ok("read_file", json!({"path": "two.txt"})).await;
-    let out = ws
-        .call(
-            "edit_file",
-            json!({"path": "two.txt", "old_text": "x = 1\ny = 2", "new_text": "x = 1\ny = 3"}),
-        )
-        .await;
-    assert!(
-        out.content
-            .contains("With whitespace adjusted it matches 2 places (lines 2–3, 5–6)"),
-        "{}",
-        out.content
-    );
-    assert_eq!(out.metadata["failure"], "not_found");
-    assert_eq!(ws.read("two.txt"), two);
-
-    // A new_text line indented less than old_text's base can't be re-indented.
-    let less = "list:\n        a = 1\n        b = 2\n";
-    ws.write("less.txt", less);
-    ws.ok("read_file", json!({"path": "less.txt"})).await;
-    let err = ws
-        .err(
-            "edit_file",
-            json!({"path": "less.txt", "old_text": "    a = 1\n    b = 2", "new_text": "    a = 1\n  b = 2"}),
-        )
-        .await;
-    assert!(
-        err.contains(
-            "It matches lines 2–3 with the indentation changed (`4 spaces` → `8 spaces`), but \
-             new_text line 2 doesn't start with old_text's indentation `4 spaces`"
+    let cases = [
+        // Two places match once whitespace is ignored.
+        (
+            "two.txt",
+            "a:\n    x = 1\n    y = 2\nb:\n    x = 1\n    y = 2\n",
+            json!({"old_text": "x = 1\ny = 2", "new_text": "x = 1\ny = 3"}),
+            "whitespace_ambiguous",
+            "Ignoring whitespace it matches 2 places (lines 2–3, 5–6), so nothing was changed.",
         ),
-        "{err}"
-    );
-    assert_eq!(ws.read("less.txt"), less);
-
-    // Nested lines must keep the same indentation after the base: here spaces vs tabs.
-    let nested = "start {\n\tif x {\n\t\ty();\n\t}\n}\n";
-    ws.write("nested.txt", nested);
-    ws.ok("read_file", json!({"path": "nested.txt"})).await;
-    let err = ws
-        .err(
-            "edit_file",
+        // Only the method matches with a consistent shift, but either could be meant.
+        (
+            "align.txt",
+            "def a():\n    return f(1,\n             2)\n\nclass C:\n    def a(self):\n        \
+             return f(1,\n            2)\n",
+            json!({"old_text": "  return f(1,\n      2)", "new_text": "  return f(1,\n      3)"}),
+            "whitespace_ambiguous",
+            "matches 2 places (lines 2–3, 7–8)",
+        ),
+        // A new_text line indented less than old_text's base can't be re-indented.
+        (
+            "less.txt",
+            "list:\n        a = 1\n        b = 2\n",
+            json!({"old_text": "    a = 1\n    b = 2", "new_text": "    a = 1\n  b = 3"}),
+            "not_reindentable",
+            "It matches lines 2–3 with the indentation changed (`4 spaces` → `8 spaces`), but \
+             new_text line 2 doesn't start with old_text's indentation `4 spaces`",
+        ),
+        // Re-indenting would put spaces after the file's tabs.
+        (
+            "tabs.txt",
+            "start {\n\tif x {\n\t\ty();\n\t}\n}\n",
             json!({
-                "path": "nested.txt",
+                "old_text": "    if x {\n    \ty();\n    }",
+                "new_text": "    if x {\n    \ty();\n        w = 0;\n    }",
+            }),
+            "not_reindentable",
+            "but the file indents these lines with tabs and new_text line 3 is indented further \
+             with spaces, so re-indenting it would mix them.",
+        ),
+        // Nested lines must keep the same indentation after the base: here spaces vs tabs.
+        (
+            "nested.txt",
+            "start {\n\tif x {\n\t\ty();\n\t}\n}\n",
+            json!({
                 "old_text": "    if x {\n        y();\n    }",
                 "new_text": "    if x {\n        z();\n    }",
             }),
-        )
-        .await;
-    assert!(
-        err.contains("It matches lines 2–4 if whitespace is ignored; what differs: indentation."),
-        "{err}"
-    );
-    assert_eq!(ws.read("nested.txt"), nested);
+            "not_reindentable",
+            "Ignoring whitespace it matches lines 2–4, but no single change of indentation turns \
+             it into those lines, which read:\n\tif x {\n\t\ty();\n\t}\n",
+        ),
+        // Changing only indentation would be shifted as well.
+        (
+            "indent.txt",
+            "list:\n        a = 1\n        b = 2\n",
+            json!({"old_text": "    a = 1\n    b = 2", "new_text": "        a = 1\n        b = 2"}),
+            "indentation_only",
+            "new_text changes only indentation",
+        ),
+    ];
+    for (name, text, mut input, reason, message) in cases {
+        ws.write(name, text);
+        ws.ok("read_file", json!({ "path": name })).await;
+        input["path"] = json!(name);
+        let out = ws.call("edit_file", input).await;
+        assert!(out.is_error, "{name}: {}", out.content);
+        assert!(out.content.contains(message), "{name}: {}", out.content);
+        assert_eq!(out.metadata["failure"], reason, "{name}");
+        assert_eq!(ws.read(name), text, "{name}");
+    }
 }
 
 #[tokio::test]
@@ -671,8 +684,8 @@ async fn replace_all_never_adjusts_whitespace() {
         .await;
     assert!(
         err.contains(
-            "It matches lines 2–3 if whitespace is ignored; what differs: indentation. \
-             replace_all only replaces exact matches."
+            "Ignoring whitespace, it matches lines 2–3, which read:\n\tlet x = 1;\n\tlet y = \
+             2;\nreplace_all only replaces exact matches. Re-read"
         ),
         "{err}"
     );
@@ -869,6 +882,72 @@ async fn edit_hints_stay_fast_on_big_files() {
     ));
     let took = start.elapsed();
     assert!(took < Duration::from_secs(2), "took {took:?}");
+}
+
+#[tokio::test]
+async fn edit_search_is_linear_on_repetitive_files() {
+    // Every window of `x` lines agrees with old_text up to its last line, the worst case
+    // for comparing old_text with each window in turn.
+    let ws = Ws::new();
+    let n = 200_000;
+    let mut text = "  x\n".repeat(n);
+    text.push_str("  y\n");
+    ws.ok("write_file", json!({"path": "big.txt", "content": text}))
+        .await;
+    let start = std::time::Instant::now();
+    let mut old_text = "x\n".repeat(n - 1);
+    old_text.push('y');
+    let new_text = old_text.replace('y', "z");
+    let out = ws
+        .ok(
+            "edit_file",
+            json!({"path": "big.txt", "old_text": old_text, "new_text": new_text}),
+        )
+        .await;
+    assert!(out.content.contains("(+1 -1)"), "{}", out.content);
+    assert!(ws.read("big.txt").ends_with("  x\n  x\n  z\n"));
+    // Nearly matching everywhere, but not at all: the hint is cheap too.
+    let mut old_text = "x\n".repeat(n - 1);
+    old_text.push('q');
+    let err = ws
+        .err(
+            "edit_file",
+            json!({"path": "big.txt", "old_text": old_text, "new_text": "x"}),
+        )
+        .await;
+    assert!(
+        err.contains("The closest part of the file is lines"),
+        "{err}"
+    );
+    let took = start.elapsed();
+    assert!(took < Duration::from_secs(5), "took {took:?}");
+}
+
+#[tokio::test]
+async fn cancelled_edits_write_nothing() {
+    let ws = Ws::new();
+    let text = "a:\n        x = 1\n        y = 2\n";
+    ws.write("c.txt", text);
+    ws.ok("read_file", json!({"path": "c.txt"})).await;
+    let mut cx = ws.cx.clone();
+    cx.cancel = ch_kernel::reexports::CancellationToken::new();
+    cx.cancel.cancel();
+    // An exact match, then one found by the whitespace fallback.
+    for (old_text, new_text) in [
+        ("x = 1", "x = 2"),
+        ("    x = 1\n    y = 2", "    x = 1\n    y = 3"),
+    ] {
+        let out = ws
+            .tool("edit_file")
+            .call(
+                json!({"path": "c.txt", "old_text": old_text, "new_text": new_text}),
+                &cx,
+            )
+            .await;
+        assert_eq!(out.content, "Cancelled.");
+        assert_eq!(out.metadata["failure"], "cancelled");
+        assert_eq!(ws.read("c.txt"), text);
+    }
 }
 
 // --------------------------------------------------------------- safety integration
