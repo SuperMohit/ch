@@ -56,7 +56,8 @@ pub trait ToolSource: Send + Sync {
 - A plugin adds sources in `register` (`cx.add_tool_source(..)`), so registration stays synchronous.
 - **Startup.** When a session starts, the kernel starts every source concurrently and waits for each until it reports its first list, fails, or reaches its startup timeout: 10 s by default, `startup_timeout_secs` per server or plugin.
 - **Failures.** A failure is reported with its reason (exited with the tail of its stderr, timed out, invalid output) and holds up neither the others nor the session.
-- **Slow starts.** A source that times out keeps starting in the background for up to 60 s. Its tools then arrive like any other mid-session addition (§3).
+- **Slow starts.** A source that times out keeps starting in the background, for up to 60 s or its startup timeout if that is longer. Its tools then arrive like any other mid-session addition (§3). A `start` that panics counts as failed.
+- **Restarts.** Each start of a source has a generation. Reports from an earlier start, or from a start that was stopped, are ignored, so a stale instance (a process noticing its closed pipe after a reconnect) can't change its replacement or turn "stopped" into "exited". A source removed and added again keeps its place in the precedence order.
 - **Order.** Precedence between sources follows config order, never arrival order, so names resolve the same way every run.
 - **No lazy start.** Tools have to be known before the model can call them, and declaring them again in `plugin.toml` would be a copy that drifts. Roadmap 7.2 is updated to say so.
 
@@ -84,7 +85,7 @@ The session replaces its fixed list with a **ledger**. The ledger holds every to
 
 - **Stored specs are frozen.** A spec is stored as first sent and is never edited, removed or reordered.
 - **Withdrawn tools stay in the ledger.** A call to one returns an error observation, for example: "`mcp__github__create_issue` is no longer available: the `github` server exited."
-- **Same name, different spec** (a server re-lists after a reconnect): the first-sent spec stays for the conversation, and a warning says the new text applies after `/clear` or in a new session.
+- **Same name, different spec** (a server re-lists after a reconnect): the first-sent spec stays for the conversation, and a warning says the new text applies after `/clear` or in a new session. With `Replace` (below), whose models don't check their reasoning, the new spec replaces the old one.
 - **Re-adding a withdrawn tool** with an identical spec makes it active again.
 - **Saving.** The ledger is part of `SessionSnapshot` and saved in the same atomic write as the history. A session file without it loads with a ledger built from the current tools.
 
@@ -102,8 +103,10 @@ Sources report changes at any time. The kernel queues them and nets them per too
     - It never emits two system messages in a row. So a turn that failed after storing a change still produces a valid request.
     - The cache breakpoint goes on the last block of the user message before the system message.
   - **`Replace`**: providers and models that don't check thinking signatures (OpenAI, older Claude models). The provider sends the active tools and renders `ToolsChanged` as a short text note ("Tools now available: …; no longer available: …"). The cost is one cache rewrite.
-  - **`Frozen`**: a model that checks thinking, where the beta isn't available (Foundry, Sonnet 5, a non-official base URL). Changes stay queued until `/clear` or a new session, and the user is told once which tools are waiting. A withdrawn tool keeps its definition and fails when called.
-  - **Override.** The Anthropic provider's `tool_changes = "auto" | "on" | "off"` setting overrides the choice. `auto` is the default.
+  - **`Frozen`**: a model that checks thinking, where the beta isn't available (Foundry, Sonnet 5, a non-official base URL). Changes stay queued until `/clear` or a new session, and the user is told once which tools are waiting. Every definition the first request had is sent, withdrawn ones included, and a withdrawn tool fails when called.
+    - A conversation that already announced changes natively and continues where they can't be (a `/model` switch, a resume through a proxy) can't be sent as its reasoning was written: tools added later can't be deferred there. The session warns once that `/clear` may be needed.
+  - **Override.** The Anthropic provider's `tool_changes = "auto" | "on" | "off"` setting overrides the choice. `auto` is the default. `on` uses the beta through another base URL too, but only for models that accept it.
+  - **Refusal fallback.** Claude Sonnet 5.5's server-side fallback answers some refusals with Claude Sonnet 5, which takes neither tool changes nor system messages, so a Sonnet 5.5 request that carries tool changes is sent without `fallbacks`.
 - **Context strategies.** Under ADR 0004, a summary stores one netted `ToolsChanged` for the state at its last event, appended to the first message with the summary. `elide` never removes `ToolsChanged` blocks. The `[model.summarizer]` transcript renders them as a line of text.
 - **Frontend.** It gets an `AgentEvent::ToolsChanged` and prints one line.
 
@@ -113,7 +116,7 @@ A turn already running sees new tools from its next model call. A withdrawal aff
 
 The kernel renders `system` at the conversation's first request and saves it in the snapshot. Every later request sends the saved text. `/clear` and a new session render it again. This replaces the per-call render (`model_call.rs:70`). Today's contributors already return the same text each time, so nothing they produce changes.
 
-- `prompt-base` sees the tools of the first request. Tools added later are announced by `ToolsChanged`.
+- `prompt-base` sees the tools of the first request: the ledger's non-deferred entries. Tools added later are announced by `ToolsChanged`.
 - An external plugin that starts with the session contributes system blocks like a built-in one. A plugin that arrives later has its blocks added once as a reminder at the next model call.
 - A resumed session keeps its saved system prompt.
 
@@ -128,6 +131,8 @@ The kernel renders `system` at the conversation's first request and saves it in 
 ### 7. Resume
 
 A resumed session loads its ledger and system prompt, then starts its sources. Tools in the ledger that no source offers become withdrawn. Tools a source offers that aren't in the ledger become pending additions. Both reach the model through §4 at the first call. A spec that changed keeps its saved form.
+
+A session file saved before ledgers existed counts only the built-in tools as its first request's, whether it is resumed with `ch -c` or with `/resume` while sources already run. Source tools are announced as additions, and its system prompt is rendered from the built-in tools.
 
 ### 8. Trust, approval and what a server can touch
 
@@ -178,7 +183,7 @@ A resumed session loads its ledger and system prompt, then starts its sources. T
 ### 9. Processes and calls
 
 - **Process groups.** Each server or plugin runs in its own process group, so Ctrl-C at the terminal doesn't reach it.
-- **Stopping.** Stopping reuses `executor-local`'s group handling: it closes stdin, sends SIGTERM to the group, then SIGKILL after 2 s. The kernel keeps a registry of live sources and stops them on every exit path, including before `process::exit` in `main.rs` and the print frontend.
+- **Stopping.** Stopping reuses `executor-local`'s group handling: it closes stdin, sends SIGTERM to the group, then SIGKILL after 2 s. The session stops its sources when it ends, and a session dropped without ending aborts their start tasks and asks them to stop. `process::exit` (in `main.rs` and on the print frontend's second Ctrl-C) runs no destructors, so the process groups sources spawn are recorded in a process-wide registry that those exit paths kill first; it comes with the MCP bridge, which is the first source that spawns processes.
 - **stderr** is drained continuously into a 64 KB ring buffer, so a chatty child never blocks.
 - **Timeouts.** Each call has a timeout: 120 s by default, `call_timeout_secs` per server or plugin. A timeout or a cancelled turn sends the protocol's cancel notification and returns an error observation.
 - **Exits.** A source that exits fails its pending calls at once.
@@ -230,10 +235,10 @@ A resumed session loads its ledger and system prompt, then starts its sources. T
 ## Implementation order
 
 1. **Kernel.**
-   - Changes: `ToolSource`, the ledger, `ToolsChanged`, provider rendering, the system prompt rendered once, the live-source registry.
+   - Changes: `ToolSource`, the ledger, `ToolsChanged`, provider rendering, the system prompt rendered once.
    - Tests: a scripted source in `ch-testkit` that adds, re-lists, withdraws and fails.
    - Check: the signed-thinking validator provider from 6.5 finds no violations across additions, withdrawals, a failed call followed by a new turn, a summary, an overflow retry and a resume.
-2. **`mcp-bridge` (7.4)** with `/mcp`, per-server trust, the cleared environment, process groups and redaction.
+2. **`mcp-bridge` (7.4)** with `/mcp`, per-server trust, the cleared environment, process groups (and the registry the exit paths kill) and redaction.
 3. **`ch-plugin-protocol`, `external-host` and `ch-plugin-sdk` (7.1–7.3)**, including hooks, commands, prompt contributions and events.
 4. **`hooks-shell` (7.5)**, with timeouts and the same trust rules, then **`ch plugins` and `/plugins reload` (7.6)**.
 

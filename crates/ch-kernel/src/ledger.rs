@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::model::ToolChanges;
 use crate::tool::ToolSpec;
 use crate::types::ContentBlock;
 
@@ -99,11 +100,29 @@ impl ToolLedger {
             .collect()
     }
 
+    /// The tools sent with every request in full: the first request's, withdrawn or
+    /// not. What a request sends when tool changes can't be announced.
+    pub fn sent_specs(&self) -> Vec<ToolSpec> {
+        (self.entries.iter())
+            .filter(|e| !e.deferred)
+            .map(|e| e.spec.clone())
+            .collect()
+    }
+
+    /// Whether tools were added after the first request.
+    pub fn has_deferred(&self) -> bool {
+        self.entries.iter().any(|e| e.deferred)
+    }
+
     /// The ledger the next model call sends when `offered` are the tools available
-    /// now. With `apply` false (a model that can't take tool changes) nothing is
-    /// added or withdrawn after the first request: additions wait, and a withdrawn tool
-    /// keeps its entry (calling it fails).
-    pub fn stage(&self, offered: &[Offered], apply: bool) -> Staged {
+    /// now, for a provider that handles changes as `mode` says:
+    /// - `Native`: changes are announced; definitions never change once sent.
+    /// - `Replace`: changes are announced, and a changed definition replaces the old one
+    ///   (the model doesn't check its reasoning against them).
+    /// - `Frozen`: after the first request nothing is added or withdrawn: additions
+    ///   wait, and a withdrawn tool keeps its entry (calling it fails).
+    pub fn stage(&self, offered: &[Offered], mode: ToolChanges) -> Staged {
+        let apply = mode != ToolChanges::Frozen;
         let mut staged = Staged {
             ledger: self.clone(),
             added: Vec::new(),
@@ -131,7 +150,11 @@ impl ToolLedger {
             match ledger.entries.iter_mut().find(|e| e.spec.name == *name) {
                 Some(e) => {
                     if e.spec != o.spec {
-                        staged.changed.push(name.clone());
+                        if mode == ToolChanges::Replace {
+                            e.spec = o.spec.clone();
+                        } else {
+                            staged.changed.push(name.clone());
+                        }
                     }
                     if !e.active {
                         if apply {
@@ -219,6 +242,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const NATIVE: ToolChanges = ToolChanges::Native;
+    const FROZEN: ToolChanges = ToolChanges::Frozen;
+
     fn spec(name: &str, desc: &str) -> ToolSpec {
         ToolSpec {
             name: name.into(),
@@ -246,12 +272,12 @@ mod tests {
 
     #[test]
     fn the_first_request_takes_every_tool_and_later_ones_only_append() {
-        let first = ToolLedger::default().stage(&offered(&["a", "b"]), true);
+        let first = ToolLedger::default().stage(&offered(&["a", "b"]), NATIVE);
         assert!(first.block().is_none());
         let l = first.ledger;
         assert!(l.is_started());
 
-        let s = l.stage(&offered(&["a", "mcp__x"]), true);
+        let s = l.stage(&offered(&["a", "mcp__x"]), NATIVE);
         assert_eq!(s.added, ["mcp__x"]);
         assert_eq!(s.removed, ["b"]);
         assert_eq!(
@@ -264,7 +290,7 @@ mod tests {
         );
 
         // Back again: the entry is reused, not appended.
-        let s = s.ledger.stage(&offered(&["a", "b", "mcp__x"]), true);
+        let s = s.ledger.stage(&offered(&["a", "b", "mcp__x"]), NATIVE);
         assert_eq!(s.added, ["b"]);
         assert!(s.removed.is_empty());
         assert_eq!(s.ledger.entries.len(), 3);
@@ -272,22 +298,34 @@ mod tests {
 
     #[test]
     fn a_changed_definition_keeps_the_first_one() {
-        let l = ToolLedger::default().stage(&offered(&["a"]), true).ledger;
+        let l = ToolLedger::default().stage(&offered(&["a"]), NATIVE).ledger;
         let mut now = offered(&["a"]);
         now[0].spec.description = "new".into();
-        let s = l.stage(&now, true);
+        let s = l.stage(&now, NATIVE);
         assert_eq!(s.changed, ["a"]);
         assert_eq!(s.ledger.entries[0].spec.description, "d");
         assert!(s.block().is_none());
     }
 
     #[test]
+    fn replace_mode_takes_the_new_definition() {
+        let l = ToolLedger::default()
+            .stage(&offered(&["a"]), ToolChanges::Replace)
+            .ledger;
+        let mut now = offered(&["a"]);
+        now[0].spec.description = "new".into();
+        let s = l.stage(&now, ToolChanges::Replace);
+        assert!(s.changed.is_empty());
+        assert_eq!(s.ledger.entries[0].spec.description, "new");
+    }
+
+    #[test]
     fn without_tool_changes_nothing_is_added_or_withdrawn_after_the_first_request() {
         let l = ToolLedger::default()
-            .stage(&offered(&["a", "b"]), false)
+            .stage(&offered(&["a", "b"]), FROZEN)
             .ledger;
         assert_eq!(l.entries.len(), 2);
-        let s = l.stage(&offered(&["a", "mcp__x"]), false);
+        let s = l.stage(&offered(&["a", "mcp__x"]), FROZEN);
         assert_eq!(s.waiting, ["mcp__x"]);
         assert!(s.block().is_none());
         assert_eq!(s.ledger, l);
@@ -297,10 +335,10 @@ mod tests {
     fn a_full_ledger_makes_new_tools_wait() {
         let many: Vec<String> = (0..MAX_LEDGER + 2).map(|i| format!("t{i}")).collect();
         let all: Vec<&str> = many.iter().map(String::as_str).collect();
-        let s = ToolLedger::default().stage(&offered(&all), true);
+        let s = ToolLedger::default().stage(&offered(&all), NATIVE);
         assert_eq!(s.ledger.entries.len(), MAX_LEDGER);
         assert_eq!(s.waiting.len(), 2);
-        let s = s.ledger.stage(&offered(&all), true);
+        let s = s.ledger.stage(&offered(&all), NATIVE);
         assert!(s.added.is_empty());
         assert_eq!(s.waiting.len(), 2);
     }

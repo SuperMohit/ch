@@ -263,6 +263,7 @@ dependencies = [
  "anyhow",
  "ch-kernel",
  "ch-planning",
+ "ch-provider-anthropic",
  "ch-provider-scripted",
  "ch-safety",
  "ch-testkit",

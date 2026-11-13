@@ -1,8 +1,10 @@
 //! Starting and stopping tool sources (ADR 0006 §1).
 
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::FutureExt as _;
 use futures::future::join_all;
 use tokio_util::sync::CancellationToken;
 
@@ -33,7 +35,8 @@ impl Session {
 
     /// Adds a source while the session runs (`/plugins reload`) and waits for it as at
     /// session start. Its tools reach the model at the next model call. Fails if a
-    /// source with the same id is already running.
+    /// source with the same id is already running. A source removed earlier under the
+    /// same id takes its old place in the precedence order.
     pub async fn add_tool_source(&mut self, source: Arc<dyn ToolSource>) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.sources.iter().any(|s| s.id() == source.id()),
@@ -47,27 +50,30 @@ impl Session {
         Ok(())
     }
 
-    /// Stops and removes a source. Its tools are withdrawn at the next model call.
+    /// Stops and removes a source. Its tools are withdrawn at the next model call, and
+    /// anything it reports from now on is ignored.
     pub async fn remove_tool_source(&mut self, id: &str) -> bool {
         let Some(i) = self.sources.iter().position(|s| s.id() == id) else {
             return false;
         };
         let source = self.sources.remove(i);
-        self.catalog.settle(id, SourceStatus::Stopped);
+        self.catalog.stop_source(id);
+        if let Some(task) = self.source_tasks.remove(id) {
+            task.abort();
+        }
         let _ = tokio::time::timeout(STOP_GRACE, source.stop()).await;
-        self.catalog.remove_source(id);
         true
     }
 
     /// Stops every source, giving each [`STOP_GRACE`].
     pub(super) async fn stop_sources(&mut self) {
-        for task in self.source_tasks.drain(..) {
+        for (_, task) in self.source_tasks.drain() {
             task.abort();
         }
         let stops = self.sources.iter().map(|s| {
             let catalog = self.catalog.clone();
             async move {
-                catalog.settle(s.id(), SourceStatus::Stopped);
+                catalog.stop_source(s.id());
                 if tokio::time::timeout(STOP_GRACE, s.stop()).await.is_err() {
                     tracing::warn!(source = s.id(), "tool source didn't stop in time");
                 }
@@ -77,42 +83,55 @@ impl Session {
     }
 
     /// Starts `source` in a task and returns a future that waits for it until its
-    /// startup timeout.
+    /// startup timeout. The future owns everything it uses, so several can run at once.
     fn spawn_source(&mut self, source: Arc<dyn ToolSource>) -> impl Future<Output = ()> + use<> {
         let id = source.id().to_string();
-        self.catalog.add_source(&id);
-        let sink = ToolSink::new(source.as_ref(), self.catalog.clone(), self.events.clone());
+        let generation = self.catalog.start_source(&id);
+        let sink = ToolSink::new(
+            source.as_ref(),
+            generation,
+            self.catalog.clone(),
+            self.events.clone(),
+        );
         let cx = self.cx(0, CancellationToken::new());
         let catalog = self.catalog.clone();
         let events = self.events.clone();
         let startup = source.startup_timeout();
+        // The background limit never cuts a configured startup timeout short.
+        let limit = startup.max(BACKGROUND_START);
         let task = tokio::spawn({
             let id = id.clone();
             async move {
-                let started = tokio::time::timeout(BACKGROUND_START, source.start(sink, &cx)).await;
-                let status = match started {
-                    Ok(Ok(())) => SourceStatus::Ready { tools: 0 },
-                    Ok(Err(e)) => SourceStatus::Failed {
+                let start = AssertUnwindSafe(source.start(sink, &cx)).catch_unwind();
+                let status = match tokio::time::timeout(limit, start).await {
+                    Ok(Ok(Ok(()))) => SourceStatus::Ready { tools: 0 },
+                    Ok(Ok(Err(e))) => SourceStatus::Failed {
                         reason: crate::util::printable(&format!("{e:#}")),
                     },
+                    Ok(Err(_panic)) => SourceStatus::Failed {
+                        reason: "it panicked while starting".into(),
+                    },
                     Err(_) => {
-                        source.stop().await;
+                        // Only this start's own process: a newer start or a stop
+                        // owns the source now.
+                        if catalog.is_current(&id, generation) {
+                            source.stop().await;
+                        }
                         SourceStatus::Failed {
-                            reason: format!(
-                                "it didn't start within {} s",
-                                BACKGROUND_START.as_secs()
-                            ),
+                            reason: format!("it didn't start within {} s", limit.as_secs()),
                         }
                     }
                 };
-                if catalog.settle(&id, status)
+                if catalog.settle(&id, generation, status)
                     && let Some(status) = catalog.status(&id)
                 {
                     events.emit(AgentEvent::ToolSource { source: id, status });
                 }
             }
         });
-        self.source_tasks.push(task.abort_handle());
+        if let Some(old) = self.source_tasks.insert(id.clone(), task.abort_handle()) {
+            old.abort();
+        }
         let events = self.events.clone();
         let catalog = self.catalog.clone();
         async move {
@@ -125,6 +144,29 @@ impl Session {
                     ),
                 });
             }
+        }
+    }
+}
+
+impl Drop for Session {
+    /// A session dropped without [`Session::end`] (an error path, a panic) still stops
+    /// its sources: start tasks are aborted, and each source is asked to stop if a
+    /// runtime is there to run it.
+    fn drop(&mut self) {
+        for (_, task) in self.source_tasks.drain() {
+            task.abort();
+        }
+        if self.ended || !self.started || self.sources.is_empty() {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        for source in self.sources.drain(..) {
+            self.catalog.stop_source(source.id());
+            rt.spawn(async move {
+                let _ = tokio::time::timeout(STOP_GRACE, source.stop()).await;
+            });
         }
     }
 }

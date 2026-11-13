@@ -73,11 +73,17 @@ impl Session {
         ledger: &ToolLedger,
         mode: ToolChanges,
     ) -> ModelRequest {
+        // Without native tool changes a model that checks its reasoning must get the
+        // definitions it was first sent, withdrawn ones included.
+        let tools = match mode {
+            ToolChanges::Frozen => ledger.sent_specs(),
+            _ => ledger.active_specs(),
+        };
         ModelRequest {
             model: self.model.clone(),
             system,
             messages: Vec::new(),
-            tools: ledger.active_specs(),
+            tools,
             max_tokens: self.kcfg.model.max_output_tokens,
             temperature: self.kcfg.model.temperature,
             thinking_budget: self.kcfg.model.thinking_budget,
@@ -99,7 +105,17 @@ impl Session {
                 ),
             );
         }
-        let staged = self.ledger.stage(&offered, mode != ToolChanges::Frozen);
+        let staged = self.ledger.stage(&offered, mode);
+        if mode == ToolChanges::Frozen && staged.ledger.has_deferred() {
+            self.warn_once(
+                "frozen with deferred".into(),
+                format!(
+                    "this conversation added tools in a way `{}` can't repeat here; if \
+                     requests are rejected, start over with /clear",
+                    self.model
+                ),
+            );
+        }
         for name in &staged.changed {
             self.warn_once(
                 format!("changed {name}"),
@@ -162,11 +178,22 @@ impl Session {
         // additions are stored below, so a call that stops early leaves them pending.
         let mode = self.provider.tool_changes(&self.model);
         let staged = self.stage_tools(mode);
+        // A conversation's system prompt is rendered with its first request's tools; ones
+        // added later are announced, not written into it.
+        let system = match &self.system {
+            Some(system) => system.clone(),
+            None => {
+                let first = Cx {
+                    tools: Arc::new(staged.ledger.sent_specs()),
+                    ..cx.clone()
+                };
+                self.render_system(&first).await
+            }
+        };
         let cx = &Cx {
             tools: Arc::new(staged.ledger.active_specs()),
             ..cx.clone()
         };
-        let system = self.system_prompt(cx).await;
         let mut reminders = Vec::new();
         for (_, p) in &self.registry.prompts {
             reminders.extend(
@@ -449,11 +476,15 @@ fn termination(e: ModelError) -> TerminationReason {
     }
 }
 
-/// The tool definitions `request` sends: the whole ledger when the provider renders tool
-/// changes natively, the active tools otherwise.
+/// The tool definitions `request` makes the model read: with native tool changes, those
+/// of the first request and the deferred ones still active (a deferred tool is loaded
+/// only once announced); otherwise what it sends.
 pub(super) fn sent_tools(request: &ModelRequest) -> Vec<ToolSpec> {
     match &request.tool_ledger {
-        Some(ledger) => ledger.iter().map(|e| e.spec.clone()).collect(),
+        Some(ledger) => (ledger.iter())
+            .filter(|e| !e.deferred || e.active)
+            .map(|e| e.spec.clone())
+            .collect(),
         None => request.tools.clone(),
     }
 }

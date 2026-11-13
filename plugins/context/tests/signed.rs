@@ -496,9 +496,67 @@ fn flipping_script(from: u64, count: u64) -> Vec<ScriptStep> {
     steps
 }
 
-/// Tools added and withdrawn mid-turn, across trims, summaries, `/compact`, an overflow
-/// and a resume, never invalidate the model's signed reasoning: earlier definitions are
-/// never changed, and deferred ones count only once announced.
+/// What netting all of `request`'s tool changes leaves: the tools added after the first
+/// request that are active, and the first request's tools that were withdrawn. A view
+/// that lost a change (a summary that dropped one) makes the model see another list.
+fn assert_changes_match_the_ledger(request: &ModelRequest) {
+    let ledger = request.tool_ledger.as_ref().expect("native");
+    let (mut added, mut removed) = (Vec::new(), Vec::new());
+    if let Some(ContentBlock::ToolsChanged {
+        added: a,
+        removed: r,
+    }) = ch_kernel::ledger::net(request.messages.iter().flat_map(|m| &m.content))
+    {
+        (added, removed) = (a, r);
+    }
+    added.sort();
+    removed.sort();
+    let mut want_added: Vec<String> = (ledger.iter())
+        .filter(|e| e.deferred && e.active)
+        .map(|e| e.spec.name.clone())
+        .collect();
+    let mut want_removed: Vec<String> = (ledger.iter())
+        .filter(|e| !e.deferred && !e.active)
+        .map(|e| e.spec.name.clone())
+        .collect();
+    want_added.sort();
+    want_removed.sort();
+    assert_eq!((added, removed), (want_added, want_removed));
+}
+
+/// `request` as the Anthropic provider sends it, without cache breakpoints (they move to
+/// the newest message on every request).
+fn wire(request: &ModelRequest) -> Value {
+    let mut body = ch_provider_anthropic::request::build_body(request, &Default::default());
+    for m in body["messages"].as_array_mut().unwrap() {
+        for b in m["content"].as_array_mut().unwrap() {
+            b.as_object_mut().unwrap().remove("cache_control");
+        }
+    }
+    body
+}
+
+/// The API's placement rules for system messages.
+fn assert_placement(body: &Value) {
+    let roles: Vec<&str> = (body["messages"].as_array().unwrap().iter())
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_ne!(roles[0], "system");
+    for (i, role) in roles.iter().enumerate() {
+        if *role == "system" {
+            assert_eq!(roles[i - 1], "user", "{roles:?}");
+            assert!(
+                i + 1 == roles.len() || roles[i + 1] == "assistant",
+                "{roles:?}"
+            );
+        }
+    }
+}
+
+/// Tools added and withdrawn mid-turn, across trims, summaries, `/compact` and a resume,
+/// never invalidate the model's signed reasoning: earlier definitions are never changed,
+/// and deferred ones count only once announced. What the provider sends stays valid and,
+/// between compactions, extends the last request.
 #[tokio::test]
 async fn tools_coming_and_going_keep_the_reasoning_valid() {
     let d = dirs();
@@ -515,42 +573,87 @@ async fn tools_coming_and_going_keep_the_reasoning_valid() {
     assert_eq!(r.reason, TerminationReason::Done, "{r:?}");
     assert_signed(&p);
 
-    let events = received(&mut rx);
-    let changes = (events.iter())
-        .filter(|e| matches!(e, AgentEvent::ToolsChanged { .. }))
-        .count();
-    assert!(changes >= 10, "{changes} tool changes");
-    let summarized = (events.iter()).any(|e| {
-        matches!(
-            e,
-            AgentEvent::ContextCompacted {
-                kind: CompactionKind::Summarized,
-                ..
+    // Which agent requests came right after a compaction, and what happened.
+    let (mut changes, mut trims, mut summaries) = (0, 0, 0);
+    let mut after_compaction = Vec::new();
+    let mut compacted = false;
+    for event in received(&mut rx) {
+        match event {
+            AgentEvent::ToolsChanged { .. } => changes += 1,
+            AgentEvent::ContextCompacted { kind, .. } => {
+                compacted = true;
+                match kind {
+                    CompactionKind::Elided => trims += 1,
+                    CompactionKind::Summarized => summaries += 1,
+                }
             }
-        )
-    });
-    assert!(summarized, "the run should have been summarized");
+            AgentEvent::ModelRequest { purpose, .. } if purpose == "agent" => {
+                after_compaction.push(compacted);
+                compacted = false;
+            }
+            _ => {}
+        }
+    }
+    assert!(changes >= 10, "{changes} tool changes");
+    assert!(
+        trims > 0 && summaries > 0,
+        "{trims} trims, {summaries} summaries"
+    );
 
-    // The ledger only grew: each request's definitions start with the last one's.
     let requests = p.inner.requests();
+    assert_eq!(requests.len(), after_compaction.len());
     let defs = |r: &ModelRequest| -> Vec<ch_kernel::ToolSpec> {
-        r.tool_ledger
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|e| e.spec.clone())
-            .collect()
+        let l = r.tool_ledger.as_ref().unwrap();
+        l.iter().map(|e| e.spec.clone()).collect()
     };
-    for pair in requests.windows(2) {
-        let (a, b) = (defs(&pair[0]), defs(&pair[1]));
+    for (i, request) in requests.iter().enumerate() {
+        assert_changes_match_the_ledger(request);
+        assert_placement(&wire(request));
+        if i == 0 {
+            continue;
+        }
+        // The ledger only grows.
+        let (a, b) = (defs(&requests[i - 1]), defs(request));
         assert_eq!(b[..a.len()], a[..]);
+        let (wa, wb) = (wire(&requests[i - 1]), wire(request));
+        let (ta, tb) = (
+            wa["tools"].as_array().unwrap(),
+            wb["tools"].as_array().unwrap(),
+        );
+        assert_eq!(tb[..ta.len()], ta[..], "request {i}'s tools");
+        if !after_compaction[i] {
+            let (ma, mb) = (
+                wa["messages"].as_array().unwrap(),
+                wb["messages"].as_array().unwrap(),
+            );
+            assert_eq!(
+                mb[..ma.len()],
+                ma[..],
+                "request {i} doesn't extend the last"
+            );
+        }
     }
     let last = requests.last().unwrap();
     let ledger = last.tool_ledger.as_ref().unwrap();
     assert!(ledger.iter().filter(|e| e.deferred).count() >= 10);
     assert_eq!(ledger.iter().filter(|e| e.deferred && e.active).count(), 1);
+    // A summary carried the changes of the span it replaced.
+    assert!(
+        (last.messages[0].content.iter()).any(|b| matches!(b, ContentBlock::ToolsChanged { .. })),
+        "{:?}",
+        last.messages[0]
+    );
+    // The model called a tool that was withdrawn by then, and was told so.
+    let told = (requests.iter())
+        .flat_map(|r| &r.messages)
+        .flat_map(|m| &m.content)
+        .any(|b| {
+            matches!(b, ContentBlock::ToolResult { content, .. }
+            if content.starts_with("`mcp__fake__extra1` is no longer available"))
+        });
+    assert!(told);
 
-    // `/compact`, then another turn.
+    // `/compact`, then the session ends.
     let out = s.compact(None).await.unwrap();
     assert!(out.changed, "{}", out.message);
     s.end().await;
@@ -581,4 +684,14 @@ async fn tools_coming_and_going_keep_the_reasoning_valid() {
         TerminationReason::Done
     );
     assert_signed(&q);
+    let again = &q.inner.requests()[0];
+    assert_changes_match_the_ledger(again);
+    let state = |name: &str| {
+        let ledger = again.tool_ledger.as_ref().unwrap();
+        let e = ledger.iter().find(|e| e.spec.name == name).unwrap();
+        (e.deferred, e.active)
+    };
+    assert_eq!(state("mcp__fake__fresh"), (true, true));
+    assert_eq!(state("mcp__fake__extra1"), (true, true));
+    assert_eq!(state("mcp__fake__flip"), (false, false));
 }

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -170,7 +170,7 @@ impl SessionBuilder {
             approver,
             catalog,
             sources,
-            source_tasks: Vec::new(),
+            source_tasks: HashMap::new(),
             ledger: ToolLedger::default(),
             system: None,
             tool_specs: Arc::default(),

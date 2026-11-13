@@ -129,6 +129,9 @@ pub trait ToolSource: Send + Sync {
 #[derive(Clone)]
 pub struct ToolSink {
     source: String,
+    /// Which start of the source this sink belongs to. A sink from an earlier start
+    /// (before a restart, or after a stop) is ignored.
+    generation: u64,
     prefix: String,
     read_only: Arc<HashSet<String>>,
     catalog: Arc<Catalog>,
@@ -136,9 +139,15 @@ pub struct ToolSink {
 }
 
 impl ToolSink {
-    pub(crate) fn new(source: &dyn ToolSource, catalog: Arc<Catalog>, events: EventBus) -> Self {
+    pub(crate) fn new(
+        source: &dyn ToolSource,
+        generation: u64,
+        catalog: Arc<Catalog>,
+        events: EventBus,
+    ) -> Self {
         Self {
             source: source.id().to_string(),
+            generation,
             prefix: source.prefix(),
             read_only: Arc::new(source.read_only_tools().into_iter().collect()),
             catalog,
@@ -173,9 +182,13 @@ impl ToolSink {
             self.warn(format!("skipped a tool from `{}`: {why}", self.source));
         }
         let n = admitted.len();
-        self.catalog
-            .set(&self.source, admitted, SourceStatus::Ready { tools: n });
-        self.emit_status();
+        let status = SourceStatus::Ready { tools: n };
+        if self
+            .catalog
+            .set(&self.source, self.generation, admitted, status)
+        {
+            self.emit_status();
+        }
     }
 
     /// The source stopped on its own: its tools are withdrawn, and calls to them fail
@@ -184,8 +197,12 @@ impl ToolSink {
         let status = SourceStatus::Exited {
             reason: reason.into(),
         };
-        self.catalog.set(&self.source, Vec::new(), status);
-        self.emit_status();
+        if self
+            .catalog
+            .set(&self.source, self.generation, Vec::new(), status)
+        {
+            self.emit_status();
+        }
     }
 
     fn emit_status(&self) {
@@ -244,6 +261,8 @@ struct CatalogState {
 
 struct Slot {
     id: String,
+    /// Bumped by every start and stop, so reports from an earlier start are ignored.
+    generation: u64,
     status: SourceStatus,
     tools: Vec<(ToolSpec, Arc<dyn Tool>)>,
 }
@@ -269,40 +288,75 @@ impl Catalog {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Adds a source that is starting, or marks a known one as starting again.
-    pub fn add_source(&self, id: &str) {
+    /// Marks a source as starting and returns the generation of this start. A source
+    /// started again keeps its place, which is its precedence.
+    pub fn start_source(&self, id: &str) -> u64 {
         let mut st = self.lock();
         match st.sources.iter_mut().find(|s| s.id == id) {
             Some(slot) => {
+                slot.generation += 1;
                 slot.status = SourceStatus::Starting;
                 slot.tools.clear();
+                slot.generation
             }
-            None => st.sources.push(Slot {
-                id: id.to_string(),
-                status: SourceStatus::Starting,
-                tools: Vec::new(),
-            }),
+            None => {
+                st.sources.push(Slot {
+                    id: id.to_string(),
+                    generation: 0,
+                    status: SourceStatus::Starting,
+                    tools: Vec::new(),
+                });
+                0
+            }
         }
     }
 
-    pub fn remove_source(&self, id: &str) {
-        self.lock().sources.retain(|s| s.id != id);
-    }
-
-    pub fn set(&self, id: &str, tools: Vec<(ToolSpec, Arc<dyn Tool>)>, status: SourceStatus) {
+    /// Withdraws a source's tools and ignores whatever its current start reports later.
+    pub fn stop_source(&self, id: &str) {
         let mut st = self.lock();
         if let Some(slot) = st.sources.iter_mut().find(|s| s.id == id) {
-            slot.tools = tools;
-            slot.status = status;
+            slot.generation += 1;
+            slot.status = SourceStatus::Stopped;
+            slot.tools.clear();
         }
     }
 
-    /// Marks a source as failed or stopped unless it already reported something else.
-    pub fn settle(&self, id: &str, status: SourceStatus) -> bool {
+    /// Whether `generation` is the source's current start.
+    pub fn is_current(&self, id: &str, generation: u64) -> bool {
+        let st = self.lock();
+        (st.sources.iter()).any(|s| s.id == id && s.generation == generation)
+    }
+
+    /// Records what the source's start `generation` reported. Returns false, changing
+    /// nothing, when that start is no longer the current one.
+    pub fn set(
+        &self,
+        id: &str,
+        generation: u64,
+        tools: Vec<(ToolSpec, Arc<dyn Tool>)>,
+        status: SourceStatus,
+    ) -> bool {
+        let mut st = self.lock();
+        match st.sources.iter_mut().find(|s| s.id == id) {
+            Some(slot) if slot.generation == generation => {
+                slot.tools = tools;
+                slot.status = status;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// How a start ended: `Ready` only if it reported nothing yet, a failure always.
+    /// Returns whether the status changed.
+    pub fn settle(&self, id: &str, generation: u64, status: SourceStatus) -> bool {
         let mut st = self.lock();
         let Some(slot) = st.sources.iter_mut().find(|s| s.id == id) else {
             return false;
         };
+        if slot.generation != generation {
+            return false;
+        }
         let replace = match status {
             // `start` returned without reporting tools.
             SourceStatus::Ready { .. } => slot.status == SourceStatus::Starting,
@@ -337,8 +391,18 @@ impl Catalog {
         let st = self.lock();
         match st.sources.iter().find(|s| s.id == source) {
             Some(slot) => slot.status.reason().map(str::to_string),
-            None => Some("its source was removed".into()),
+            None => Some("its source is gone".into()),
         }
+    }
+
+    /// The built-in tools: what a conversation saved before ledgers existed was sent.
+    pub fn builtin(&self) -> Vec<Offered> {
+        (self.lock().builtin.iter())
+            .map(|(spec, _)| Offered {
+                spec: spec.clone(),
+                source: None,
+            })
+            .collect()
     }
 
     /// Every tool offered now, built-in ones first, then each source's in order. A name

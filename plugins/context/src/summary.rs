@@ -612,6 +612,43 @@ mod tests {
     }
 
     #[test]
+    fn a_transcript_shows_tool_changes_as_harness_entries() {
+        let span = [Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolsChanged {
+                added: vec!["mcp__gh__a".into()],
+                removed: Vec::new(),
+            }],
+        }];
+        let req = transcript(
+            "m",
+            &dummy(),
+            &Message::user("task"),
+            &span,
+            "sum up".into(),
+        );
+        let text = req.messages[0].text();
+        assert!(
+            text.contains("[harness] Tools now available: mcp__gh__a."),
+            "{text}"
+        );
+    }
+
+    fn dummy() -> ModelRequest {
+        ModelRequest {
+            model: "m".into(),
+            system: Vec::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            max_tokens: 100,
+            temperature: None,
+            thinking_budget: None,
+            purpose: "agent".into(),
+            tool_ledger: None,
+        }
+    }
+
+    #[test]
     fn a_block_has_the_framing_the_summary_and_the_copied_parts() {
         assert_eq!(
             summary().block(),

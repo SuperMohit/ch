@@ -16,7 +16,7 @@ use tokio::sync::broadcast::Receiver;
 /// Records requests and answers from a script; reports `mode` for tool changes.
 #[derive(Clone)]
 struct Recorder {
-    mode: ToolChanges,
+    mode: Arc<Mutex<ToolChanges>>,
     replies: Arc<Mutex<VecDeque<ModelResponse>>>,
     requests: Arc<Mutex<Vec<ModelRequest>>>,
 }
@@ -24,7 +24,7 @@ struct Recorder {
 impl Recorder {
     fn new(mode: ToolChanges, replies: Vec<ModelResponse>) -> Self {
         Self {
-            mode,
+            mode: Arc::new(Mutex::new(mode)),
             replies: Arc::new(Mutex::new(replies.into())),
             requests: Arc::default(),
         }
@@ -66,7 +66,7 @@ impl ModelProvider for Recorder {
     }
 
     fn tool_changes(&self, _model: &str) -> ToolChanges {
-        self.mode
+        *self.mode.lock().unwrap()
     }
 }
 
@@ -147,7 +147,8 @@ impl Hook for Gate {
     }
 }
 
-/// The read-only flag pre_tool hooks see for each call.
+/// The read-only flag pre_tool hooks see for each call, and whether `cx.tools` lists
+/// the tool.
 struct SeesReadOnly(Arc<Mutex<Vec<(String, bool)>>>);
 
 #[async_trait::async_trait]
@@ -158,8 +159,9 @@ impl Hook for SeesReadOnly {
     fn points(&self) -> &[HookPoint] {
         &[HookPoint::PreTool]
     }
-    async fn on(&self, event: &HookEvent, _cx: &Cx) -> HookDecision {
+    async fn on(&self, event: &HookEvent, cx: &Cx) -> HookDecision {
         if let HookEvent::PreTool { call, read_only } = event {
+            assert!(cx.has_tool(&call.name), "{} isn't in cx.tools", call.name);
             self.0.lock().unwrap().push((call.name.clone(), *read_only));
         }
         HookDecision::Continue
@@ -556,6 +558,19 @@ async fn a_model_that_cant_take_changes_keeps_its_tools_until_clear() {
     run.session.run_turn("third").await;
     assert!(run.warnings().is_empty());
 
+    // The first list is kept, the system prompt too, and a withdrawn tool fails.
+    assert_eq!(run.model.last().system, first.system);
+    src.exit("gone");
+    run.model.push(vec![call("c1", "mcp__fake__a"), text("ok")]);
+    run.session.run_turn("call it").await;
+    let last = run.model.last();
+    assert_eq!(last.tools, first.tools);
+    assert_eq!(
+        result_text(&last),
+        "`mcp__fake__a` is no longer available: gone."
+    );
+    src.set_tools(mcp(&["b"]));
+
     run.session.clear().unwrap();
     run.session.run_turn("fresh").await;
     let fresh = run.model.last();
@@ -753,5 +768,125 @@ async fn a_source_added_mid_session_joins_at_the_next_call_and_can_be_removed() 
     assert_eq!(
         changes(&run.model.last()),
         [changed(&[], &["mcp__late__x"])]
+    );
+}
+
+#[tokio::test]
+async fn a_stale_instance_of_a_source_cant_change_its_replacement() {
+    let src = ScriptedSource::new("mcp:fake", "mcp__fake__").with_tools(mcp(&["a"]));
+    let other = ScriptedSource::new("mcp:other", "mcp__other__")
+        .with_tools(vec![echo_tool("mcp__other__o")]);
+    let model = Recorder::new(ToolChanges::Native, vec![text("one")]);
+    let mut run = session(model, vec![src.clone(), other], None);
+    run.session.run_turn("first").await;
+    let old = src.sink();
+
+    // A reconnect: the old instance is removed and a new one added under the same id.
+    assert!(run.session.remove_tool_source("mcp:fake").await);
+    run.session
+        .add_tool_source(Arc::new(src.clone()))
+        .await
+        .unwrap();
+    old.exited("the old process noticed its pipe closed");
+    old.set_tools(mcp(&["stale"]));
+    assert_eq!(
+        run.session.tool_sources(),
+        [
+            ("mcp:fake".to_string(), SourceStatus::Ready { tools: 1 }),
+            ("mcp:other".to_string(), SourceStatus::Ready { tools: 1 }),
+        ],
+        "the new instance keeps its place and its tools"
+    );
+    run.session.run_turn("second").await;
+    assert!(changes(&run.model.last()).is_empty());
+
+    // After the session ends, a late exit doesn't turn "stopped" into "exited".
+    let current = src.sink();
+    run.session.end().await;
+    run.drain();
+    current.exited("pipe closed");
+    assert!(run.drain().is_empty());
+    assert_eq!(
+        run.session.tool_sources()[0],
+        ("mcp:fake".to_string(), SourceStatus::Stopped)
+    );
+}
+
+#[tokio::test]
+async fn a_source_whose_start_panics_is_reported_as_failed() {
+    let src = ScriptedSource::new("mcp:boom", "mcp__boom__").panicking();
+    let model = Recorder::new(ToolChanges::Native, vec![text("one")]);
+    let mut run = session(model, vec![src], None);
+    run.session.run_turn("first").await;
+    assert_eq!(
+        run.session.tool_sources(),
+        [(
+            "mcp:boom".to_string(),
+            SourceStatus::Failed {
+                reason: "it panicked while starting".into()
+            }
+        )]
+    );
+}
+
+#[tokio::test]
+async fn resuming_an_old_file_announces_the_tools_of_running_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path());
+    // A conversation saved before prompts and ledgers were kept.
+    let model = Recorder::new(ToolChanges::Native, vec![text("one")]);
+    let mut old = session(model, vec![], Some(store.clone()));
+    old.session.run_turn("first").await;
+    let id = old.session.id().to_string();
+    old.session.end().await;
+    drop(old);
+    let path = dir.path().join(format!("{id}.jsonl"));
+    let saved = std::fs::read_to_string(&path).unwrap();
+    let without: Vec<&str> = (saved.lines())
+        .filter(|l| !l.starts_with("{\"type\":\"prompt\""))
+        .collect();
+    assert_eq!(without.len() + 1, saved.lines().count());
+    std::fs::write(&path, without.join("\n") + "\n").unwrap();
+
+    // `/resume` in a session whose sources are already running.
+    let src = ScriptedSource::new("mcp:fake", "mcp__fake__").with_tools(mcp(&["a"]));
+    let model = Recorder::new(ToolChanges::Native, vec![text("again")]);
+    let mut run = session(model, vec![src], Some(store.clone()));
+    run.session.start().await;
+    run.session.restore(store.load(&id).unwrap()).unwrap();
+    run.session.run_turn("go on").await;
+    let req = run.model.last();
+    assert_eq!(
+        ledger(&req),
+        [
+            ("read".into(), false, true),
+            ("mcp__fake__a".into(), true, true)
+        ]
+    );
+    assert_eq!(changes(&req), [changed(&["mcp__fake__a"], &[])]);
+    // The prompt is rendered with the tools the old requests had.
+    assert_eq!(req.system, ["render 1; tools: read"]);
+}
+
+#[tokio::test]
+async fn switching_to_a_model_that_cant_take_changes_keeps_every_first_definition() {
+    let src = ScriptedSource::new("mcp:fake", "mcp__fake__").with_tools(mcp(&["a"]));
+    let model = Recorder::new(ToolChanges::Native, vec![text("one")]);
+    let mut run = session(model, vec![src.clone()], None);
+    run.session.run_turn("first").await;
+    src.set_tools(mcp(&["b"]));
+    run.session.run_turn("second").await;
+
+    *run.model.mode.lock().unwrap() = ToolChanges::Frozen;
+    run.drain();
+    run.session.run_turn("third").await;
+    let last = run.model.last();
+    assert!(last.tool_ledger.is_none());
+    // The first request's tools, the withdrawn one included.
+    assert_eq!(names(&last.tools), ["read", "mcp__fake__a"]);
+    let warnings = run.warnings();
+    assert!(
+        warnings.iter().any(|w| w.contains("can't repeat here")),
+        "{warnings:#?}"
     );
 }

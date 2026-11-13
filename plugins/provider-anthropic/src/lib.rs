@@ -66,7 +66,8 @@ pub struct AnthropicConfig {
     pub prefix_mismatch_behavior: String,
     /// Tools added or withdrawn mid-conversation: `"auto"` announces them with the
     /// mid-conversation tool-change beta on the official API for models that accept it;
-    /// `"on"` always does (for a proxy that passes the beta through); `"off"` never does.
+    /// `"on"` also does through another base URL (a proxy that passes the beta through);
+    /// `"off"` never does.
     /// Without it, a model that checks its earlier reasoning keeps its first tool list
     /// until `/clear`, and other models get the new list and a note.
     pub tool_changes: String,
@@ -98,11 +99,12 @@ impl AnthropicConfig {
     /// How requests for `model` handle tools that change mid-conversation.
     pub fn tool_changes(&self, model: &str) -> ToolChanges {
         let caps = crate::models::caps(model);
-        let native = match self.tool_changes.trim() {
-            "on" => true,
-            "off" => false,
-            _ => self.is_official() && caps.tool_changes,
-        };
+        let native = caps.tool_changes
+            && match self.tool_changes.trim() {
+                "on" => true,
+                "off" => false,
+                _ => self.is_official(),
+            };
         if native {
             ToolChanges::Native
         } else if caps.checks_thinking {
@@ -248,7 +250,7 @@ impl ModelProvider for AnthropicProvider {
         let key = self.api_key()?;
         let opts = self.cfg.body_options();
         let body = build_body(&request, &opts);
-        let betas = opts.betas(&request.model, &body);
+        let betas = opts.betas(&body);
         let base = Duration::from_millis(self.cfg.retry_base_ms);
         let mut retries = 0;
         loop {
@@ -336,6 +338,8 @@ mod tests {
             ..proxy
         };
         assert_eq!(on.tool_changes("claude-opus-5-5"), Native);
+        // Not for a model that doesn't accept the beta.
+        assert_eq!(on.tool_changes("claude-sonnet-5"), Replace);
         let off = AnthropicConfig {
             tool_changes: "off".into(),
             ..AnthropicConfig::default()

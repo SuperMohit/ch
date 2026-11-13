@@ -144,6 +144,12 @@ pub fn caps(model: &str) -> ModelCaps {
     }
 }
 
+/// Whether `model`'s server-side refusal fallback can go to a model that doesn't take
+/// mid-conversation tool changes: Claude Sonnet 5.5 falls back to Claude Sonnet 5.
+pub fn fallback_lacks_tool_changes(model: &str) -> bool {
+    parse(model) == Some((Family::Sonnet, (5, 5)))
+}
+
 /// Known context windows (input tokens). `None` for ids this table doesn't know.
 pub fn context_window(model: &str) -> Option<u64> {
     let (family, v) = parse(model)?;

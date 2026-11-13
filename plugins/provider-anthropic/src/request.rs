@@ -31,11 +31,10 @@ impl BodyOptions {
         !self.fallbacks.is_empty() && caps(model).refusal_fallback
     }
 
-    /// The betas a request for `model` needs.
-    /// The betas `body`, a request for `model`, needs.
-    pub fn betas(&self, model: &str, body: &Value) -> Vec<&'static str> {
+    /// The betas `body` needs.
+    pub fn betas(&self, body: &Value) -> Vec<&'static str> {
         let mut betas = Vec::new();
-        if self.uses_fallbacks(model) {
+        if body.get("fallbacks").is_some() {
             betas.push(crate::FALLBACK_BETA);
         }
         if body.pointer("/thinking/block_binding").is_some() {
@@ -109,10 +108,16 @@ pub fn build_body(req: &ModelRequest, opts: &BodyOptions) -> Value {
     if caps.thinking == ThinkingStyle::Adaptive && !opts.effort.is_empty() {
         body.insert("output_config".into(), json!({ "effort": opts.effort }));
     }
-    if opts.uses_fallbacks(&req.model) {
-        body.insert("fallbacks".into(), json!(opts.fallbacks));
+    let body = Value::Object(body);
+    // Claude Sonnet 5.5's server-side fallback answers some refusals with Claude Sonnet
+    // 5, which takes neither tool changes nor system messages.
+    let fallback_ok =
+        !(changes_tools(&body) && crate::models::fallback_lacks_tool_changes(&req.model));
+    let mut body = body;
+    if opts.uses_fallbacks(&req.model) && fallback_ok {
+        body["fallbacks"] = json!(opts.fallbacks);
     }
-    Value::Object(body)
+    body
 }
 
 fn thinking(req: &ModelRequest, caps: &ModelCaps, opts: &BodyOptions) -> Option<Value> {
@@ -371,7 +376,7 @@ mod tests {
             r.thinking_budget = None;
             let body = build_body(&r, o);
             let sent = body["thinking"]["block_binding"]["prefix_mismatch_behavior"].clone();
-            (sent, o.betas(model, &body).contains(&crate::BINDING_BETA))
+            (sent, o.betas(&body).contains(&crate::BINDING_BETA))
         };
         let mut o = opts();
         assert_eq!(binding("claude-opus-5-5", &o), (Value::Null, false));
@@ -586,10 +591,7 @@ mod tests {
         // The breakpoint stays on the user message: the system message is the tail.
         assert_eq!(user_blocks[1]["cache_control"]["type"], "ephemeral");
         assert!(msgs[3]["content"][0].get("cache_control").is_none());
-        assert!(
-            o.betas("claude-opus-5-5", &body)
-                .contains(&crate::TOOL_CHANGES_BETA)
-        );
+        assert!(o.betas(&body).contains(&crate::TOOL_CHANGES_BETA));
     }
 
     #[test]
@@ -663,10 +665,7 @@ mod tests {
         );
         assert!(text.contains("no longer available (don't call them): mcp__gh__old"));
         assert_eq!(body["tools"].as_array().unwrap().len(), 1);
-        assert!(
-            !o.betas("claude-opus-5-5", &body)
-                .contains(&crate::TOOL_CHANGES_BETA)
-        );
+        assert!(!o.betas(&body).contains(&crate::TOOL_CHANGES_BETA));
     }
 
     #[test]

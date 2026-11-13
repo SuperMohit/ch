@@ -6,7 +6,7 @@ mod model_call;
 mod sources;
 mod tools;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,8 +79,9 @@ pub struct Session {
     /// What built-in plugins and tool sources offer now.
     catalog: Arc<Catalog>,
     sources: Vec<Arc<dyn ToolSource>>,
-    /// Background tasks starting sources, aborted when the session ends.
-    source_tasks: Vec<tokio::task::AbortHandle>,
+    /// The task starting each source, by id, aborted when it is removed or the session
+    /// ends.
+    source_tasks: HashMap<String, tokio::task::AbortHandle>,
     /// Every tool definition this conversation was sent (ADR 0006).
     ledger: ToolLedger,
     /// The system prompt of this conversation's first request, sent unchanged after.
@@ -223,8 +224,10 @@ impl Session {
                 self.system = Some(p.system);
                 self.ledger = p.tools;
             }
+            // Its requests had the built-in tools; tools from sources running now are
+            // new to it and are announced as additions.
             None if !self.history.is_empty() => {
-                self.ledger = ToolLedger::sent(&self.catalog.offered().0);
+                self.ledger = ToolLedger::sent(&self.catalog.builtin());
             }
             None => return,
         }
@@ -491,6 +494,8 @@ impl Session {
                 Ok(r) => r,
                 Err(reason) => break (reason, false),
             };
+            // The call may have changed the tools: what runs next sees the new list.
+            let cx = self.cx(step, cancel.clone());
             step += 1;
             let text = response.message.text();
             if !text.trim().is_empty() {

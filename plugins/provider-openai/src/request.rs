@@ -153,6 +153,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_tool_change_is_a_note_in_the_user_message() {
+        let msg = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::text("go on"),
+                ContentBlock::ToolsChanged {
+                    added: vec!["mcp__gh__a".into()],
+                    removed: vec!["mcp__gh__b".into()],
+                },
+            ],
+        };
+        let mut out = Vec::new();
+        user(&msg, &mut out);
+        assert_eq!(out.len(), 1);
+        let text = out[0]["content"].as_str().unwrap();
+        assert!(text.starts_with("go on\n\n<system-reminder>"), "{text}");
+        assert!(text.contains("Tools now available: mcp__gh__a."), "{text}");
+        assert!(text.contains("(don't call them): mcp__gh__b."), "{text}");
+    }
+
+    #[test]
     fn a_stored_malformed_call_is_sent_back_unchanged() {
         let raw = json!({"_invalid_json": "{\"pa"});
         let msg = Message {

@@ -26,6 +26,7 @@ struct State {
     sink: Option<ToolSink>,
     tools: Vec<Arc<dyn Tool>>,
     fail: Option<String>,
+    panic: bool,
     delay: Duration,
     starts: usize,
     stops: usize,
@@ -57,6 +58,21 @@ impl ScriptedSource {
     pub fn failing(self, reason: &str) -> Self {
         self.state().fail = Some(reason.into());
         self
+    }
+
+    /// Makes `start` panic.
+    pub fn panicking(self) -> Self {
+        self.state().panic = true;
+        self
+    }
+
+    /// The sink of the source's latest start, to report through it later as a stale
+    /// instance would.
+    pub fn sink(&self) -> ToolSink {
+        self.state()
+            .sink
+            .clone()
+            .expect("the source wasn't started")
     }
 
     /// Makes `start` take `delay` before reporting its tools.
@@ -126,13 +142,14 @@ impl ToolSource for ScriptedSource {
     }
 
     async fn start(&self, sink: ToolSink, _cx: &Cx) -> anyhow::Result<()> {
-        let (delay, fail) = {
+        let (delay, fail, panic) = {
             let mut st = self.state();
             st.starts += 1;
             st.sink = Some(sink.clone());
-            (st.delay, st.fail.clone())
+            (st.delay, st.fail.clone(), st.panic)
         };
         tokio::time::sleep(delay).await;
+        assert!(!panic, "scripted panic in start");
         if let Some(reason) = fail {
             anyhow::bail!("{reason}");
         }
