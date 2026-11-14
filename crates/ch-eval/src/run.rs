@@ -907,7 +907,7 @@ pub enum Verdict {
 /// `session_start` event's list, written before the agent's first command.
 ///
 /// `ch` ended normally when it exited with a code of its own other than 1 (done, step
-/// limit, context overflow, a hook stop, a denied prompt, cancelled), or was killed at
+/// limit, context overflow, a hook stop, a denied prompt, a refusal, cancelled), or was killed at
 /// the timeout. A run through the proxy with no successful model call says nothing about
 /// the agent, however it ended.
 pub fn classify(
@@ -920,7 +920,7 @@ pub fn classify(
     if let Some(e) = &exit.start_error {
         return Verdict::Infra(format!("the agent's container didn't start: {e}"));
     }
-    let ended_normally = exit.timed_out || matches!(exit.code, Some(0 | 2 | 3 | 4 | 5 | 130));
+    let ended_normally = exit.timed_out || matches!(exit.code, Some(0 | 2 | 3 | 4 | 5 | 6 | 130));
     if let Some(calls) = calls {
         let last = || {
             let status = match calls.last_status {
@@ -1373,7 +1373,7 @@ mod tests {
             Verdict::Transient(m) if m.contains("529")
         ));
         // A run that ended normally is the agent's, whatever the API did last.
-        for code in [Some(0), Some(2), Some(3)] {
+        for code in [Some(0), Some(2), Some(3), Some(6), Some(130)] {
             assert_eq!(
                 classify(&exit(code), Some(&failing), true, None, &cell),
                 Verdict::Record

@@ -52,8 +52,8 @@ impl Usage {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResultLine {
-    /// `done`, `error`, `step_limit`, `context_overflow`, `hook_stop`, `cancelled` or
-    /// `prompt_denied`.
+    /// `done`, `error`, `step_limit`, `context_overflow`, `hook_stop`, `cancelled`,
+    /// `prompt_denied` or `refused`.
     pub reason: String,
     pub detail: Option<String>,
     pub exit_code: i32,
