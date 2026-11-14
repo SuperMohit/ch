@@ -29,7 +29,7 @@ use tokio::task::JoinHandle;
 
 use crate::config::{ServerConfig, Transport};
 use crate::launch::{self, HttpLaunch, Launch, Places, StdioLaunch};
-use crate::procs::{self, StderrTail};
+use crate::procs::{self, StartGuard, StderrTail};
 use crate::redact::Redactor;
 use crate::tool::{Link, McpTool};
 use crate::transport::LineTransport;
@@ -77,6 +77,9 @@ struct Process {
     child: Arc<AsyncMutex<Child>>,
     stdin: Arc<AsyncMutex<Option<ChildStdin>>>,
     stderr: Arc<StderrTail>,
+    /// Set by the first stop. A second one (the exit monitor, then the session) would
+    /// signal a group whose leader was reaped, and its number may be reused by then.
+    stopped: Arc<AtomicBool>,
 }
 
 impl Process {
@@ -84,6 +87,9 @@ impl Process {
     /// write blocked on a full pipe holds stdin; then the signals come without waiting
     /// for it.
     async fn stop(&self) {
+        if self.stopped.swap(true, Ordering::SeqCst) {
+            return;
+        }
         if let Ok(mut stdin) = self.stdin.try_lock() {
             drop(stdin.take());
         }
@@ -205,9 +211,12 @@ impl McpServer {
                 .map(|u| u.to_string())
                 .unwrap_or_default(),
         };
+        // Kills the process if this start is dropped before handing it over.
+        let mut guard: Option<StartGuard> = None;
         let (service, process) = match launch {
             Launch::Stdio(l) => {
                 let process = spawn(&l, &self.cfg.name)?;
+                guard = Some(StartGuard::new(process.pgid));
                 *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(process.clone());
                 let transport = {
                     let mut child = process.child.lock().await;
@@ -222,6 +231,10 @@ impl McpServer {
                 match served {
                     Ok(s) if ours => (s, Some(process)),
                     Ok(s) => {
+                        // The stop that took it stops it.
+                        if let Some(g) = &mut guard {
+                            g.disarm();
+                        }
                         s.cancellation_token().cancel();
                         bail!("it was stopped while starting");
                     }
@@ -232,6 +245,9 @@ impl McpServer {
                         };
                         if ours {
                             process.stop().await;
+                        }
+                        if let Some(g) = &mut guard {
+                            g.disarm();
                         }
                         bail!("{}", redactor.redact(&reason));
                     }
@@ -321,9 +337,15 @@ impl McpServer {
                 if let Some(p) = &running.process {
                     p.stop().await;
                 }
+                if let Some(g) = &mut guard {
+                    g.disarm();
+                }
                 bail!("it was stopped while starting");
             }
             *run = Some(running);
+        }
+        if let Some(g) = &mut guard {
+            g.disarm();
         }
         shared.first_list().await
     }
@@ -365,8 +387,10 @@ impl ToolSource for McpServer {
 
     async fn start(&self, sink: ToolSink, _cx: &Cx) -> anyhow::Result<()> {
         self.stop_running().await;
+        let epoch = self.epoch.load(Ordering::SeqCst);
         let result = self.connect(sink).await;
-        if result.is_err() {
+        // Clean up only this start: a newer start or a stop owns the server otherwise.
+        if result.is_err() && self.epoch.load(Ordering::SeqCst) == epoch {
             self.stop_running().await;
         }
         result.map_err(|e| anyhow!("{}", printable(&format!("{e:#}"))))
@@ -410,6 +434,7 @@ fn spawn(l: &StdioLaunch, name: &str) -> anyhow::Result<Process> {
         child: Arc::new(AsyncMutex::new(child)),
         stdin: Arc::new(AsyncMutex::new(stdin)),
         stderr,
+        stopped: Arc::new(AtomicBool::new(false)),
     })
 }
 

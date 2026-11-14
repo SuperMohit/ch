@@ -45,6 +45,35 @@ pub fn kill_all() {
     }
 }
 
+/// Kills a process group on drop, unless disarmed. The code starting a server holds one
+/// until it hands the process over (to the running state that a stop can reach), so a
+/// start dropped part-way, such as an aborted start task, never leaves the process
+/// running.
+pub struct StartGuard {
+    pgid: i32,
+    armed: bool,
+}
+
+impl StartGuard {
+    pub fn new(pgid: i32) -> Self {
+        Self { pgid, armed: true }
+    }
+
+    /// The process is owned elsewhere now.
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            signal_group(Pid::from_raw(self.pgid), Signal::SIGKILL);
+            unregister(self.pgid);
+        }
+    }
+}
+
 /// How much of a server's stderr is kept.
 pub const STDERR_CAP: usize = 64 * 1024;
 
