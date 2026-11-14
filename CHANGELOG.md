@@ -8,11 +8,12 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 - An unknown key under `[model]`, `[agent]` or `[select]` (including `[model.pricing]` and `[model.summarizer]`) stops `ch` with an error that lists the valid keys. Before, a misspelled setting such as `agent.max_step` was silently ignored. Top-level keys and `[plugins.*]` tables are unchanged.
 - A `[model.summarizer]` that names a provider with no default model, such as `openai`, now needs `model.summarizer.id`, or `ch` stops at startup.
+- `ch -p` exits with code 6 when the model refuses to answer, and the result's reason is `refused`. Before, a refusal ended as `done` with exit code 0, so scripts and evals counted it as a success.
 
 ### New
 
 - **Interactive REPL.** `ch` streams the model's text as it arrives, shows one line per tool call and coloured diffs for edits, and takes multi-line input. Esc or Ctrl-C interrupts a turn and keeps the history.
-- **Headless mode.** `ch -p "task"` runs one task without interaction, reading the prompt from stdin with `-p -`. `--output-format` is `text`, `json` or `stream-json`, and the exit code says how the run ended (done, error, step limit, context overflow, stopped by a hook, prompt blocked, cancelled).
+- **Headless mode.** `ch -p "task"` runs one task without interaction, reading the prompt from stdin with `-p -`. `--output-format` is `text`, `json` or `stream-json`, and the exit code says how the run ended (done, error, step limit, context overflow, stopped by a hook, prompt blocked, refused, cancelled).
 - **Model providers.** The Anthropic Messages API, with streaming, retries, prompt caching and extended thinking, and OpenAI-compatible chat completions (OpenAI, OpenRouter, vLLM, SGLang).
 - **Tools.** `read_file`, `edit_file`, `write_file`, `list_files`, `glob_files`, `grep_text`, `bash` and `web_fetch`. With the file tools turned off, `bash` switches to a bash-only description.
 - **Permissions.** Three modes (`ask`, `accept-edits`, `bypass`) and `allow`, `ask` and `deny` rules of the form `tool` or `tool:glob`. Each part of a compound shell command is checked separately, read-only commands run without asking, and a built-in deny list blocks commands such as `sudo` and `git push`. Answering "always" can save the rule to `.ch/config.toml`.
@@ -76,6 +77,8 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 - A session can only be open in one `ch` at a time. A second `ch -c` (or `/resume`) for a session another process has open now stops with a message, instead of both processes saving over each other's turns. The lock is released when `ch` exits, even after a crash.
 - `/clear` starts a new session instead of emptying the current one. Before, the next turn saved over the cleared conversation, so it was lost. Now it stays saved and `/resume` brings it back.
 - `edit_file` and `write_file` change the exact content the read-before-write check verified. Before, they read the file a second time after the check, so a change made between the two reads was edited over without the "changed on disk" error.
+- A repository's `.ch/config.toml` can no longer stop `ch` from starting with an out-of-range `plugins.planning.refresh_after_steps` or `plugins.stuck` limit. As for the other settings a project may set without trust, the value is corrected with a warning.
+- `/clear` starts the new conversation's token and cost totals at zero, so the saved session no longer carries the previous conversation's spend. `/cost` shows the conversation's totals, plus the whole run's after a `/clear` or `/resume`.
 
 ### Security
 
@@ -100,3 +103,5 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 - Environment variables in front of a read-only command now make it ask, except locale and display settings (`LANG`, `LC_*`, `TZ`, `NO_COLOR`, `TERM`, `COLUMNS`, `LINES`). Before, `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=<cmd> git status` ran `<cmd>` without asking. Assignments after `env` (`env LD_PRELOAD=x cat`) are now checked too.
 - `env` and `printenv` ask before running, because they print the whole environment, provider API keys included.
 - Commands that nest substitutions, `sh -c` or `eval` more than four levels deep are denied, because the deny list can't check the innermost parts.
+- A command's own environment can no longer bring back a variable the executor hides, such as a provider's API key.
+

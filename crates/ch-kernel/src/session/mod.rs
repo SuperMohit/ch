@@ -78,8 +78,11 @@ pub struct Session {
     hooks: Vec<Arc<dyn Hook>>,
     cancel: CancelHandle,
     turn: u32,
-    usage: Usage,
-    cost: f64,
+    /// What the current conversation has used, saved with it: starts again on `/clear`,
+    /// comes back with the conversation on `/resume`.
+    spend: Spend,
+    /// What this process has used, across `/clear` and `/resume`.
+    process_spend: Spend,
     calibrator: TokenCalibrator,
     always_allow: HashSet<String>,
     store: Option<SessionStore>,
@@ -88,6 +91,20 @@ pub struct Session {
     sink_tasks: Vec<JoinHandle<()>>,
     started: bool,
     ended: bool,
+}
+
+/// Tokens and cost added up over model calls.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Spend {
+    pub(crate) usage: Usage,
+    pub(crate) cost: f64,
+}
+
+impl Spend {
+    fn add(&mut self, usage: &Usage, cost: Option<f64>) {
+        self.usage.add(usage);
+        self.cost += cost.unwrap_or(0.0);
+    }
 }
 
 impl Session {
@@ -127,12 +144,21 @@ impl Session {
     pub fn provider_id(&self) -> &str {
         self.provider.id()
     }
+    /// Tokens the current conversation has used, including in earlier processes.
     pub fn usage(&self) -> Usage {
-        self.usage
+        self.spend.usage
     }
-    /// Total cost in USD (0 when pricing isn't configured).
+    /// The current conversation's cost in USD (0 when pricing isn't configured).
     pub fn cost(&self) -> f64 {
-        self.cost
+        self.spend.cost
+    }
+    /// Tokens this process has used, across `/clear` and `/resume`.
+    pub fn process_usage(&self) -> Usage {
+        self.process_spend.usage
+    }
+    /// This process's cost in USD, across `/clear` and `/resume`.
+    pub fn process_cost(&self) -> f64 {
+        self.process_spend.cost
     }
     pub fn turn(&self) -> u32 {
         self.turn
@@ -160,7 +186,7 @@ impl Session {
     }
 
     /// Starts a new conversation under a new id (`/clear`), leaving the old one saved as
-    /// it was. Usage totals are kept.
+    /// it was. The conversation's usage starts again from zero; the process's is kept.
     pub fn clear(&mut self) -> anyhow::Result<()> {
         let id = builder::new_session_id();
         if let Some(store) = &self.store {
@@ -170,6 +196,7 @@ impl Session {
         self.created_at = Utc::now();
         self.turn = 0;
         self.history.clear();
+        self.spend = Spend::default();
         Ok(())
     }
 
@@ -191,8 +218,8 @@ impl Session {
                 turns: self.turn,
             },
             history: self.history.clone(),
-            usage: self.usage,
-            cost: self.cost,
+            usage: self.spend.usage,
+            cost: self.spend.cost,
         }
     }
 
@@ -207,8 +234,10 @@ impl Session {
         self.created_at = snap.meta.created_at;
         self.turn = snap.meta.turns;
         self.history = snap.history;
-        self.usage = snap.usage;
-        self.cost = snap.cost;
+        self.spend = Spend {
+            usage: snap.usage,
+            cost: snap.cost,
+        };
         Ok(())
     }
 
@@ -427,7 +456,7 @@ impl Session {
             }
             // A refused or cut-off response may hold incomplete tool calls: never run them.
             let cut_off = match response.stop_reason {
-                StopReason::Refusal => Some(TerminationReason::Done),
+                StopReason::Refusal => Some(TerminationReason::Refused),
                 StopReason::ContextWindowExceeded => Some(TerminationReason::ContextOverflow {
                     message: "the response was cut off because the context window is full".into(),
                 }),

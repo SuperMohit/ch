@@ -234,15 +234,13 @@ impl Session {
         }
     }
 
-    /// Adds a model call's usage and cost to the session's totals.
+    /// Adds a model call's usage and cost to the conversation's and the process's totals.
     fn record_usage(&mut self, model: &str, purpose: &str, usage: &Usage) {
-        self.usage.add(usage);
         let cost = self
             .for_configured_model(model, self.kcfg.model.pricing)
             .map(|p| p.cost(usage));
-        if let Some(c) = cost {
-            self.cost += c;
-        }
+        self.spend.add(usage, cost);
+        self.process_spend.add(usage, cost);
         self.events.emit(AgentEvent::Usage {
             usage: *usage,
             cost,

@@ -2475,7 +2475,8 @@ async fn refused_or_cut_off_responses_never_run_tools() {
         .insert(0, ContentBlock::text("I can't help with that."));
     let mut h = harness(vec![Ok(refusal)], vec![], config());
     let r = h.session.run_turn("go").await;
-    assert_eq!(r.reason, TerminationReason::Done);
+    assert_eq!(r.reason, TerminationReason::Refused);
+    assert!(!r.reason.is_success());
     let ev = h.session.history().events();
     assert_eq!(ev.len(), 2);
     assert!(ev[1].message.tool_calls().is_empty());
@@ -2702,6 +2703,20 @@ async fn clear_starts_a_new_session_and_keeps_the_old_one() {
     let new = store.load(s.id()).unwrap();
     assert_eq!((new.meta.title.as_str(), new.meta.turns), ("second", 1));
     assert_eq!(store.latest().unwrap().unwrap().id, s.id());
+
+    // Each conversation is saved with its own usage; the process keeps the sum.
+    assert_eq!(old.usage, usage());
+    assert_eq!(new.usage, usage());
+    assert_eq!(s.usage(), usage());
+    let mut both = usage();
+    both.add(&usage());
+    assert_eq!(s.process_usage(), both);
+    s.restore(old).unwrap();
+    assert_eq!(s.usage(), usage());
+    assert_eq!(s.process_usage(), both);
+    s.clear().unwrap();
+    assert_eq!(s.usage(), Usage::default());
+    assert_eq!(s.process_usage(), both);
 }
 
 #[cfg(unix)]

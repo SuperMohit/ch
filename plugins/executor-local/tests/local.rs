@@ -112,6 +112,14 @@ async fn hidden_variables_are_not_in_the_environment() {
         .await
         .unwrap();
     assert_eq!(hidden.stdout, "unset");
+    let mut put_back = req();
+    put_back.env.push(("HOME".into(), "/tmp/key".into()));
+    let still_hidden = LocalExecutor::default()
+        .hide_env(["HOME".to_string()])
+        .run(put_back, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(still_hidden.stdout, "unset");
 }
 
 #[test]

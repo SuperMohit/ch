@@ -14,7 +14,7 @@ use crate::tokens::TokenCalibrator;
 use crate::tool::Tool;
 use crate::types::Usage;
 
-use super::{CancelHandle, Session};
+use super::{CancelHandle, Session, Spend};
 
 pub struct SessionBuilder {
     registry: Arc<Registry>,
@@ -170,8 +170,8 @@ impl SessionBuilder {
             hooks,
             cancel: CancelHandle::default(),
             turn,
-            usage,
-            cost,
+            spend: Spend { usage, cost },
+            process_spend: Spend::default(),
             calibrator: TokenCalibrator::default(),
             always_allow: HashSet::new(),
             store: self.store,

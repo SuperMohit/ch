@@ -40,7 +40,7 @@ pub struct PrintResult {
 /// Process exit code for a termination reason.
 ///
 /// done 0, error 1, step_limit 2, context_overflow 3, hook_stop 4, prompt_denied 5,
-/// cancelled 130.
+/// refused 6, cancelled 130.
 pub fn exit_code(reason: &TerminationReason) -> i32 {
     match reason {
         TerminationReason::Done => 0,
@@ -49,15 +49,17 @@ pub fn exit_code(reason: &TerminationReason) -> i32 {
         TerminationReason::ContextOverflow { .. } => 3,
         TerminationReason::HookStop { .. } => 4,
         TerminationReason::PromptDenied { .. } => 5,
+        TerminationReason::Refused => 6,
         TerminationReason::Cancelled => 130,
     }
 }
 
 fn reason_detail(reason: &TerminationReason) -> Option<String> {
     match reason {
-        TerminationReason::Done | TerminationReason::StepLimit | TerminationReason::Cancelled => {
-            None
-        }
+        TerminationReason::Done
+        | TerminationReason::StepLimit
+        | TerminationReason::Refused
+        | TerminationReason::Cancelled => None,
         TerminationReason::ContextOverflow { message } | TerminationReason::Error { message } => {
             Some(message.clone())
         }
@@ -263,6 +265,7 @@ mod tests {
             exit_code(&TerminationReason::PromptDenied { reason: "r".into() }),
             5
         );
+        assert_eq!(exit_code(&TerminationReason::Refused), 6);
         assert_eq!(exit_code(&TerminationReason::Cancelled), 130);
     }
 }

@@ -9,7 +9,7 @@ use clap::{Parser, ValueEnum};
 /// Without `-p`, starts the interactive REPL (running PROMPT first, if given).
 /// With `-p`, runs one task headlessly and exits with a code that reflects how it ended:
 /// 0 done, 1 error, 2 step limit, 3 context overflow, 4 stopped by a hook, 5 prompt
-/// blocked, 130 cancelled.
+/// blocked, 6 the model refused, 130 cancelled.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "ch", version, about, long_about)]
 pub struct Cli {

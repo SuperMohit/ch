@@ -15,6 +15,7 @@ ch-kernel.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 ch-provider-scripted.workspace = true

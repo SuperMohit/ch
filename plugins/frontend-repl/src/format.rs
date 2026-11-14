@@ -217,6 +217,7 @@ pub fn reason_text(reason: &TerminationReason) -> Option<String> {
     let text = match reason {
         TerminationReason::Done => None,
         TerminationReason::Cancelled => Some("interrupted".into()),
+        TerminationReason::Refused => Some("the model declined to answer".into()),
         TerminationReason::StepLimit => {
             Some("stopped: step limit reached (raise agent.max_steps to allow more)".into())
         }

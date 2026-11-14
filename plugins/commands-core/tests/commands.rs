@@ -160,16 +160,21 @@ async fn exit_and_quit() {
 }
 
 #[tokio::test]
-async fn clear_starts_a_new_session_but_keeps_usage() {
+async fn clear_starts_a_new_conversation_and_the_process_keeps_its_usage() {
     let mut s = session(CONFIG, None);
     s.run_turn("hello").await;
     assert!(!s.history().is_empty());
+    assert!(!message(&mut s, "/cost").await.contains("Since ch started"));
     let old_id = s.id().to_string();
     let out = message(&mut s, "/clear").await;
     assert!(out.contains("new conversation"), "{out}");
     assert!(s.history().is_empty());
     assert_ne!(s.id(), old_id);
-    assert_eq!(s.usage().input_tokens, 1200);
+    assert_eq!(s.usage().input_tokens, 0);
+    assert_eq!(s.process_usage().input_tokens, 1200);
+    let cost = message(&mut s, "/cost").await;
+    assert!(cost.contains("- Input: 0"), "{cost}");
+    assert!(cost.contains("Since ch started:"), "{cost}");
 }
 
 #[tokio::test]

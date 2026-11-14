@@ -29,8 +29,6 @@ mod tracker;
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use anyhow::bail;
-
 use ch_kernel::reexports::async_trait;
 use ch_kernel::{
     ContentBlock, Cx, Hook, HookDecision, HookEvent, HookPoint, Plugin, PluginManifest, RegisterCx,
@@ -70,24 +68,31 @@ impl Default for StuckConfig {
 }
 
 impl StuckConfig {
-    /// Rejects settings under which a limit could never take effect or would fire on
-    /// every call.
-    pub fn validate(&self) -> anyhow::Result<()> {
+    /// Corrects settings under which a limit would fire on every call or could never
+    /// take effect, with a warning: a project may set these without trust, so a bad
+    /// value mustn't stop `ch` from starting.
+    pub fn checked(mut self) -> (Self, Vec<String>) {
+        let mut warnings = Vec::new();
         if self.remind_after == 1 {
-            bail!(
-                "plugins.stuck.remind_after = 1 would add the reminder to every call; use 2 \
-                 or more, or 0 to turn it off"
+            warnings.push(
+                "plugins.stuck.remind_after = 1 would add the reminder to every call; using 2 \
+                 (0 turns it off)"
+                    .to_string(),
             );
+            self.remind_after = 2;
         }
         if self.refuse_after > 0 && self.stop_after > 0 && self.refuse_after >= self.stop_after {
-            bail!(
+            // Lowering refuse_after keeps the stop where it was, so a project can't make
+            // a hopeless turn run longer, and a refusal still comes before the stop.
+            let fixed = self.stop_after - 1;
+            warnings.push(format!(
                 "plugins.stuck.refuse_after ({}) must be below stop_after ({}), or the turn \
-                 ends before a call is ever refused",
-                self.refuse_after,
-                self.stop_after
-            );
+                 ends before a call is ever refused; using {fixed}",
+                self.refuse_after, self.stop_after
+            ));
+            self.refuse_after = fixed;
         }
-        Ok(())
+        (self, warnings)
     }
 }
 
@@ -117,7 +122,10 @@ impl Plugin for StuckPlugin {
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
         let config: StuckConfig = cx.config()?;
-        config.validate()?;
+        let (config, warnings) = config.checked();
+        for warning in warnings {
+            tracing::warn!("{warning}");
+        }
         cx.add_hook(StuckHook::new(config));
         Ok(())
     }
@@ -261,16 +269,27 @@ mod tests {
     }
 
     #[test]
-    fn settings_that_cannot_work_are_rejected() {
+    fn settings_that_cannot_work_are_corrected() {
         let with = |f: fn(&mut StuckConfig)| {
             let mut c = StuckConfig::default();
             f(&mut c);
-            c.validate()
+            c.checked()
         };
-        assert!(with(|_| {}).is_ok());
-        assert!(with(|c| c.remind_after = 1).is_err());
-        assert!(with(|c| c.refuse_after = 8).is_err());
-        assert!(with(|c| c.stop_after = 0).is_ok());
-        assert!(with(|c| c.refuse_after = 0).is_ok());
+        let (c, warnings) = with(|_| {});
+        assert_eq!(c, StuckConfig::default());
+        assert!(warnings.is_empty());
+        let (c, warnings) = with(|c| c.remind_after = 1);
+        assert_eq!(c.remind_after, 2);
+        assert!(warnings[0].contains("every call"), "{warnings:?}");
+        let (c, warnings) = with(|c| c.refuse_after = 8);
+        assert_eq!((c.refuse_after, c.stop_after), (7, 8));
+        assert!(warnings[0].contains("below stop_after"), "{warnings:?}");
+        let (c, _) = with(|c| {
+            c.refuse_after = 3;
+            c.stop_after = 1;
+        });
+        assert_eq!((c.refuse_after, c.stop_after), (0, 1));
+        assert!(with(|c| c.stop_after = 0).1.is_empty());
+        assert!(with(|c| c.refuse_after = 0).1.is_empty());
     }
 }

@@ -293,7 +293,7 @@ The design is in [ADR 0004](adr/0004-context-management.md), with notes on where
 
 **Safety (always on):** see [ADR 0001](adr/0001-sandbox-and-agent-security-responsibilities.md) for what the agent protects and what a sandbox must. A path guard (resolve symlinks, reject anything outside the workspace root); a file-state tracker `{path: (hash, full_read)}` that rejects edits to files never fully read or changed since the last read; an allow / ask / deny permission layer (read-only commands such as `git status/diff/log`, `ls`, `rg`, `cat` are allowed, destructive ones denied); tool errors returned as observations so the loop never crashes.
 
-**Telemetry per run:** success, cost (tokens × price), turns, tool calls, **termination reason** (done / step limit / overflow / stopped by a hook, such as `stuck` / cancelled / error), peak context ÷ window, elision and summary counts, whether any file was edited, and how many times an already-edited file was re-patched.
+**Telemetry per run:** success, cost (tokens × price), turns, tool calls, **termination reason** (done / step limit / overflow / stopped by a hook, such as `stuck` / prompt blocked / refused / cancelled / error), peak context ÷ window, elision and summary counts, whether any file was edited, and how many times an already-edited file was re-patched.
 
 ## 9. Testing strategy
 
