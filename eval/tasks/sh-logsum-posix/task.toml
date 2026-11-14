@@ -1,0 +1,10 @@
+instruction = """
+`bin/logsum` starts with `#!/bin/sh`, but it uses bash features, so it fails where sh \
+is dash (Debian, Ubuntu, most CI images). Rewrite it in POSIX sh, so that \
+`sh bin/logsum` prints the same output and exits with the same status as \
+`bash bin/logsum` does now, for any input. Keep the `#!/bin/sh` line, and don't call bash.
+"""
+verify = "sh test_logsum.sh"
+timeout_secs = 600
+max_steps = 50
+tags = ["chore", "shell"]

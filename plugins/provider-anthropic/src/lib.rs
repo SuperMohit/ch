@@ -61,6 +61,11 @@ pub struct AnthropicConfig {
     /// `thinking.block_binding.prefix_mismatch_behavior` (such as `"error"`), sent with
     /// the binding-controls beta when thinking is on; empty to leave it to the account.
     pub prefix_mismatch_behavior: String,
+    /// Whether `base_url` is the official API, or a proxy that forwards requests to it
+    /// unchanged (as `ch-eval`'s credential proxy does). What is sent only to the
+    /// official API (`fallbacks`, and `eager_input_streaming` by default) follows this.
+    /// Unset, it is whether `base_url` is api.anthropic.com.
+    pub official_api: Option<bool>,
 }
 
 impl Default for AnthropicConfig {
@@ -76,13 +81,15 @@ impl Default for AnthropicConfig {
             fallbacks: "default".into(),
             eager_input_streaming: None,
             prefix_mismatch_behavior: String::new(),
+            official_api: None,
         }
     }
 }
 
 impl AnthropicConfig {
     fn is_official(&self) -> bool {
-        self.base_url.contains(OFFICIAL_HOST)
+        self.official_api
+            .unwrap_or_else(|| self.base_url.contains(OFFICIAL_HOST))
     }
 
     fn body_options(&self) -> BodyOptions {
@@ -308,6 +315,21 @@ mod tests {
         }
         .body_options();
         assert!(off.fallbacks.is_empty());
+
+        // A proxy declared to forward to the official API gets what it would.
+        let forwarding = AnthropicConfig {
+            base_url: "http://ch-eval-proxy:8080/anthropic".into(),
+            official_api: Some(true),
+            ..Default::default()
+        }
+        .body_options();
+        assert_eq!(forwarding, official);
+        let declared_other = AnthropicConfig {
+            official_api: Some(false),
+            ..Default::default()
+        }
+        .body_options();
+        assert_eq!(declared_other, proxy);
     }
 
     #[test]

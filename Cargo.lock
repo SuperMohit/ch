@@ -194,6 +194,7 @@ dependencies = [
  "ch-commands-markdown",
  "ch-context",
  "ch-diagnostics",
+ "ch-eval",
  "ch-executor-local",
  "ch-frontend-print",
  "ch-frontend-repl",
@@ -214,6 +215,7 @@ dependencies = [
  "dirs",
  "futures",
  "insta",
+ "nix",
  "serde",
  "serde_json",
  "sha2",
@@ -223,6 +225,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]
@@ -301,6 +304,30 @@ dependencies = [
 [[package]]
 name = "ch-eval"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "ch-kernel",
+ "ch-provider-anthropic",
+ "chrono",
+ "clap",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "nix",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shell-words",
+ "tempfile",
+ "tokio",
+ "toml",
+ "uuid",
+ "wiremock",
+]
 
 [[package]]
 name = "ch-executor-docker"

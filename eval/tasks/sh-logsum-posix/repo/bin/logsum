@@ -1,0 +1,38 @@
+#!/bin/sh
+# Summarizes a log: counts its lines by level (the first word of each line, in any
+# case). Levels other than error, warn and info count as "other"; blank lines are
+# skipped.
+#
+# Usage: logsum [-q] FILE
+#   -q  print only the number of errors
+#
+# Exits 1 when the log has errors, 2 on a usage error, and 0 otherwise.
+
+quiet=0
+if [[ "$1" == "-q" ]]; then
+  quiet=1
+  shift
+fi
+if [[ $# -ne 1 || ! -f "$1" ]]; then
+  echo "usage: logsum [-q] FILE" >&2
+  exit 2
+fi
+
+declare -A counts=([error]=0 [warn]=0 [info]=0 [other]=0)
+while read -r level rest; do
+  [[ -z "$level" ]] && continue
+  level="${level,,}"
+  case "$level" in
+    error|warn|info) ((counts[$level]++)) ;;
+    *) ((counts[other]++)) ;;
+  esac
+done < "$1"
+
+if (( quiet )); then
+  echo "${counts[error]}"
+else
+  for level in error warn info other; do
+    echo "$level: ${counts[$level]}"
+  done
+fi
+(( counts[error] == 0 ))

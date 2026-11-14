@@ -1,0 +1,6 @@
+INFO server starting
+INFO listening on :8080
+WARN slow request: GET /reports took 2.4s
+ERROR database connection lost
+info reconnected
+DEBUG pool size 4

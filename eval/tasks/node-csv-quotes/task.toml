@@ -1,0 +1,11 @@
+instruction = """
+Add support for quoted fields to `parseLine` in csv.js. A field may be wrapped in \
+double quotes. Inside the quotes, a comma is part of the value, and two double quotes \
+(`""`) stand for one. The surrounding quotes are not part of the value. Unquoted fields \
+keep working as they do now. Quoted fields never contain line breaks, so `parse` needs \
+no change beyond what `parseLine` does.
+"""
+verify = "node test_hidden.cjs"
+timeout_secs = 600
+max_steps = 50
+tags = ["feature", "node"]

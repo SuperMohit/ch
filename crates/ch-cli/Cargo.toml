@@ -115,10 +115,17 @@ ch-executor-local = { workspace = true, optional = true }
 # ch-telemetry-jsonl = { workspace = true, optional = true }
 # ch-telemetry-langfuse = { workspace = true, optional = true }
 
+# `prctl(PR_SET_DUMPABLE, 0)` at startup; see `main.rs`.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix.workspace = true
+
 [dev-dependencies]
+# The eval pipeline test drives this crate's `ch` binary through ch-eval's host backend.
+ch-eval = { workspace = true, features = ["host-backend"] }
 insta.workspace = true
 tempfile.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+wiremock.workspace = true

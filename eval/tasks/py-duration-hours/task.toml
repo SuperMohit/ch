@@ -1,0 +1,9 @@
+instruction = """
+`parse_duration` in durations.py gives the wrong number of seconds for durations with \
+an hours part: `parse_duration("1h30m")` returns 1860, but it should be 5400. Fix the \
+bug, and keep everything else it does as it is.
+"""
+verify = "python3 -I test_hidden_durations.py"
+timeout_secs = 600
+max_steps = 50
+tags = ["bugfix", "python"]

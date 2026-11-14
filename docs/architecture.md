@@ -185,7 +185,7 @@ coding-harness/
 │   ├── ch-plugin-protocol/          # JSON-RPC message types for external plugins (shared)
 │   ├── ch-plugin-sdk/               # helper crate for writing external plugins in Rust
 │   ├── ch-cli/                      # the `ch` binary: config loading, plugin wiring, picks frontend
-│   ├── ch-eval/                     # eval runner (headless frontend + matrix over plugin configs)
+│   ├── ch-eval/                     # eval runner: `ch -p` per task × config cell in Docker, a credential proxy, a report
 ├── plugins/
 │   ├── provider-anthropic/   provider-openai/    provider-scripted/ (tests)
 │   ├── tools-fs/             tool-bash/          tool-web-fetch/
@@ -198,10 +198,11 @@ coding-harness/
 │   └── telemetry-langfuse/   telemetry-jsonl/
 ├── prompts/                         # prompt templates used by prompt-base, planning, context, stuck
 ├── examples/plugins/                # sample external plugins (Python + Rust)
+├── eval/                            # ch-eval's tasks (tasks/) and Docker images (docker/)
 └── tests/fixtures/                  # toy repos for end-to-end tests
 ```
 
-Each plugin crate depends only on `ch-kernel` (plus `tools-fs` on `safety`, whose services it uses). `ch-cli` links the plugins in, one cargo feature each. Plugins find each other at runtime through the registry, not through crate dependencies: `tool-bash`, for example, gets its executor from `Cx::executor`.
+Each plugin crate depends only on `ch-kernel` (plus `tools-fs` on `safety`, whose services it uses). `ch-cli` links the plugins in, one cargo feature each. Plugins find each other at runtime through the registry, not through crate dependencies: `tool-bash`, for example, gets its executor from `Cx::executor`. `ch-eval` runs the `ch` binary and reads its JSON output, so it measures what users run; of the other crates it uses only `ch-kernel`, for its config and pricing types, and `provider-anthropic`, for the beta headers its proxy lets through.
 
 ```mermaid
 flowchart TD
@@ -238,7 +239,7 @@ flowchart TD
 
 ## 8. Design defaults
 
-These are starting values. Every one is a config setting, and the eval runner ([roadmap](../ROADMAP.md) Phase 9) is how we tune them per model.
+These are starting values. Every one is a config setting, and the eval runner (`ch-eval`, [ADR 0005](adr/0005-eval-runner.md)) is how we tune them per model.
 
 | Setting | Default |
 |---|---|
@@ -301,4 +302,4 @@ The design is in [ADR 0004](adr/0004-context-management.md), with notes on where
 - **Plugins:** unit tests for each plugin, plus the shared conformance suites for Tools, Hooks and Providers.
 - **End to end:** `provider-scripted` + `frontend-print` + fixture repos; prompt snapshots with `insta`.
 - **Live:** `#[ignore]` tests run with API keys; small and cheap.
-- **Evals:** the eval suite ([roadmap](../ROADMAP.md) Phase 9) is the regression check for changes to prompts or plugins.
+- **Evals:** `ch-eval run` ([ADR 0005](adr/0005-eval-runner.md), [eval/README.md](../eval/README.md)) runs the task suite in `eval/tasks/` with `ch -p` in a container per run, across a matrix of configs, and reports pass rates, cost and harness signals per config. It measures a change to plugins or settings when someone runs it (it needs Docker and a model API key, so CI doesn't); the suite is small for now. A change compiled into `ch`, such as a prompt, takes two builds, a run of each into its own output directory (`--ch`), and `ch-eval compare`, which first checks that both ran the same tasks with the same settings, to put them side by side. Its own logic is tested without Docker or a model; pipeline tests drive `ch -p` with the scripted provider and, through the credential proxy, with the Anthropic provider against a fake API; the Docker smoke tests are `#[ignore]`d.
