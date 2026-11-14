@@ -118,7 +118,7 @@ impl Frontend for PrintFrontend {
             if tokio::signal::ctrl_c().await.is_ok() {
                 cancel.cancel();
                 if tokio::signal::ctrl_c().await.is_ok() {
-                    std::process::exit(130);
+                    ch_kernel::exit::exit(130);
                 }
             }
         });

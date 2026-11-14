@@ -214,7 +214,8 @@ impl ToolSink {
         }
     }
 
-    fn warn(&self, message: String) {
+    /// Shows the user a warning about this source.
+    pub fn warn(&self, message: String) {
         self.events.emit(AgentEvent::Warning { message });
     }
 

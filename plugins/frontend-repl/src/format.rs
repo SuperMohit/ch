@@ -330,8 +330,73 @@ pub fn approval_preview(req: &ApprovalRequest) -> Vec<String> {
                 out
             })
             .unwrap_or_default(),
+        name if ch_kernel::tool_source::is_outside_tool(name) => input_preview(&req.input),
         _ => Vec::new(),
     }
+}
+
+/// Longest value shown in an outside tool's input preview.
+const MAX_PREVIEW_VALUE: usize = 160;
+
+/// Longest key path shown in an outside tool's input preview.
+const MAX_PREVIEW_KEY: usize = 60;
+
+/// An outside tool's whole input as `key.path = value` lines, at most
+/// [`MAX_PREVIEW_LINES`], each value cut to [`MAX_PREVIEW_VALUE`] characters: the server
+/// chose the input's shape, so no one field can be assumed to be the one that matters.
+pub fn input_preview(input: &Value) -> Vec<String> {
+    fn walk(v: &Value, path: String, out: &mut Vec<(String, String)>) {
+        match v {
+            Value::Object(map) if !map.is_empty() => {
+                for (k, v) in map {
+                    let key = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
+                    walk(v, key, out);
+                }
+            }
+            Value::Array(items) if !items.is_empty() => {
+                for (i, v) in items.iter().enumerate() {
+                    walk(v, format!("{path}[{i}]"), out);
+                }
+            }
+            other => {
+                let shown = match other {
+                    Value::String(s) => format!("{s:?}"),
+                    other => other.to_string(),
+                };
+                out.push((path, shown));
+            }
+        }
+    }
+    let mut pairs = Vec::new();
+    walk(input, String::new(), &mut pairs);
+    let total = pairs.len();
+    let mut out: Vec<String> = pairs
+        .into_iter()
+        .take(MAX_PREVIEW_LINES)
+        .map(|(k, v)| {
+            let v = if v.chars().count() > MAX_PREVIEW_VALUE {
+                v.chars().take(MAX_PREVIEW_VALUE).collect::<String>() + "…"
+            } else {
+                v
+            };
+            let k = if k.is_empty() { "input".to_string() } else { k };
+            // Keys come from the model too: a long one can't push the values aside.
+            let k = if k.chars().count() > MAX_PREVIEW_KEY {
+                k.chars().take(MAX_PREVIEW_KEY).collect::<String>() + "…"
+            } else {
+                k
+            };
+            format!("{} = {}", dim(&printable(&k)), printable(&v))
+        })
+        .collect();
+    if total > MAX_PREVIEW_LINES {
+        out.push(dim(&format!("… {} more values", total - MAX_PREVIEW_LINES)));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -343,6 +408,40 @@ mod tests {
     fn strip_ansi_removes_styles() {
         assert_eq!(strip_ansi(&red("x")), "x");
         assert_eq!(strip_ansi(&format!("a{}b", bold("c"))), "acb");
+    }
+
+    #[test]
+    fn outside_tools_preview_their_whole_input() {
+        let req = ApprovalRequest {
+            tool: "mcp__gh__create_issue".into(),
+            input: json!({
+                "title": "Fix\u{1b}[2J it",
+                "labels": ["bug", "p1"],
+                "body": "x".repeat(500),
+                "meta": {"n": 3, "empty": {}}
+            }),
+            summary: "{...}".into(),
+            reason: "r".into(),
+            key: None,
+        };
+        let lines: Vec<String> = approval_preview(&req)
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect();
+        assert!(
+            lines[0].starts_with("body = \"xxx") && lines[0].contains('…'),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|l| l == "labels[1] = \"p1\""), "{lines:?}");
+        assert!(lines.iter().any(|l| l == "meta.n = 3"), "{lines:?}");
+        assert!(lines.iter().any(|l| l == "meta.empty = {}"), "{lines:?}");
+        assert!(lines.iter().all(|l| !l.contains('\u{1b}')), "{lines:?}");
+        assert!(lines.iter().all(|l| l.chars().count() < 200), "{lines:?}");
+        let many = json!((0..30).collect::<Vec<_>>());
+        let req = ApprovalRequest { input: many, ..req };
+        let lines = approval_preview(&req);
+        assert_eq!(lines.len(), MAX_PREVIEW_LINES + 1);
+        assert!(strip_ansi(lines.last().unwrap()).contains("10 more values"));
     }
 
     #[test]

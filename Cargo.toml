@@ -61,6 +61,7 @@ globset = "0.4"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 htmd = "0.5"
+http = "1"
 ignore = "0.4"
 indicatif = "0.18"
 insta = { version = "1", features = ["json", "yaml"] }
@@ -69,6 +70,7 @@ nu-ansi-term = "0.50"
 nix = { version = "0.31", features = ["signal", "process"] }
 reedline = "0.49" # 0.50+ needs rustc 1.95; stable was 1.94 when this was set
 regex = "1"
+rmcp = { version = "3.10", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

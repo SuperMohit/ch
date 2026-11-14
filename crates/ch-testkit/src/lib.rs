@@ -43,6 +43,53 @@ pub fn assert_tool_conforms(tool: &dyn Tool) {
     assert_spec_conforms(&spec);
 }
 
+/// The profile for tools from MCP servers and external plugins (ADR 0006 §2, §11):
+///
+/// - the name is `mcp__<server>__<tool>` or `ext__<plugin>__<tool>`, the server or plugin
+///   name is `[a-z0-9-]{1,24}` and the tool part is not empty;
+/// - the spec passes [`ToolSpec::validate`] (an object schema, a valid name);
+/// - the description is at most [`MAX_DESCRIPTION_BYTES`] bytes;
+/// - it isn't marked read-only unless `read_only_allowed` (the user's `read_only_tools`).
+///
+/// Unlike [`assert_spec_conforms`], it doesn't require snake_case or the built-in
+/// description sections: those are the server's to write.
+///
+/// [`MAX_DESCRIPTION_BYTES`]: ch_kernel::tool_source::MAX_DESCRIPTION_BYTES
+pub fn assert_outside_spec_conforms(spec: &ToolSpec, read_only_allowed: bool) {
+    if let Err(e) = spec.validate() {
+        panic!("{e}");
+    }
+    let name = &spec.name;
+    let rest = ch_kernel::tool_source::RESERVED_PREFIXES
+        .iter()
+        .find_map(|p| name.strip_prefix(p))
+        .unwrap_or_else(|| panic!("outside tool `{name}` doesn't start with mcp__ or ext__"));
+    let Some((owner, tool)) = rest.split_once("__") else {
+        panic!("outside tool `{name}` has no `__` after its server or plugin name");
+    };
+    let owner_ok = (1..=24).contains(&owner.len())
+        && owner
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    assert!(
+        owner_ok,
+        "outside tool `{name}`: `{owner}` must be [a-z0-9-]{{1,24}}"
+    );
+    assert!(
+        !tool.is_empty(),
+        "outside tool `{name}` has an empty tool part"
+    );
+    assert!(
+        spec.description.len() <= ch_kernel::tool_source::MAX_DESCRIPTION_BYTES,
+        "outside tool `{name}`: description over {} bytes",
+        ch_kernel::tool_source::MAX_DESCRIPTION_BYTES
+    );
+    assert!(
+        read_only_allowed || !spec.read_only,
+        "outside tool `{name}` is read-only without the user's say-so"
+    );
+}
+
 /// [`assert_tool_conforms`] for a bare spec (external tools, MCP tools).
 pub fn assert_spec_conforms(spec: &ToolSpec) {
     if let Err(e) = spec.validate() {
