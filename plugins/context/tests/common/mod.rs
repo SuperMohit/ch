@@ -179,6 +179,7 @@ pub fn ccx_for(id: &str, session_dir: Option<&Path>, tools: &[&str]) -> ContextC
             temperature: None,
             thinking_budget: Some(2000),
             purpose: "agent".into(),
+            tool_ledger: None,
         },
         summarizer: None,
         usage: UsageLog::default(),

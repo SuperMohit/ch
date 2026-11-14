@@ -32,7 +32,7 @@ pub use tool::WebFetchTool;
 
 /// `[plugins.tool-web-fetch]` settings.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct WebFetchConfig {
     /// `User-Agent` header sent with every request.
     pub user_agent: String,

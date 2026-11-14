@@ -31,7 +31,7 @@ pub const ID: &str = "prompt-base";
 
 /// `[plugins.prompt-base]`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PromptBaseConfig {
     /// A file whose contents replace the built-in `system.md`. Relative paths are
     /// resolved against the workspace; a leading `~/` means the home directory.

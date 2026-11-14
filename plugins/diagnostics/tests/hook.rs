@@ -155,6 +155,7 @@ impl Fixture {
                 temperature: None,
                 thinking_budget: None,
                 purpose: "agent".into(),
+                tool_ledger: None,
             },
         };
         note(self.on(ev).await)

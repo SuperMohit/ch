@@ -1,5 +1,6 @@
 //! Collects what plugins register and validates it.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use crate::plugin::{API_VERSION, Plugin, PluginManifest, RegisterCx};
 use crate::prompt::PromptContributor;
 use crate::services::Services;
 use crate::tool::{Tool, ToolSpec};
+use crate::tool_source::ToolSource;
 
 type Tagged<T> = Vec<(String, Arc<T>)>;
 
@@ -28,6 +30,7 @@ pub struct RegistryBuilder {
     pub(crate) enabled: Vec<String>,
     pub(crate) providers: Tagged<dyn ModelProvider>,
     pub(crate) tools: Tagged<dyn Tool>,
+    pub(crate) sources: Tagged<dyn ToolSource>,
     pub(crate) hooks: Tagged<dyn Hook>,
     pub(crate) prompts: Tagged<dyn PromptContributor>,
     pub(crate) contexts: Tagged<dyn ContextStrategy>,
@@ -52,6 +55,9 @@ pub struct Registry {
     pub plugins: Vec<PluginStatus>,
     pub providers: Tagged<dyn ModelProvider>,
     pub tools: Tagged<dyn Tool>,
+    /// Sources of tools known only at run time, in registration order (their
+    /// precedence when two offer the same name).
+    pub sources: Tagged<dyn ToolSource>,
     /// Sorted by priority (stable).
     pub hooks: Tagged<dyn Hook>,
     /// Sorted by priority (stable).
@@ -96,15 +102,24 @@ impl RegistryBuilder {
                 bail!("two plugins have the id `{}`", m.id);
             }
         }
+        let known = || {
+            manifests
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         for id in kcfg.plugins.enable.iter().chain(&kcfg.plugins.disable) {
             if !seen.contains(id) {
+                bail!("config mentions unknown plugin `{id}` (known: {})", known());
+            }
+        }
+        for (id, _) in config.plugin_tables() {
+            if !seen.contains(id) {
                 bail!(
-                    "config mentions unknown plugin `{id}` (known: {})",
-                    manifests
-                        .iter()
-                        .map(|m| m.id.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    "config has a [plugins.{id}] table, but there is no plugin `{id}` \
+                     (known: {})",
+                    known()
                 );
             }
         }
@@ -179,10 +194,25 @@ impl RegistryBuilder {
                 config,
                 builder: &mut builder,
                 workspace,
+                config_read: Cell::new(false),
             };
             plugin
                 .register(&mut cx)
                 .with_context(|| format!("registering plugin `{id}`"))?;
+            // A plugin that reads its section checks its own keys; one that doesn't
+            // would ignore them all.
+            let unread = config
+                .plugin_tables()
+                .find(|(table, keys)| table == id && !keys.is_empty());
+            if let Some((_, keys)) = unread.filter(|_| !cx.config_read.get()) {
+                bail!(
+                    "plugin `{id}` has no settings, but [plugins.{id}] sets {}",
+                    keys.keys()
+                        .map(|k| format!("`{k}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
         }
 
         // Keep the status list in registration order for display.
@@ -203,8 +233,13 @@ impl RegistryBuilder {
             .filter(|(_, c)| !c.yields_on_conflict())
             .map(|(_, c)| c.name().to_string())
             .collect();
+        // Commands that yield give way to a firm one, and between themselves the first
+        // registered keeps the name: a project's markdown command and a user's plugin
+        // command with one name must not stop ch from starting.
+        let mut kept_yielding: HashSet<String> = HashSet::new();
         self.commands.retain(|(plugin, c)| {
-            let hidden = c.yields_on_conflict() && firm.contains(c.name());
+            let hidden = c.yields_on_conflict()
+                && (firm.contains(c.name()) || !kept_yielding.insert(c.name().to_string()));
             if hidden {
                 tracing::warn!(plugin = %plugin, command = %c.name(), "command hidden by another plugin's command of the same name");
             }
@@ -216,6 +251,20 @@ impl RegistryBuilder {
                 .map_err(|e| anyhow::anyhow!("plugin `{plugin}`: {e}"))?;
         }
         check_unique("tool", self.tools.iter().map(|(p, t)| (p, t.spec().name)))?;
+        for (plugin, tool) in &self.tools {
+            let name = tool.spec().name;
+            if crate::tool_source::is_outside_tool(&name) {
+                bail!(
+                    "plugin `{plugin}`: tool name `{name}` starts with a prefix reserved for \
+                     MCP servers and external plugins ({:?})",
+                    crate::tool_source::RESERVED_PREFIXES
+                );
+            }
+        }
+        check_unique(
+            "tool source",
+            self.sources.iter().map(|(p, s)| (p, s.id().to_string())),
+        )?;
         check_unique(
             "command",
             self.commands.iter().map(|(p, c)| (p, c.name().to_string())),
@@ -256,6 +305,7 @@ impl RegistryBuilder {
             plugins,
             providers: self.providers,
             tools: self.tools,
+            sources: self.sources,
             hooks: self.hooks,
             prompts: self.prompts,
             contexts: self.contexts,

@@ -1,6 +1,7 @@
 //! The plugin trait and the registration context.
 
 use std::any::Any;
+use std::cell::Cell;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ use crate::model::ModelProvider;
 use crate::prompt::PromptContributor;
 use crate::registry::RegistryBuilder;
 use crate::tool::Tool;
+use crate::tool_source::ToolSource;
 
 /// Bumped on breaking changes to the plugin traits.
 pub const API_VERSION: u32 = 1;
@@ -93,6 +95,9 @@ pub struct RegisterCx<'a> {
     pub(crate) config: &'a Config,
     pub(crate) builder: &'a mut RegistryBuilder,
     pub(crate) workspace: &'a Path,
+    /// Whether [`RegisterCx::config`] was called, so a plugin with no settings can be
+    /// told apart from one that read its section.
+    pub(crate) config_read: Cell<bool>,
 }
 
 impl RegisterCx<'_> {
@@ -100,8 +105,11 @@ impl RegisterCx<'_> {
         &self.plugin_id
     }
 
-    /// This plugin's `[plugins.<id>]` section, or `T::default()`.
+    /// This plugin's `[plugins.<id>]` section, or `T::default()`. A plugin that never
+    /// calls this has no settings, and a non-empty section for it is an error. Give `T`
+    /// `#[serde(deny_unknown_fields)]`, so a misspelled key is an error too.
     pub fn config<T: DeserializeOwned + Default>(&self) -> anyhow::Result<T> {
+        self.config_read.set(true);
         self.config.plugin_section(&self.plugin_id)
     }
 
@@ -133,6 +141,12 @@ impl RegisterCx<'_> {
 
     pub fn add_tool_arc(&mut self, t: Arc<dyn Tool>) {
         self.builder.tools.push((self.plugin_id.clone(), t));
+    }
+
+    /// Adds a source of tools known only at run time (an MCP server, an external
+    /// plugin). The session starts it; see [`crate::tool_source`].
+    pub fn add_tool_source(&mut self, s: Arc<dyn ToolSource>) {
+        self.builder.sources.push((self.plugin_id.clone(), s));
     }
 
     pub fn add_hook(&mut self, h: impl Hook + 'static) {

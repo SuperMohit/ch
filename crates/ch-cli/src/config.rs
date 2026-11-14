@@ -63,6 +63,8 @@ pub struct Overrides {
     pub permission_mode: Option<String>,
     /// Apply the project's restricted settings for this run without asking.
     pub trust_project: bool,
+    /// Start the project's MCP servers for this run without asking.
+    pub trust_project_servers: bool,
 }
 
 impl Overrides {
@@ -74,6 +76,7 @@ impl Overrides {
             allow: cli.allow.clone(),
             permission_mode: cli.permission_mode.map(|m| m.as_str().to_string()),
             trust_project: cli.trust_project,
+            trust_project_servers: cli.trust_project_servers,
         }
     }
 }
@@ -86,6 +89,9 @@ pub struct LoadedConfig {
     pub files: Vec<PathBuf>,
     /// The project's restricted settings, and whether they were applied.
     pub project: ProjectTrust,
+    /// `mcp_servers` from the project's `.ch/config.toml`. Never merged into `config`:
+    /// each project server is trusted on its own (ADR 0006 §8), not with the settings.
+    pub project_servers: Option<Value>,
 }
 
 /// What happened to the project config's restricted settings.
@@ -112,8 +118,10 @@ pub fn build_config(
         files.push(paths.user_config());
     }
     let mut project = ProjectTrust::NothingToTrust;
-    if let Some(table) = read_project_config(paths)? {
+    let mut project_servers = None;
+    if let Some(mut table) = read_project_config(paths)? {
         files.push(paths.project_config());
+        project_servers = take_servers(&mut table);
         let ProjectLayer { open, restricted } = ProjectLayer::split(table, settings);
         merge_adding(&mut config, open, ADDITIVE_LISTS)?;
         if !restricted.is_empty() {
@@ -138,7 +146,22 @@ pub fn build_config(
         config,
         files,
         project,
+        project_servers,
     })
+}
+
+/// Removes `mcp_servers` from a project config, at the top and in every profile, and
+/// returns the top-level list. A profile can't add servers: it would apply them as the
+/// user's own.
+fn take_servers(table: &mut Table) -> Option<Value> {
+    if let Some(Value::Table(profiles)) = table.get_mut("profiles") {
+        for (_, profile) in profiles.iter_mut() {
+            if let Value::Table(p) = profile {
+                p.remove("mcp_servers");
+            }
+        }
+    }
+    table.remove("mcp_servers")
 }
 
 /// Merges `table` into `config`, adding the lists at `lists` to the ones already there
@@ -165,9 +188,10 @@ pub fn trust_saved_rule(
     trusted: &mut Table,
     rule: &str,
 ) -> anyhow::Result<bool> {
-    let Some(table) = read_project_config(paths)? else {
+    let Some(mut table) = read_project_config(paths)? else {
         return Ok(false);
     };
+    take_servers(&mut table);
     let now = ProjectLayer::split(table, settings).restricted;
     let mut expected = Config::from_table(trusted.clone());
     append_list(
