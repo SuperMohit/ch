@@ -65,7 +65,7 @@ impl Command for Clear {
         "clear"
     }
     fn description(&self) -> &str {
-        "Start a fresh conversation (token and cost totals are kept)"
+        "Start a fresh conversation, with its own token and cost totals"
     }
     async fn run(&self, _args: &str, cx: &mut CmdCx<'_>) -> anyhow::Result<Outcome> {
         // Don't lose the current conversation.
@@ -165,7 +165,7 @@ impl Command for Cost {
         "cost"
     }
     fn description(&self) -> &str {
-        "Show token usage and cost for this session"
+        "Show token usage and cost for this conversation"
     }
     async fn run(&self, _args: &str, cx: &mut CmdCx<'_>) -> anyhow::Result<Outcome> {
         let s = &cx.session;
@@ -176,10 +176,26 @@ impl Command for Cost {
         let _ = writeln!(out, "- Cache read: {}", thousands(u.cache_read_tokens));
         let _ = writeln!(out, "- Cache write: {}", thousands(u.cache_write_tokens));
         out.push('\n');
-        if s.kernel_config().model.pricing.is_some() || s.cost() > 0.0 {
+        let priced = s.kernel_config().model.pricing.is_some() || s.process_cost() > 0.0;
+        if priced || s.cost() > 0.0 {
             let _ = write!(out, "**Cost:** ${:.4}", s.cost());
         } else {
             out.push_str("**Cost:** not tracked. Set `[model.pricing]` in the config to see it.");
+        }
+        // After /clear, /resume or resuming at startup, the conversation's totals no longer
+        // match this run's.
+        let (p, pc) = (s.process_usage(), s.process_cost());
+        if p != u || (pc - s.cost()).abs() > 1e-9 {
+            let tokens =
+                p.input_tokens + p.output_tokens + p.cache_read_tokens + p.cache_write_tokens;
+            let _ = write!(
+                out,
+                "\n\n**Since ch started:** {} tokens",
+                thousands(tokens)
+            );
+            if priced {
+                let _ = write!(out, ", ${pc:.4}");
+            }
         }
         Ok(Outcome::Message(out))
     }

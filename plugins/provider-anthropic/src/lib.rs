@@ -18,6 +18,7 @@ use std::time::Duration;
 use ch_kernel::reexports::{CancellationToken, async_trait};
 use ch_kernel::{
     ModelError, ModelProvider, ModelRequest, ModelStream, Plugin, PluginManifest, RegisterCx,
+    ToolChanges,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -31,11 +32,13 @@ pub const API_VERSION_HEADER: &str = "2023-06-01";
 pub const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 /// Beta header for `thinking.block_binding`.
 pub const BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
+/// Beta header for `defer_loading` with `tool_addition`/`tool_removal` (ADR 0006).
+pub const TOOL_CHANGES_BETA: &str = "mid-conversation-tool-changes-2026-07-01";
 const OFFICIAL_HOST: &str = "api.anthropic.com";
 
 /// `[plugins.provider-anthropic]`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AnthropicConfig {
     /// Environment variable holding the API key. Read on each call, not at startup.
     pub api_key_env: String,
@@ -66,6 +69,13 @@ pub struct AnthropicConfig {
     /// official API (`fallbacks`, and `eager_input_streaming` by default) follows this.
     /// Unset, it is whether `base_url` is api.anthropic.com.
     pub official_api: Option<bool>,
+    /// Tools added or withdrawn mid-conversation: `"auto"` announces them with the
+    /// mid-conversation tool-change beta on the official API for models that accept it;
+    /// `"on"` also does through another base URL (a proxy that passes the beta through);
+    /// `"off"` never does.
+    /// Without it, a model that checks its earlier reasoning keeps its first tool list
+    /// until `/clear`, and other models get the new list and a note.
+    pub tool_changes: String,
 }
 
 impl Default for AnthropicConfig {
@@ -82,6 +92,7 @@ impl Default for AnthropicConfig {
             eager_input_streaming: None,
             prefix_mismatch_behavior: String::new(),
             official_api: None,
+            tool_changes: "auto".into(),
         }
     }
 }
@@ -90,6 +101,24 @@ impl AnthropicConfig {
     fn is_official(&self) -> bool {
         self.official_api
             .unwrap_or_else(|| self.base_url.contains(OFFICIAL_HOST))
+    }
+
+    /// How requests for `model` handle tools that change mid-conversation.
+    pub fn tool_changes(&self, model: &str) -> ToolChanges {
+        let caps = crate::models::caps(model);
+        let native = caps.tool_changes
+            && match self.tool_changes.trim() {
+                "on" => true,
+                "off" => false,
+                _ => self.is_official(),
+            };
+        if native {
+            ToolChanges::Native
+        } else if caps.checks_thinking {
+            ToolChanges::Frozen
+        } else {
+            ToolChanges::Replace
+        }
     }
 
     fn body_options(&self) -> BodyOptions {
@@ -228,7 +257,7 @@ impl ModelProvider for AnthropicProvider {
         let key = self.api_key()?;
         let opts = self.cfg.body_options();
         let body = build_body(&request, &opts);
-        let betas = opts.betas(&request.model, &body);
+        let betas = opts.betas(&body);
         let base = Duration::from_millis(self.cfg.retry_base_ms);
         let mut retries = 0;
         loop {
@@ -255,6 +284,10 @@ impl ModelProvider for AnthropicProvider {
 
     fn default_model(&self) -> Option<&str> {
         Some(models::DEFAULT_MODEL)
+    }
+
+    fn tool_changes(&self, model: &str) -> ToolChanges {
+        self.cfg.tool_changes(model)
     }
 }
 
@@ -293,6 +326,34 @@ pub fn plugin() -> Arc<dyn Plugin> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tool_changes_are_native_only_where_the_api_takes_them() {
+        use ch_kernel::ToolChanges::*;
+        let official = AnthropicConfig::default();
+        assert_eq!(official.tool_changes("claude-opus-5-5"), Native);
+        assert_eq!(official.tool_changes("claude-sonnet-5"), Replace);
+        assert_eq!(official.tool_changes("claude-opus-4-7"), Replace);
+        let proxy = AnthropicConfig {
+            base_url: "https://gateway.example.com".into(),
+            ..AnthropicConfig::default()
+        };
+        // A model that checks its reasoning can't have its tool list changed there.
+        assert_eq!(proxy.tool_changes("claude-opus-5-5"), Frozen);
+        assert_eq!(proxy.tool_changes("claude-opus-4-8"), Replace);
+        let on = AnthropicConfig {
+            tool_changes: "on".into(),
+            ..proxy
+        };
+        assert_eq!(on.tool_changes("claude-opus-5-5"), Native);
+        // Not for a model that doesn't accept the beta.
+        assert_eq!(on.tool_changes("claude-sonnet-5"), Replace);
+        let off = AnthropicConfig {
+            tool_changes: "off".into(),
+            ..AnthropicConfig::default()
+        };
+        assert_eq!(off.tool_changes("claude-opus-5-5"), Frozen);
+    }
+
     use super::*;
 
     #[test]

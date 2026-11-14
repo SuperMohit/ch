@@ -8,6 +8,8 @@ pub mod args;
 pub mod config;
 pub mod list;
 pub mod logging;
+#[cfg(feature = "mcp-bridge")]
+pub mod mcp;
 pub mod plugins;
 pub mod sessions;
 pub mod trust;

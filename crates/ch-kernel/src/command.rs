@@ -31,8 +31,9 @@ pub trait Command: Send + Sync {
         ""
     }
     /// When another plugin registers a command with the same name, a command that
-    /// yields is dropped (with a warning) instead of failing startup. User-defined
-    /// commands (markdown files, ...) should yield.
+    /// yields is dropped (with a warning) instead of failing startup; between two that
+    /// yield, the one registered first stays. User-defined commands (markdown files,
+    /// external plugins, ...) should yield.
     fn yields_on_conflict(&self) -> bool {
         false
     }

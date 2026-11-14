@@ -7,7 +7,8 @@ use ch_cli::{Cli, builtin_plugins, config, logging};
 fn main() {
     harden();
     let code = real_main();
-    std::process::exit(code);
+    // Kills what plugins spawned (MCP servers) before leaving: `exit` runs no destructors.
+    ch_kernel::exit::exit(code);
 }
 
 /// Marks this process as not dumpable, so other processes of the same user, such as

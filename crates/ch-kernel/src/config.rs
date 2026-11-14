@@ -130,6 +130,17 @@ impl Config {
         self.section(&format!("plugins.{id}"))
     }
 
+    /// The `[plugins.<id>]` tables, by id. `plugins.enable` and `plugins.disable` are
+    /// lists, not tables, so they aren't included.
+    pub fn plugin_tables(&self) -> impl Iterator<Item = (&str, &Table)> {
+        self.root
+            .get("plugins")
+            .and_then(Value::as_table)
+            .into_iter()
+            .flatten()
+            .filter_map(|(id, v)| Some((id.as_str(), v.as_table()?)))
+    }
+
     /// The kernel's own settings.
     pub fn kernel(&self) -> anyhow::Result<KernelConfig> {
         Value::Table(self.root.clone())

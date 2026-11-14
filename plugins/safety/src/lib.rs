@@ -26,11 +26,12 @@
 //! |---|---|---|---|
 //! | read-only tools (`read_file`, `grep_text`, ...) | run | run | run |
 //! | `edit_file` / `write_file` | ask | run | run |
-//! | writes to `.git/`, `.env*`, `.ch/config.toml` | ask | ask | run |
+//! | writes to `.git/`, `.env*`, `.ch/config.toml`, `.mcp.json`, `.ch/plugins/` | ask | ask | run |
 //! | `bash` on the read-only allowlist | run | run | run |
 //! | other `bash` | ask | ask | run |
 //! | `web_fetch` | ask (per origin) | ask (per origin) | run |
-//! | other non-read-only tools (MCP, ...) | ask | ask | run |
+//! | other non-read-only tools | ask | ask | run |
+//! | MCP and external plugin tools (`mcp__*`, `ext__*`) | ask | ask | run |
 //! | built-in deny list, paths outside the workspace | deny | deny | deny |
 //!
 //! `web_fetch` asks in accept-edits mode too: fetching is not an edit, and a page can
@@ -39,6 +40,12 @@
 //!
 //! A bare allow rule like `edit_file` does not cover sensitive paths; a rule naming the
 //! path (`edit_file:.env`) does.
+//!
+//! Tools from MCP servers and external plugins are recognised by their reserved prefix
+//! and judged on their own: they are read-only only when the user's `read_only_tools`
+//! lists them (never by the server's word), `allow` rules for them must be bare names
+//! or name globs (`mcp__github__*`), and `deny` / `ask` patterns match every string in
+//! the input at any depth (`mcp__fs__*:/etc/*`).
 
 mod bash;
 #[cfg(test)]

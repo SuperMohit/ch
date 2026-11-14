@@ -399,14 +399,42 @@ async fn runs_that_say_nothing_about_the_agent_stop_the_matrix() {
         .unwrap();
     assert_eq!(load_all(&out).unwrap()[0].reason, "no_result");
 
-    // A setting for a plugin this ch doesn't have measured nothing.
+    // ch rejects a table for a plugin it doesn't have at startup, so that run is the
+    // agent's too.
     let out = tmp.path().join("no-plugin");
     let (matrix, opts) = base(&out, "plugins.executor-docker.image=\"x\"");
+    run_matrix(Arc::new(matrix), backend(None), &opts)
+        .await
+        .unwrap();
+    assert_eq!(load_all(&out).unwrap()[0].reason, "no_result");
+
+    // A setting for a plugin the run had disabled measured nothing. ch doesn't check a
+    // disabled plugin's table, so the plugin list in the run's first event shows it.
+    let disabled_dir = tmp.path().join("disabled");
+    std::fs::create_dir_all(&disabled_dir).unwrap();
+    let disabled = write_config(
+        &disabled_dir,
+        &SCRIPTED.replace(
+            "enable = [\"provider-scripted\"]",
+            "enable = [\"provider-scripted\"]\ndisable = [\"planning\"]",
+        ),
+    );
+    let out = tmp.path().join("disabled-plugin");
+    let (matrix, opts) = prepare(&[
+        "--suite",
+        suite.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--config",
+        disabled.to_str().unwrap(),
+        "--vary",
+        "plugins.planning.refresh_after_steps=5",
+    ]);
     let err = run_matrix(Arc::new(matrix), backend(None), &opts)
         .await
         .unwrap_err();
     assert!(
-        format!("{err:#}").contains("plugin `executor-docker` wasn't enabled"),
+        format!("{err:#}").contains("plugin `planning` wasn't enabled"),
         "{err:#}"
     );
 

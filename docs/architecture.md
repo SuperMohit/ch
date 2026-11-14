@@ -98,6 +98,7 @@ sequenceDiagram
 |---|---|---|---|
 | **ModelProvider** | 1 per role (agent, summarizer) | `stream(req, cancel) -> Stream<ModelEvent>` | `provider-anthropic`, `provider-openai` |
 | **Tool** | many | `spec() -> ToolSpec`, `call(input, &ToolCx) -> ToolOutput` | `tools-fs`, `tool-bash`, `tool-web-fetch`, `planning` (`update_plan`) |
+| **ToolSource** | many | `start(ToolSink, &Cx)`, `stop()`; reports tools through the sink then and whenever they change ([ADR 0006](adr/0006-outside-plugins-and-changing-tools.md)) | `mcp-bridge`, `external-host` |
 | **Hook** | many, ordered by priority | `on(&HookEvent, &Cx) -> HookDecision` | `safety` (permissions), `stuck`, `diagnostics`, `hooks-shell` |
 | **PromptContributor** | many, ordered | `system_blocks(cx)`, `turn_reminders(cx)` | `prompt-base`, `project-instructions`, `planning` |
 | **ContextStrategy** | 1 | `view(&History, Budget, cx) -> View`, `compact(&History, Budget, &CompactRequest, cx) -> CompactOutcome` | `context` (`none` / `elide` / `summarize` / `staged`) |
@@ -143,7 +144,8 @@ Not doing: Rust dynamic libraries (`dlopen`), because Rust has no stable ABI and
 
 - Config merges in this order: built-in defaults → `~/.ch/config.toml` → `.ch/config.toml` (project) → `--profile <name>` → CLI flags.
 - Project config settings that could loosen permissions, run commands, read paths or pick endpoints and credentials apply only after the user trusts them; trust is recorded per workspace for the exact values (`crates/ch-cli/src/trust.rs`, [ADR 0001](adr/0001-sandbox-and-agent-security-responsibilities.md)).
-- *(Planned, roadmap 7.2 and 7.6)* Plugins load from `~/.ch/plugins/*/plugin.toml` and `.ch/plugins/*/plugin.toml`. Project plugins need a one-time trust prompt.
+- External plugins load from `~/.ch/plugins/*/plugin.toml` (`external-host`, roadmap 7.2; the protocol is in `crates/ch-plugin-protocol`). *(Planned, roadmap 7.6)* `.ch/plugins/*/plugin.toml` in a project, after a trust prompt per plugin.
+- Each plugin reads its own `[plugins.<id>]` table with `cx.config::<T>()`, and `T` rejects unknown keys (`#[serde(deny_unknown_fields)]`). The registry rejects a non-empty table for an enabled plugin that never reads its config, and a table whose id is no plugin's, so a misspelled setting is an error instead of silently doing nothing. `crates/ch-cli/tests/config.rs` checks this for every built-in plugin.
 - Project instructions are read from `CH.md` / `AGENTS.md` in the repo root, and in parent directories up to the git root.
 - Sessions are stored in `~/.ch/sessions/<project-hash>/<session-id>.jsonl`.
 
@@ -165,9 +167,17 @@ soft = 0.60
 hard = 0.85
 recent = 0.30
 
+[[mcp_servers]]                  # handled by the mcp-bridge plugin; also read from .mcp.json
+name = "github"                  # tools become mcp__github__<tool>
+command = "github-mcp-server"
+args = ["stdio"]
+env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }   # the only variables it gets besides PATH, HOME, ...
+read_only_tools = ["get_issue"]  # exact names; the server's own hints are ignored
+
 [[mcp_servers]]
-name = "github"
-command = "github-mcp"
+name = "docs"
+url = "https://docs.example.com/mcp"
+headers = { Authorization = "Bearer ${DOCS_TOKEN}" }
 
 [[hooks]]                        # handled by the hooks-shell plugin
 event = "post_tool"
@@ -294,7 +304,7 @@ The design is in [ADR 0004](adr/0004-context-management.md), with notes on where
 
 **Safety (always on):** see [ADR 0001](adr/0001-sandbox-and-agent-security-responsibilities.md) for what the agent protects and what a sandbox must. A path guard (resolve symlinks, reject anything outside the workspace root); a file-state tracker `{path: (hash, full_read)}` that rejects edits to files never fully read or changed since the last read; an allow / ask / deny permission layer (read-only commands such as `git status/diff/log`, `ls`, `rg`, `cat` are allowed, destructive ones denied); tool errors returned as observations so the loop never crashes.
 
-**Telemetry per run:** success, cost (tokens × price), turns, tool calls, **termination reason** (done / step limit / overflow / stopped by a hook, such as `stuck` / cancelled / error), peak context ÷ window, elision and summary counts, whether any file was edited, and how many times an already-edited file was re-patched.
+**Telemetry per run:** success, cost (tokens × price), turns, tool calls, **termination reason** (done / step limit / overflow / stopped by a hook, such as `stuck` / prompt blocked / refused / cancelled / error), peak context ÷ window, elision and summary counts, whether any file was edited, and how many times an already-edited file was re-patched.
 
 ## 9. Testing strategy
 

@@ -1,4 +1,5 @@
-//! Process-group signalling.
+//! Process-group signalling, shared with plugins that spawn long-lived processes
+//! (`mcp-bridge`).
 
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ fn group_alive(pgid: Pid) -> bool {
 }
 
 /// Sends `signal` to the group, ignoring "no such process".
-pub(crate) fn signal_group(pgid: Pid, signal: Signal) {
+pub fn signal_group(pgid: Pid, signal: Signal) {
     if let Err(e) = killpg(pgid, signal)
         && e != Errno::ESRCH
     {
@@ -24,7 +25,7 @@ pub(crate) fn signal_group(pgid: Pid, signal: Signal) {
 
 /// Stops the whole group: SIGTERM, then SIGKILL for anything still alive after `grace`.
 /// Reaps the direct child.
-pub(crate) async fn terminate_group(pgid: Pid, child: &mut Child, grace: Duration) {
+pub async fn terminate_group(pgid: Pid, child: &mut Child, grace: Duration) {
     signal_group(pgid, Signal::SIGTERM);
     let deadline = Instant::now() + grace;
     let mut reaped = false;
@@ -48,18 +49,18 @@ pub(crate) async fn terminate_group(pgid: Pid, child: &mut Child, grace: Duratio
 
 /// Kills the group with SIGKILL when dropped while armed, so dropping the `run` future
 /// (for example when the caller is aborted) never leaks processes.
-pub(crate) struct GroupGuard {
+pub struct GroupGuard {
     pgid: Pid,
     armed: bool,
 }
 
 impl GroupGuard {
-    pub(crate) fn new(pgid: Pid) -> Self {
+    pub fn new(pgid: Pid) -> Self {
         Self { pgid, armed: true }
     }
 
     /// The command finished normally; leave intentional background processes alone.
-    pub(crate) fn disarm(&mut self) {
+    pub fn disarm(&mut self) {
         self.armed = false;
     }
 }

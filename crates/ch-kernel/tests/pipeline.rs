@@ -2217,6 +2217,49 @@ fn duplicate_tool_names_are_rejected() {
     );
 }
 
+#[test]
+fn plugin_tables_must_belong_to_a_plugin_that_reads_them() {
+    let plugins = || {
+        vec![
+            plugin("quiet", |_| Ok(())),
+            plugin("reads", |cx| {
+                let _: Value = cx.config()?;
+                Ok(())
+            }),
+            Arc::new(TestPlugin {
+                manifest: PluginManifest::new("off", "test").default_enabled(false),
+                register: Box::new(|_| Ok(())),
+            }) as Arc<dyn Plugin>,
+        ]
+    };
+    let build_with = |toml: &str| build(plugins(), &Config::parse(toml).unwrap());
+
+    assert!(build_with("").is_ok());
+    // An empty table, a plugin that reads its table, and a disabled plugin's table are
+    // fine: the last is checked when the plugin is enabled.
+    assert!(build_with("[plugins.quiet]").is_ok());
+    assert!(build_with("[plugins.reads]\nx = 1").is_ok());
+    assert!(build_with("[plugins.off]\nx = 1").is_ok());
+
+    let err = build_with("[plugins.quiet]\nlevel = 2\nmode = 1")
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.contains("plugin `quiet` has no settings, but [plugins.quiet] sets `level`, `mode`"),
+        "{err}"
+    );
+    let err = build_with("[plugins.reds]\nx = 1")
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.contains("[plugins.reds] table, but there is no plugin `reds`")
+            && err.contains("known: quiet, reads, off"),
+        "{err}"
+    );
+}
+
 /// A tool whose spec is given; never called.
 struct SpecTool(ToolSpec);
 
@@ -2263,14 +2306,25 @@ fn tools_model_apis_would_reject_fail_registration() {
             "{err}"
         );
     }
-    // Names that aren't snake_case, such as MCP's `mcp__server__tool`, are accepted.
-    for name in ["mcp__github__get-issue", "Tool_1"] {
+    // Names that aren't snake_case are accepted.
+    for name in ["github__get-issue", "Tool_1"] {
         let ok = spec(name, object.clone());
         let p = vec![plugin("ext", move |cx| {
             cx.add_tool(SpecTool(ok.clone()));
             Ok(())
         })];
         assert!(build(p, &Config::default()).is_ok(), "{name}");
+    }
+    // The prefixes of MCP and external plugin tools are theirs alone: a built-in tool
+    // can't pose as one, and one can't pose as a built-in.
+    for name in ["mcp__github__get_issue", "ext__x__y"] {
+        let reserved = spec(name, object.clone());
+        let p = vec![plugin("ext", move |cx| {
+            cx.add_tool(SpecTool(reserved.clone()));
+            Ok(())
+        })];
+        let err = build(p, &Config::default()).err().unwrap().to_string();
+        assert!(err.contains("reserved"), "{err}");
     }
 }
 
@@ -2475,7 +2529,8 @@ async fn refused_or_cut_off_responses_never_run_tools() {
         .insert(0, ContentBlock::text("I can't help with that."));
     let mut h = harness(vec![Ok(refusal)], vec![], config());
     let r = h.session.run_turn("go").await;
-    assert_eq!(r.reason, TerminationReason::Done);
+    assert_eq!(r.reason, TerminationReason::Refused);
+    assert!(!r.reason.is_success());
     let ev = h.session.history().events();
     assert_eq!(ev.len(), 2);
     assert!(ev[1].message.tool_calls().is_empty());
@@ -2567,6 +2622,20 @@ fn yielding_commands_give_way() {
         }),
     ];
     assert!(build(p, &Config::default()).is_err());
+    // Two yielding ones don't: the first registered keeps the name.
+    let p = vec![
+        plugin("markdown", |cx| {
+            cx.add_command(NamedCommand("todos", true));
+            Ok(())
+        }),
+        plugin("ext", |cx| {
+            cx.add_command(NamedCommand("todos", true));
+            Ok(())
+        }),
+    ];
+    let r = build(p, &Config::default()).unwrap();
+    assert_eq!(r.commands.len(), 1);
+    assert_eq!(r.commands[0].0, "markdown");
 }
 
 #[test]
@@ -2702,6 +2771,20 @@ async fn clear_starts_a_new_session_and_keeps_the_old_one() {
     let new = store.load(s.id()).unwrap();
     assert_eq!((new.meta.title.as_str(), new.meta.turns), ("second", 1));
     assert_eq!(store.latest().unwrap().unwrap().id, s.id());
+
+    // Each conversation is saved with its own usage; the process keeps the sum.
+    assert_eq!(old.usage, usage());
+    assert_eq!(new.usage, usage());
+    assert_eq!(s.usage(), usage());
+    let mut both = usage();
+    both.add(&usage());
+    assert_eq!(s.process_usage(), both);
+    s.restore(old).unwrap();
+    assert_eq!(s.usage(), usage());
+    assert_eq!(s.process_usage(), both);
+    s.clear().unwrap();
+    assert_eq!(s.usage(), Usage::default());
+    assert_eq!(s.process_usage(), both);
 }
 
 #[cfg(unix)]

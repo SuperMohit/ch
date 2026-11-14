@@ -491,3 +491,41 @@ fn a_rule_saved_from_the_repl_keeps_trust() {
     let loaded = build_config(&f.paths, &Overrides::default(), &settings()).unwrap();
     assert!(matches!(loaded.project, ProjectTrust::Untrusted { .. }));
 }
+
+#[test]
+fn every_builtin_plugin_rejects_a_key_it_does_not_have() {
+    for plugin in ch_cli::plugins::builtin_plugins() {
+        let id = plugin.manifest().id;
+        let toml = format!("plugins.enable = [\"{id}\"]\n[plugins.{id}]\nnot_a_setting = 1");
+        let config = Config::parse(&toml).unwrap();
+        let built = ch_kernel::RegistryBuilder::build(
+            ch_cli::plugins::builtin_plugins(),
+            &config,
+            Path::new("/tmp"),
+        );
+        let err = built.err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(err.contains("not_a_setting"), "plugin `{id}`: {err}");
+    }
+}
+
+#[test]
+fn project_mcp_servers_stay_out_of_the_settings() {
+    let f = fixture(
+        None,
+        Some(
+            "[[mcp_servers]]\nname = \"a\"\ncommand = \"x\"\n\
+             [profiles.fast.agent]\nmax_steps = 3\n\
+             [[profiles.fast.mcp_servers]]\nname = \"b\"\ncommand = \"y\"\n",
+        ),
+    );
+    let o = Overrides {
+        profile: Some("fast".into()),
+        ..Default::default()
+    };
+    let loaded = build_config(&f.paths, &o, &settings()).unwrap();
+    // Not restricted settings to trust, and never merged as the user's own servers.
+    assert_eq!(loaded.project, ProjectTrust::NothingToTrust);
+    assert!(loaded.config.get_value("mcp_servers").is_none());
+    let servers = loaded.project_servers.unwrap();
+    assert_eq!(servers.as_array().unwrap().len(), 1);
+}

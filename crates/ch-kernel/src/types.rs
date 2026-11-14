@@ -37,6 +37,15 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    /// Tools that became available or stopped being available before this model call
+    /// (ADR 0006). Stored on a user message; providers render it natively (a
+    /// mid-conversation tool change) or as a short note.
+    ToolsChanged {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        added: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        removed: Vec<String>,
+    },
 }
 
 impl ContentBlock {
@@ -52,6 +61,7 @@ impl ContentBlock {
             Self::RedactedThinking { data } => data.len(),
             Self::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
             Self::ToolResult { content, .. } => content.len(),
+            Self::ToolsChanged { added, removed } => crate::ledger::note(added, removed).len(),
         }
     }
 }
@@ -172,6 +182,8 @@ impl Usage {
 pub enum TerminationReason {
     /// The model stopped calling tools.
     Done,
+    /// The model declined to answer (the provider's refusal stop reason).
+    Refused,
     /// `agent.max_steps` model calls were made without the model finishing.
     StepLimit,
     /// The request no longer fits in the model's context window.
@@ -190,6 +202,7 @@ impl TerminationReason {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Done => "done",
+            Self::Refused => "refused",
             Self::StepLimit => "step_limit",
             Self::ContextOverflow { .. } => "context_overflow",
             Self::HookStop { .. } => "hook_stop",

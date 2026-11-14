@@ -9,7 +9,7 @@ use clap::{Parser, ValueEnum};
 /// Without `-p`, starts the interactive REPL (running PROMPT first, if given).
 /// With `-p`, runs one task headlessly and exits with a code that reflects how it ended:
 /// 0 done, 1 error, 2 step limit, 3 context overflow, 4 stopped by a hook, 5 prompt
-/// blocked, 130 cancelled.
+/// blocked, 6 the model refused, 130 cancelled.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "ch", version, about, long_about)]
 pub struct Cli {
@@ -54,6 +54,11 @@ pub struct Cli {
     /// mode, allow rules, endpoints, commands, ...) for this run, without asking.
     #[arg(long)]
     pub trust_project: bool,
+
+    /// Start the project's MCP servers (from `.mcp.json` or `.ch/config.toml`) for this
+    /// run without asking. `--trust-project` doesn't start them.
+    #[arg(long)]
+    pub trust_project_servers: bool,
 
     /// Approver for `-p`: what happens when a call needs approval.
     #[arg(long, value_enum, default_value_t = ApproverArg::AutoDeny)]

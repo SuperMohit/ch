@@ -37,7 +37,7 @@ pub const ID: &str = "project-instructions";
 
 /// `[plugins.project-instructions]`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct InstructionsConfig {
     /// File names looked for in each directory, in this order.
     pub files: Vec<String>,

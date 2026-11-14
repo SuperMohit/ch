@@ -3,6 +3,7 @@
 mod builder;
 mod cancel;
 mod model_call;
+mod sources;
 mod tools;
 
 use std::collections::{HashMap, HashSet};
@@ -25,11 +26,13 @@ use crate::events::{AgentEvent, EventBus};
 use crate::executor::Executor;
 use crate::history::History;
 use crate::hook::{Hook, HookEvent, HookOutcome, Verdict, run_hooks};
+use crate::ledger::ToolLedger;
 use crate::model::{ModelProvider, ModelRequest};
 use crate::registry::Registry;
-use crate::store::{SessionLock, SessionMeta, SessionSnapshot, SessionStore};
+use crate::store::{SavedPrompt, SessionLock, SessionMeta, SessionSnapshot, SessionStore};
 use crate::tokens::TokenCalibrator;
-use crate::tool::{Tool, ToolOutput, ToolSpec};
+use crate::tool::{ToolOutput, ToolSpec};
+use crate::tool_source::{Catalog, SourceStatus, ToolSource};
 use crate::types::{ContentBlock, Message, Role, StopReason, TerminationReason, ToolCall, Usage};
 use crate::util::{system_reminder, truncate_middle};
 
@@ -73,13 +76,29 @@ pub struct Session {
     context_usage: UsageLog,
     executor: Option<Arc<dyn Executor>>,
     approver: Option<Arc<dyn Approver>>,
-    tools: HashMap<String, Arc<dyn Tool>>,
+    /// What built-in plugins and tool sources offer now.
+    catalog: Arc<Catalog>,
+    sources: Vec<Arc<dyn ToolSource>>,
+    /// The task starting each source, by id, aborted when it is removed or the session
+    /// ends.
+    source_tasks: HashMap<String, tokio::task::AbortHandle>,
+    /// Every tool definition this conversation was sent (ADR 0006).
+    ledger: ToolLedger,
+    /// The system prompt of this conversation's first request, sent unchanged after.
+    system: Option<Vec<String>>,
+    /// The tools the model can call now: the ledger's active ones, or before the first
+    /// request what is offered.
     tool_specs: Arc<Vec<ToolSpec>>,
+    /// Tool names already warned about (changed definitions, waiting, shadowed).
+    tool_warnings: HashSet<String>,
     hooks: Vec<Arc<dyn Hook>>,
     cancel: CancelHandle,
     turn: u32,
-    usage: Usage,
-    cost: f64,
+    /// What the current conversation has used, saved with it: starts again on `/clear`,
+    /// comes back with the conversation on `/resume`.
+    spend: Spend,
+    /// What this process has used, across `/clear` and `/resume`.
+    process_spend: Spend,
     calibrator: TokenCalibrator,
     always_allow: HashSet<String>,
     store: Option<SessionStore>,
@@ -88,6 +107,20 @@ pub struct Session {
     sink_tasks: Vec<JoinHandle<()>>,
     started: bool,
     ended: bool,
+}
+
+/// Tokens and cost added up over model calls.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Spend {
+    pub(crate) usage: Usage,
+    pub(crate) cost: f64,
+}
+
+impl Spend {
+    fn add(&mut self, usage: &Usage, cost: Option<f64>) {
+        self.usage.add(usage);
+        self.cost += cost.unwrap_or(0.0);
+    }
 }
 
 impl Session {
@@ -127,18 +160,36 @@ impl Session {
     pub fn provider_id(&self) -> &str {
         self.provider.id()
     }
+    /// Tokens the current conversation has used, including in earlier processes.
     pub fn usage(&self) -> Usage {
-        self.usage
+        self.spend.usage
     }
-    /// Total cost in USD (0 when pricing isn't configured).
+    /// The current conversation's cost in USD (0 when pricing isn't configured).
     pub fn cost(&self) -> f64 {
-        self.cost
+        self.spend.cost
+    }
+    /// Tokens this process has used, across `/clear` and `/resume`.
+    pub fn process_usage(&self) -> Usage {
+        self.process_spend.usage
+    }
+    /// This process's cost in USD, across `/clear` and `/resume`.
+    pub fn process_cost(&self) -> f64 {
+        self.process_spend.cost
     }
     pub fn turn(&self) -> u32 {
         self.turn
     }
+    /// The tools the model can call now.
     pub fn tool_specs(&self) -> &[ToolSpec] {
         &self.tool_specs
+    }
+    /// Every tool definition this conversation was sent, with which are active.
+    pub fn tool_ledger(&self) -> &ToolLedger {
+        &self.ledger
+    }
+    /// Each tool source (MCP server, external plugin) and where it stands.
+    pub fn tool_sources(&self) -> Vec<(String, SourceStatus)> {
+        self.catalog.statuses()
     }
     pub fn cancel_handle(&self) -> CancelHandle {
         self.cancel.clone()
@@ -160,7 +211,7 @@ impl Session {
     }
 
     /// Starts a new conversation under a new id (`/clear`), leaving the old one saved as
-    /// it was. Usage totals are kept.
+    /// it was. The conversation's usage starts again from zero; the process's is kept.
     pub fn clear(&mut self) -> anyhow::Result<()> {
         let id = builder::new_session_id();
         if let Some(store) = &self.store {
@@ -170,7 +221,44 @@ impl Session {
         self.created_at = Utc::now();
         self.turn = 0;
         self.history.clear();
+        self.spend = Spend::default();
+        self.reset_prompt();
         Ok(())
+    }
+
+    /// Forgets the conversation's system prompt and tool ledger: the next request
+    /// renders the prompt again and takes the tools offered then.
+    fn reset_prompt(&mut self) {
+        self.ledger = ToolLedger::default();
+        self.system = None;
+        self.tool_warnings.clear();
+        self.tool_specs = Arc::new(
+            self.catalog
+                .offered()
+                .0
+                .into_iter()
+                .map(|o| o.spec)
+                .collect(),
+        );
+    }
+
+    /// Takes a saved conversation's prompt: what it was sent, or, for a file saved
+    /// before prompts were kept, the tools offered now as what its requests sent.
+    pub(super) fn restore_prompt(&mut self, prompt: Option<SavedPrompt>) {
+        self.reset_prompt();
+        match prompt {
+            Some(p) => {
+                self.system = Some(p.system);
+                self.ledger = p.tools;
+            }
+            // Its requests had the built-in tools; tools from sources running now are
+            // new to it and are announced as additions.
+            None if !self.history.is_empty() => {
+                self.ledger = ToolLedger::sent(&self.catalog.builtin());
+            }
+            None => return,
+        }
+        self.tool_specs = Arc::new(self.ledger.active_specs());
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
@@ -191,8 +279,16 @@ impl Session {
                 turns: self.turn,
             },
             history: self.history.clone(),
-            usage: self.usage,
-            cost: self.cost,
+            usage: self.spend.usage,
+            cost: self.spend.cost,
+            prompt: self
+                .system
+                .clone()
+                .filter(|_| self.ledger.is_started())
+                .map(|system| SavedPrompt {
+                    system,
+                    tools: self.ledger.clone(),
+                }),
         }
     }
 
@@ -207,8 +303,11 @@ impl Session {
         self.created_at = snap.meta.created_at;
         self.turn = snap.meta.turns;
         self.history = snap.history;
-        self.usage = snap.usage;
-        self.cost = snap.cost;
+        self.spend = Spend {
+            usage: snap.usage,
+            cost: snap.cost,
+        };
+        self.restore_prompt(snap.prompt);
         Ok(())
     }
 
@@ -285,6 +384,7 @@ impl Session {
             workspace: self.workspace.to_string_lossy().to_string(),
             plugins: self.registry.enabled_plugin_ids(),
         });
+        self.start_sources().await;
         let cx = self.cx(0, CancellationToken::new());
         let mut ev = HookEvent::SessionStart;
         let _ = run_hooks(&self.hooks, &mut ev, &cx).await;
@@ -304,6 +404,7 @@ impl Session {
         if let Err(e) = self.save() {
             tracing::warn!("saving session failed: {e:#}");
         }
+        self.stop_sources().await;
         self.events.emit(AgentEvent::SessionEnd {
             session_id: self.id.clone(),
         });
@@ -336,9 +437,11 @@ impl Session {
         self.start().await;
         let cancel = self.cancel.begin();
         let cx = self.cx(0, cancel);
-        let system = self.system_blocks(&cx).await;
-        let budget = self.budget(&system, &[]);
-        let ccx = self.context_cx(cx, self.agent_request(system));
+        let system = self.system_prompt(&cx).await;
+        let mode = self.provider.tool_changes(&self.model);
+        let request = self.agent_request(system, &self.ledger, mode);
+        let budget = self.budget(&request.system, &[], &model_call::sent_tools(&request));
+        let ccx = self.context_cx(cx, request);
         let request = CompactRequest {
             reason: CompactReason::Manual,
             instructions,
@@ -420,6 +523,8 @@ impl Session {
                 Ok(r) => r,
                 Err(reason) => break (reason, false),
             };
+            // The call may have changed the tools: what runs next sees the new list.
+            let cx = self.cx(step, cancel.clone());
             step += 1;
             let text = response.message.text();
             if !text.trim().is_empty() {
@@ -427,7 +532,7 @@ impl Session {
             }
             // A refused or cut-off response may hold incomplete tool calls: never run them.
             let cut_off = match response.stop_reason {
-                StopReason::Refusal => Some(TerminationReason::Done),
+                StopReason::Refusal => Some(TerminationReason::Refused),
                 StopReason::ContextWindowExceeded => Some(TerminationReason::ContextOverflow {
                     message: "the response was cut off because the context window is full".into(),
                 }),

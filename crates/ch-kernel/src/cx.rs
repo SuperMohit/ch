@@ -21,7 +21,8 @@ pub struct Cx {
     pub events: EventBus,
     pub config: Arc<Config>,
     pub executor: Option<Arc<dyn Executor>>,
-    /// Specs of every registered tool (what the model sees).
+    /// The tools the model can call now: built-in ones and those tool sources offered
+    /// when the conversation's tools were last updated (ADR 0006).
     pub tools: Arc<Vec<ToolSpec>>,
     /// Current user turn (1-based; 0 before the first turn).
     pub turn: u32,

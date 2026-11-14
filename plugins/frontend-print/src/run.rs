@@ -4,7 +4,7 @@ use std::io::Write;
 use std::time::Instant;
 
 use ch_kernel::util::{printable, strip_ansi, terminal_text};
-use ch_kernel::{AgentEvent, Session, TerminationReason, Usage};
+use ch_kernel::{AgentEvent, Session, SourceStatus, TerminationReason, Usage};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
@@ -19,8 +19,8 @@ pub struct PrintResult {
     #[serde(rename = "type")]
     pub kind: String,
     pub session_id: String,
-    /// `done`, `error`, `step_limit`, `context_overflow`, `hook_stop`, `cancelled` or
-    /// `prompt_denied`.
+    /// `done`, `error`, `step_limit`, `context_overflow`, `hook_stop`, `prompt_denied`,
+    /// `refused` or `cancelled`.
     pub reason: String,
     /// The error message or stop reason, when there is one.
     pub detail: Option<String>,
@@ -40,7 +40,7 @@ pub struct PrintResult {
 /// Process exit code for a termination reason.
 ///
 /// done 0, error 1, step_limit 2, context_overflow 3, hook_stop 4, prompt_denied 5,
-/// cancelled 130.
+/// refused 6, cancelled 130.
 pub fn exit_code(reason: &TerminationReason) -> i32 {
     match reason {
         TerminationReason::Done => 0,
@@ -49,15 +49,17 @@ pub fn exit_code(reason: &TerminationReason) -> i32 {
         TerminationReason::ContextOverflow { .. } => 3,
         TerminationReason::HookStop { .. } => 4,
         TerminationReason::PromptDenied { .. } => 5,
+        TerminationReason::Refused => 6,
         TerminationReason::Cancelled => 130,
     }
 }
 
 fn reason_detail(reason: &TerminationReason) -> Option<String> {
     match reason {
-        TerminationReason::Done | TerminationReason::StepLimit | TerminationReason::Cancelled => {
-            None
-        }
+        TerminationReason::Done
+        | TerminationReason::StepLimit
+        | TerminationReason::Refused
+        | TerminationReason::Cancelled => None,
         TerminationReason::ContextOverflow { message } | TerminationReason::Error { message } => {
             Some(message.clone())
         }
@@ -112,6 +114,21 @@ impl<O: Write, E: Write> Printer<'_, O, E> {
             AgentEvent::AssistantMessage { .. } => self.block_ended = true,
             AgentEvent::Warning { message } => {
                 let _ = writeln!(self.err, "warning: {}", terminal_text(message));
+            }
+            AgentEvent::ToolSource { source, status } => {
+                let gone = match status {
+                    SourceStatus::Failed { reason } => Some(("failed", reason)),
+                    SourceStatus::Exited { reason } => Some(("exited", reason)),
+                    _ => None,
+                };
+                if let Some((what, reason)) = gone {
+                    let _ = writeln!(
+                        self.err,
+                        "warning: {} {what}: {}",
+                        printable(source),
+                        terminal_text(reason)
+                    );
+                }
             }
             other if self.verbose => {
                 if let Some(line) = verbose_line(other) {
@@ -263,6 +280,7 @@ mod tests {
             exit_code(&TerminationReason::PromptDenied { reason: "r".into() }),
             5
         );
+        assert_eq!(exit_code(&TerminationReason::Refused), 6);
         assert_eq!(exit_code(&TerminationReason::Cancelled), 130);
     }
 }

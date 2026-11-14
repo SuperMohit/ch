@@ -356,3 +356,38 @@ fn plugin_registers_a_read_only_tool() {
         "https://docs.rs/tokio"
     );
 }
+
+#[tokio::test]
+async fn a_user_agent_that_cannot_be_sent_is_replaced_by_the_default() {
+    let config = Config::parse(
+        r#"
+        [plugins.tool-web-fetch]
+        user_agent = "ch\nX-Injected: 1"
+        "#,
+    )
+    .unwrap();
+    let registry = RegistryBuilder::build(
+        vec![ch_tool_web_fetch::plugin()],
+        &config,
+        Path::new("/tmp"),
+    )
+    .unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ua"))
+        .and(wiremock::matchers::header(
+            "user-agent",
+            WebFetchConfig::default().user_agent.as_str(),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("ok", "text/plain"))
+        .mount(&server)
+        .await;
+    let tool = registry.tool("web_fetch").unwrap();
+    let out = tool
+        .call(
+            json!({"url": format!("{}/ua", server.uri())}),
+            &Cx::detached("/tmp"),
+        )
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+}
