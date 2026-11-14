@@ -6,3 +6,4 @@
 .env.*
 *.snap.new
 *.pending-snap
+/eval-out

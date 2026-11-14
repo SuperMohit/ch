@@ -1,6 +1,6 @@
 [package]
 name = "ch-eval"
-description = "Eval runner for ch"
+description = "Eval runner for ch: runs tasks across a matrix of configs, each run in a container, and reports"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,4 +10,44 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[lib]
+name = "ch_eval"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ch-eval"
+path = "src/main.rs"
+
+[features]
+# `backend::HostBackend`, which runs `ch`, the diff and the checks on the host with no
+# isolation. Only tests turn it on (ch-cli's pipeline test); the command line can't
+# choose it.
+host-backend = []
+
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+ch-kernel.workspace = true
+# The beta headers its requests may carry, which the proxy lets through.
+ch-provider-anthropic.workspace = true
+chrono.workspace = true
+clap.workspace = true
+futures.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+# `fs` and `dir`: removing and fixing workspaces with fd-relative calls, at any depth.
+nix = { workspace = true, features = ["fs", "dir"] }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+shell-words.workspace = true
+tokio.workspace = true
+toml.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+wiremock.workspace = true
