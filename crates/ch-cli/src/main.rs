@@ -5,9 +5,25 @@ use clap::Parser;
 use ch_cli::{Cli, builtin_plugins, config, logging};
 
 fn main() {
+    harden();
     let code = real_main();
     std::process::exit(code);
 }
+
+/// Marks this process as not dumpable, so other processes of the same user, such as
+/// the model's commands, can't read its environment (with the API key), memory or open
+/// files through `/proc/<pid>` or attach to it with ptrace, and no core dump is written.
+/// Programs `ch` starts are dumpable again once they `exec`. Linux only; elsewhere
+/// nothing changes.
+#[cfg(target_os = "linux")]
+fn harden() {
+    if let Err(e) = nix::sys::prctl::set_dumpable(false) {
+        eprintln!("ch: warning: couldn't mark the process as not dumpable: {e}");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn harden() {}
 
 fn real_main() -> i32 {
     let cli = Cli::parse();
