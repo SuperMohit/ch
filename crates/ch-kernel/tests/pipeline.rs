@@ -2578,6 +2578,20 @@ fn yielding_commands_give_way() {
         }),
     ];
     assert!(build(p, &Config::default()).is_err());
+    // Two yielding ones don't: the first registered keeps the name.
+    let p = vec![
+        plugin("markdown", |cx| {
+            cx.add_command(NamedCommand("todos", true));
+            Ok(())
+        }),
+        plugin("ext", |cx| {
+            cx.add_command(NamedCommand("todos", true));
+            Ok(())
+        }),
+    ];
+    let r = build(p, &Config::default()).unwrap();
+    assert_eq!(r.commands.len(), 1);
+    assert_eq!(r.commands[0].0, "markdown");
 }
 
 #[test]

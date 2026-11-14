@@ -208,8 +208,13 @@ impl RegistryBuilder {
             .filter(|(_, c)| !c.yields_on_conflict())
             .map(|(_, c)| c.name().to_string())
             .collect();
+        // Commands that yield give way to a firm one, and between themselves the first
+        // registered keeps the name: a project's markdown command and a user's plugin
+        // command with one name must not stop ch from starting.
+        let mut kept_yielding: HashSet<String> = HashSet::new();
         self.commands.retain(|(plugin, c)| {
-            let hidden = c.yields_on_conflict() && firm.contains(c.name());
+            let hidden = c.yields_on_conflict()
+                && (firm.contains(c.name()) || !kept_yielding.insert(c.name().to_string()));
             if hidden {
                 tracing::warn!(plugin = %plugin, command = %c.name(), "command hidden by another plugin's command of the same name");
             }

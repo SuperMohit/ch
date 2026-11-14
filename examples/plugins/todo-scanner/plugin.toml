@@ -1,0 +1,9 @@
+# Install the binary with `cargo install --path examples/plugins/todo-scanner`, then
+# copy this directory to ~/.ch/plugins/todo-scanner/.
+name = "todo-scanner"
+description = "Finds TODO and FIXME comments in the workspace"
+command = "todo-scanner"
+
+[[commands]]
+name = "todos"
+description = "Ask the model to go through the workspace's TODOs"
