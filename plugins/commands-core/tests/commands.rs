@@ -167,11 +167,11 @@ async fn clear_starts_a_new_conversation_and_the_process_keeps_its_usage() {
     s.run_turn("hello").await;
     assert!(!s.history().is_empty());
     assert!(!message(&mut s, "/cost").await.contains("Since ch started"));
-    let old_id = s.id().to_string();
+    let old_id = s.id().clone();
     let out = message(&mut s, "/clear").await;
     assert!(out.contains("new conversation"), "{out}");
     assert!(s.history().is_empty());
-    assert_ne!(s.id(), old_id);
+    assert_ne!(s.id(), &old_id);
     assert_eq!(s.usage().input_tokens, 0);
     assert_eq!(s.process_usage().input_tokens, 1200);
     let cost = message(&mut s, "/cost").await;
@@ -321,7 +321,7 @@ async fn resume_lists_and_loads_sessions() {
     );
     s.run_turn("first task").await;
     s.save().unwrap();
-    let old_id = s.id().to_string();
+    let old_id = s.id().clone();
     // Closed, as when that ch exits; an open session can't be resumed elsewhere.
     drop(s);
 
@@ -341,7 +341,7 @@ async fn resume_lists_and_loads_sessions() {
 
     let out = message(&mut s2, &format!("/resume {old_id}")).await;
     assert!(out.contains("Resumed session"), "{out}");
-    assert_eq!(s2.id(), old_id);
+    assert_eq!(s2.id(), &old_id);
     assert_eq!(
         s2.history().first_user_text().as_deref(),
         Some("first task")

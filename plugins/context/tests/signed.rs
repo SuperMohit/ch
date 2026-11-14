@@ -8,7 +8,7 @@ use ch_kernel::reexports::CancellationToken;
 use ch_kernel::reexports::futures::StreamExt;
 use ch_kernel::{
     AgentEvent, CompactionKind, ContentBlock, Message, ModelEvent, ModelProvider, ModelRequest,
-    Role, SessionStore, TerminationReason,
+    Role, SessionId, SessionStore, TerminationReason,
 };
 use ch_provider_scripted::{ScriptStep, ScriptedProvider};
 use ch_testkit::{ScriptedSource, echo_tool};
@@ -314,7 +314,11 @@ async fn a_resumed_session_with_other_settings_keeps_the_reasoning_valid() {
         "[plugins.context]\nstrategy = \"summarize\"\nhard = 0.95\nsummary_max_words = 300",
     );
     resumed
-        .restore(SessionStore::new(&d.sessions).load("s1").unwrap())
+        .restore(
+            SessionStore::new(&d.sessions)
+                .load(&SessionId::parse("s1").unwrap())
+                .unwrap(),
+        )
         .unwrap();
     assert_eq!(
         resumed.run_turn("go on").await.reason,
@@ -677,7 +681,11 @@ async fn tools_coming_and_going_keep_the_reasoning_valid() {
         )],
     );
     resumed
-        .restore(SessionStore::new(&d.sessions).load("s1").unwrap())
+        .restore(
+            SessionStore::new(&d.sessions)
+                .load(&SessionId::parse("s1").unwrap())
+                .unwrap(),
+        )
         .unwrap();
     assert_eq!(
         resumed.run_turn("go on").await.reason,

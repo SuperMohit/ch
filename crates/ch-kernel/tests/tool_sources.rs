@@ -692,7 +692,7 @@ async fn a_resumed_session_keeps_its_prompt_and_hears_what_changed() {
     let mut run = session(model, vec![src], Some(store.clone()));
     run.session.run_turn("first").await;
     let first = run.model.last();
-    let id = run.session.id().to_string();
+    let id = run.session.id().clone();
     run.session.end().await;
     drop(run);
 
@@ -837,7 +837,7 @@ async fn resuming_an_old_file_announces_the_tools_of_running_sources() {
     let model = Recorder::new(ToolChanges::Native, vec![text("one")]);
     let mut old = session(model, vec![], Some(store.clone()));
     old.session.run_turn("first").await;
-    let id = old.session.id().to_string();
+    let id = old.session.id().clone();
     old.session.end().await;
     drop(old);
     let path = dir.path().join(format!("{id}.jsonl"));
