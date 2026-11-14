@@ -64,6 +64,7 @@ fn config_flags_repeat_and_map_to_overrides() {
         "--permission-mode",
         "accept-edits",
         "--trust-project",
+        "--trust-project-servers",
     ]);
     assert_eq!(cli.permission_mode, Some(PermissionMode::AcceptEdits));
     let o = Overrides::from_cli(&cli);
@@ -76,6 +77,7 @@ fn config_flags_repeat_and_map_to_overrides() {
             allow: vec!["edit_file".into(), "bash:cargo *".into()],
             permission_mode: Some("accept-edits".into()),
             trust_project: true,
+            trust_project_servers: true,
         }
     );
     assert!(Cli::try_parse_from(["ch", "--permission-mode", "yolo"]).is_err());

@@ -1,7 +1,8 @@
 //! Session persistence: one JSONL file per session.
 //!
-//! Line 1 is a `meta` record, then one `event` record per history event, then a final
-//! `totals` record. The file is rewritten after every turn.
+//! Line 1 is a `meta` record, then a `prompt` record once the conversation's first request
+//! was sent (its system prompt and tool ledger), one `event` record per history event, and
+//! a final `totals` record. The file is rewritten after every turn.
 //!
 //! A process that has a session open holds an exclusive lock on `<id>.lock` next to
 //! it, so a second `ch -c` can't load the same session and overwrite its turns. The
@@ -16,6 +17,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::history::{Event, History};
+use crate::ledger::ToolLedger;
 use crate::types::Usage;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,12 +67,24 @@ pub struct SessionSnapshot {
     pub history: History,
     pub usage: Usage,
     pub cost: f64,
+    /// The system prompt and tools the conversation was sent with (ADR 0006). `None`
+    /// before its first request, and in files saved before they were kept.
+    pub prompt: Option<SavedPrompt>,
+}
+
+/// What every request of a conversation repeats: the system prompt rendered for its
+/// first request, and every tool definition sent so far.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedPrompt {
+    pub system: Vec<String>,
+    pub tools: ToolLedger,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Line {
     Meta(SessionMeta),
+    Prompt(SavedPrompt),
     Event(Event),
     Totals { usage: Usage, cost: f64 },
 }
@@ -168,6 +182,13 @@ impl SessionStore {
             "{}",
             serde_json::to_string(&Line::Meta(snap.meta.clone()))?
         )?;
+        if let Some(prompt) = &snap.prompt {
+            writeln!(
+                f,
+                "{}",
+                serde_json::to_string(&Line::Prompt(prompt.clone()))?
+            )?;
+        }
         for ev in snap.history.events() {
             writeln!(f, "{}", serde_json::to_string(&Line::Event(ev.clone()))?)?;
         }
@@ -192,6 +213,7 @@ impl SessionStore {
         let mut events = Vec::new();
         let mut usage = Usage::default();
         let mut cost = 0.0;
+        let mut prompt = None;
         for (n, line) in BufReader::new(f).lines().enumerate() {
             let line = line?;
             if line.trim().is_empty() {
@@ -201,6 +223,7 @@ impl SessionStore {
                 .with_context(|| format!("{}:{}", path.display(), n + 1))?
             {
                 Line::Meta(m) => meta = Some(m),
+                Line::Prompt(p) => prompt = Some(p),
                 Line::Event(e) => events.push(e),
                 Line::Totals { usage: u, cost: c } => {
                     usage = u;
@@ -220,6 +243,7 @@ impl SessionStore {
             history: History::from_events(events),
             usage,
             cost,
+            prompt,
         })
     }
 
@@ -291,12 +315,17 @@ mod tests {
                 ..Default::default()
             },
             cost: 0.5,
+            prompt: Some(SavedPrompt {
+                system: vec!["base".into()],
+                tools: ToolLedger::default(),
+            }),
         };
         store.save(&snap).unwrap();
         let loaded = store.load("s1").unwrap();
         assert_eq!(loaded.history.len(), 2);
         assert_eq!(loaded.usage.input_tokens, 5);
         assert_eq!(loaded.meta, snap.meta);
+        assert_eq!(loaded.prompt, snap.prompt);
         assert_eq!(store.list().unwrap().len(), 1);
         assert_eq!(store.latest().unwrap().unwrap().id, "s1");
 

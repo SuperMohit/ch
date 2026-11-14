@@ -11,8 +11,9 @@ use ch_kernel::{
     Role, SessionStore, TerminationReason,
 };
 use ch_provider_scripted::{ScriptStep, ScriptedProvider};
+use ch_testkit::{ScriptedSource, echo_tool};
 use serde_json::{Value, json};
-use sessions::{Dirs, Signed, dirs, received, signed_session};
+use sessions::{Dirs, Signed, dirs, received, signed_session, signed_session_with};
 
 /// `count` calls to `big` with `lines` lines each, then a reply. Replies differ, so
 /// `Signed` tells them apart without their thinking.
@@ -64,6 +65,7 @@ async fn send(p: &Signed, messages: Vec<Message>) -> Result<Message, String> {
         temperature: None,
         thinking_budget: Some(1000),
         purpose: "agent".into(),
+        tool_ledger: None,
     };
     let stream = (p.stream(request, CancellationToken::new()).await).map_err(|e| e.to_string())?;
     let events: Vec<_> = stream.collect().await;
@@ -433,4 +435,263 @@ async fn plan_reminders_and_summaries_keep_the_reasoning_valid() {
         second.contains("<system-reminder>") && second.contains("Read part"),
         "{second}"
     );
+}
+
+/// `mcp__fake__flip`: each call makes its source offer a new `extra<n>` tool in place of
+/// the last one, so tools are added and withdrawn while the turn runs.
+struct Flip {
+    source: ScriptedSource,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[ch_kernel::reexports::async_trait]
+impl ch_kernel::Tool for Flip {
+    fn spec(&self) -> ch_kernel::ToolSpec {
+        ch_kernel::ToolSpec {
+            name: "mcp__fake__flip".into(),
+            description: "Changes the server's tools.".into(),
+            input_schema: json!({"type": "object"}),
+            read_only: false,
+        }
+    }
+
+    async fn call(&self, _input: Value, _cx: &ch_kernel::Cx) -> ch_kernel::ToolOutput {
+        let n = 1 + self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let flip: std::sync::Arc<dyn ch_kernel::Tool> = std::sync::Arc::new(Flip {
+            source: self.source.clone(),
+            calls: std::sync::atomic::AtomicUsize::new(n),
+        });
+        self.source
+            .set_tools(vec![flip, echo_tool(&format!("mcp__fake__extra{n}"))]);
+        ch_kernel::ToolOutput::ok(format!("flipped {n}"))
+    }
+}
+
+/// Lets the fake server's tools run without asking.
+const ALLOW_FAKE: &str = "[plugins.safety]\nallow = [\"mcp__fake__*\"]\n";
+
+fn flipping_source() -> ScriptedSource {
+    let source = ScriptedSource::new("mcp:fake", "mcp__fake__");
+    let flip = std::sync::Arc::new(Flip {
+        source: source.clone(),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    source.with_tools(vec![flip])
+}
+
+/// Every fifth step changes the tools; the rest read logs big enough for trims and
+/// summaries. The model also calls a tool that was withdrawn by then.
+fn flipping_script(from: u64, count: u64) -> Vec<ScriptStep> {
+    let mut steps: Vec<ScriptStep> = (from..from + count)
+        .map(|n| match n % 5 {
+            0 => ScriptStep::tool("mcp__fake__flip", json!({})),
+            3 => ScriptStep::tool("mcp__fake__extra1", json!({ "x": n.to_string() })),
+            _ => ScriptStep::tool(
+                "big",
+                json!({ "n": n, "lines": if n % 2 == 0 { 100 } else { 12 } }),
+            ),
+        })
+        .collect();
+    steps.push(ScriptStep::text(format!("done {from}")));
+    steps
+}
+
+/// What netting all of `request`'s tool changes leaves: the tools added after the first
+/// request that are active, and the first request's tools that were withdrawn. A view
+/// that lost a change (a summary that dropped one) makes the model see another list.
+fn assert_changes_match_the_ledger(request: &ModelRequest) {
+    let ledger = request.tool_ledger.as_ref().expect("native");
+    let (mut added, mut removed) = (Vec::new(), Vec::new());
+    if let Some(ContentBlock::ToolsChanged {
+        added: a,
+        removed: r,
+    }) = ch_kernel::ledger::net(request.messages.iter().flat_map(|m| &m.content))
+    {
+        (added, removed) = (a, r);
+    }
+    added.sort();
+    removed.sort();
+    let mut want_added: Vec<String> = (ledger.iter())
+        .filter(|e| e.deferred && e.active)
+        .map(|e| e.spec.name.clone())
+        .collect();
+    let mut want_removed: Vec<String> = (ledger.iter())
+        .filter(|e| !e.deferred && !e.active)
+        .map(|e| e.spec.name.clone())
+        .collect();
+    want_added.sort();
+    want_removed.sort();
+    assert_eq!((added, removed), (want_added, want_removed));
+}
+
+/// `request` as the Anthropic provider sends it, without cache breakpoints (they move to
+/// the newest message on every request).
+fn wire(request: &ModelRequest) -> Value {
+    let mut body = ch_provider_anthropic::request::build_body(request, &Default::default());
+    for m in body["messages"].as_array_mut().unwrap() {
+        for b in m["content"].as_array_mut().unwrap() {
+            b.as_object_mut().unwrap().remove("cache_control");
+        }
+    }
+    body
+}
+
+/// The API's placement rules for system messages.
+fn assert_placement(body: &Value) {
+    let roles: Vec<&str> = (body["messages"].as_array().unwrap().iter())
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_ne!(roles[0], "system");
+    for (i, role) in roles.iter().enumerate() {
+        if *role == "system" {
+            assert_eq!(roles[i - 1], "user", "{roles:?}");
+            assert!(
+                i + 1 == roles.len() || roles[i + 1] == "assistant",
+                "{roles:?}"
+            );
+        }
+    }
+}
+
+/// Tools added and withdrawn mid-turn, across trims, summaries, `/compact` and a resume,
+/// never invalidate the model's signed reasoning: earlier definitions are never changed,
+/// and deferred ones count only once announced. What the provider sends stays valid and,
+/// between compactions, extends the last request.
+#[tokio::test]
+async fn tools_coming_and_going_keep_the_reasoning_valid() {
+    let d = dirs();
+    let p = Signed::new(ScriptedProvider::new(flipping_script(1, 80)).with_context_window(12_000));
+    let mut s = signed_session_with(
+        &p,
+        &d,
+        "s1",
+        ALLOW_FAKE,
+        vec![ScriptedSource::plugin("sources", vec![flipping_source()])],
+    );
+    let mut rx = s.events().subscribe();
+    let r = s.run_turn("read the logs").await;
+    assert_eq!(r.reason, TerminationReason::Done, "{r:?}");
+    assert_signed(&p);
+
+    // Which agent requests came right after a compaction, and what happened.
+    let (mut changes, mut trims, mut summaries) = (0, 0, 0);
+    let mut after_compaction = Vec::new();
+    let mut compacted = false;
+    for event in received(&mut rx) {
+        match event {
+            AgentEvent::ToolsChanged { .. } => changes += 1,
+            AgentEvent::ContextCompacted { kind, .. } => {
+                compacted = true;
+                match kind {
+                    CompactionKind::Elided => trims += 1,
+                    CompactionKind::Summarized => summaries += 1,
+                }
+            }
+            AgentEvent::ModelRequest { purpose, .. } if purpose == "agent" => {
+                after_compaction.push(compacted);
+                compacted = false;
+            }
+            _ => {}
+        }
+    }
+    assert!(changes >= 10, "{changes} tool changes");
+    assert!(
+        trims > 0 && summaries > 0,
+        "{trims} trims, {summaries} summaries"
+    );
+
+    let requests = p.inner.requests();
+    assert_eq!(requests.len(), after_compaction.len());
+    let defs = |r: &ModelRequest| -> Vec<ch_kernel::ToolSpec> {
+        let l = r.tool_ledger.as_ref().unwrap();
+        l.iter().map(|e| e.spec.clone()).collect()
+    };
+    for (i, request) in requests.iter().enumerate() {
+        assert_changes_match_the_ledger(request);
+        assert_placement(&wire(request));
+        if i == 0 {
+            continue;
+        }
+        // The ledger only grows.
+        let (a, b) = (defs(&requests[i - 1]), defs(request));
+        assert_eq!(b[..a.len()], a[..]);
+        let (wa, wb) = (wire(&requests[i - 1]), wire(request));
+        let (ta, tb) = (
+            wa["tools"].as_array().unwrap(),
+            wb["tools"].as_array().unwrap(),
+        );
+        assert_eq!(tb[..ta.len()], ta[..], "request {i}'s tools");
+        if !after_compaction[i] {
+            let (ma, mb) = (
+                wa["messages"].as_array().unwrap(),
+                wb["messages"].as_array().unwrap(),
+            );
+            assert_eq!(
+                mb[..ma.len()],
+                ma[..],
+                "request {i} doesn't extend the last"
+            );
+        }
+    }
+    let last = requests.last().unwrap();
+    let ledger = last.tool_ledger.as_ref().unwrap();
+    assert!(ledger.iter().filter(|e| e.deferred).count() >= 10);
+    assert_eq!(ledger.iter().filter(|e| e.deferred && e.active).count(), 1);
+    // A summary carried the changes of the span it replaced.
+    assert!(
+        (last.messages[0].content.iter()).any(|b| matches!(b, ContentBlock::ToolsChanged { .. })),
+        "{:?}",
+        last.messages[0]
+    );
+    // The model called a tool that was withdrawn by then, and was told so.
+    let told = (requests.iter())
+        .flat_map(|r| &r.messages)
+        .flat_map(|m| &m.content)
+        .any(|b| {
+            matches!(b, ContentBlock::ToolResult { content, .. }
+            if content.starts_with("`mcp__fake__extra1` is no longer available"))
+        });
+    assert!(told);
+
+    // `/compact`, then the session ends.
+    let out = s.compact(None).await.unwrap();
+    assert!(out.changed, "{}", out.message);
+    s.end().await;
+    drop(s);
+
+    // Another process, with a server that now offers other tools.
+    let q = p.then(ScriptedProvider::new(flipping_script(81, 12)).with_context_window(12_000));
+    let mut resumed = signed_session_with(
+        &q,
+        &d,
+        "new",
+        ALLOW_FAKE,
+        vec![ScriptedSource::plugin(
+            "sources",
+            vec![
+                ScriptedSource::new("mcp:fake", "mcp__fake__").with_tools(vec![
+                    echo_tool("mcp__fake__extra1"),
+                    echo_tool("mcp__fake__fresh"),
+                ]),
+            ],
+        )],
+    );
+    resumed
+        .restore(SessionStore::new(&d.sessions).load("s1").unwrap())
+        .unwrap();
+    assert_eq!(
+        resumed.run_turn("go on").await.reason,
+        TerminationReason::Done
+    );
+    assert_signed(&q);
+    let again = &q.inner.requests()[0];
+    assert_changes_match_the_ledger(again);
+    let state = |name: &str| {
+        let ledger = again.tool_ledger.as_ref().unwrap();
+        let e = ledger.iter().find(|e| e.spec.name == name).unwrap();
+        (e.deferred, e.active)
+    };
+    assert_eq!(state("mcp__fake__fresh"), (true, true));
+    assert_eq!(state("mcp__fake__extra1"), (true, true));
+    assert_eq!(state("mcp__fake__flip"), (false, false));
 }

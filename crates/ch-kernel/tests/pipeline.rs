@@ -2306,14 +2306,25 @@ fn tools_model_apis_would_reject_fail_registration() {
             "{err}"
         );
     }
-    // Names that aren't snake_case, such as MCP's `mcp__server__tool`, are accepted.
-    for name in ["mcp__github__get-issue", "Tool_1"] {
+    // Names that aren't snake_case are accepted.
+    for name in ["github__get-issue", "Tool_1"] {
         let ok = spec(name, object.clone());
         let p = vec![plugin("ext", move |cx| {
             cx.add_tool(SpecTool(ok.clone()));
             Ok(())
         })];
         assert!(build(p, &Config::default()).is_ok(), "{name}");
+    }
+    // The prefixes of MCP and external plugin tools are theirs alone: a built-in tool
+    // can't pose as one, and one can't pose as a built-in.
+    for name in ["mcp__github__get_issue", "ext__x__y"] {
+        let reserved = spec(name, object.clone());
+        let p = vec![plugin("ext", move |cx| {
+            cx.add_tool(SpecTool(reserved.clone()));
+            Ok(())
+        })];
+        let err = build(p, &Config::default()).err().unwrap().to_string();
+        assert!(err.contains("reserved"), "{err}");
     }
 }
 
@@ -2610,6 +2621,20 @@ fn yielding_commands_give_way() {
         }),
     ];
     assert!(build(p, &Config::default()).is_err());
+    // Two yielding ones don't: the first registered keeps the name.
+    let p = vec![
+        plugin("markdown", |cx| {
+            cx.add_command(NamedCommand("todos", true));
+            Ok(())
+        }),
+        plugin("ext", |cx| {
+            cx.add_command(NamedCommand("todos", true));
+            Ok(())
+        }),
+    ];
+    let r = build(p, &Config::default()).unwrap();
+    assert_eq!(r.commands.len(), 1);
+    assert_eq!(r.commands[0].0, "markdown");
 }
 
 #[test]

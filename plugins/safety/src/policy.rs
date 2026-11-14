@@ -135,6 +135,11 @@ impl Policy {
         read_only: bool,
         session_dir: Option<&Path>,
     ) -> Decision {
+        // First, by the reserved prefix: an outside tool never reaches a built-in
+        // tool's checks, and a built-in name never reaches these.
+        if ch_kernel::tool_source::is_outside_tool(tool) {
+            return self.decide_outside(tool, input, read_only);
+        }
         if tool == "bash" {
             let command = input.get("command").and_then(Value::as_str).unwrap_or("");
             return self.decide_bash(command);
@@ -351,8 +356,83 @@ impl Policy {
     }
 }
 
-/// Paths where a write always asks outside bypass mode: git internals, `.env*` files
-/// and ch's project config. Names compare case-insensitively, because on
+/// Most string values of an outside tool's input checked against `deny` and `ask`
+/// rules. Past that, the call asks.
+pub const MAX_OUTSIDE_STRINGS: usize = 4096;
+
+/// Deepest nesting of an outside tool's input that is searched for strings.
+const MAX_OUTSIDE_DEPTH: usize = 64;
+
+/// Every string in `input`, at any depth: values and object keys (a server may take a
+/// map keyed by path). Returns `None`
+/// when there are more than [`MAX_OUTSIDE_STRINGS`] or the input nests deeper than
+/// [`MAX_OUTSIDE_DEPTH`]: an input too big to check can't be allowed unchecked.
+pub fn string_values(input: &Value) -> Option<Vec<&str>> {
+    fn walk<'a>(v: &'a Value, depth: usize, out: &mut Vec<&'a str>) -> bool {
+        if depth > MAX_OUTSIDE_DEPTH {
+            return false;
+        }
+        match v {
+            Value::String(s) => {
+                out.push(s);
+                out.len() <= MAX_OUTSIDE_STRINGS
+            }
+            Value::Array(items) => items.iter().all(|i| walk(i, depth + 1, out)),
+            Value::Object(map) => map.iter().all(|(k, v)| {
+                out.push(k);
+                out.len() <= MAX_OUTSIDE_STRINGS && walk(v, depth + 1, out)
+            }),
+            _ => true,
+        }
+    }
+    let mut out = Vec::new();
+    walk(input, 0, &mut out).then_some(out)
+}
+
+impl Policy {
+    /// Tools from MCP servers and external plugins (ADR 0006 §8). `deny` and `ask` rules
+    /// match against every string in the input; `allow` rules count only as bare names
+    /// or name globs (`mcp__github__*`), since a pattern can't say what an unknown
+    /// tool's input means. `read_only` is true only for tools the user's config lists
+    /// in `read_only_tools`.
+    fn decide_outside(&self, tool: &str, input: &Value, read_only: bool) -> Decision {
+        let Some(strings) = string_values(input) else {
+            if let Some(d) = self.deny_or_ask(tool, &[]) {
+                return d;
+            }
+            return Decision::ask(
+                format!("{tool}'s input is too large or too deeply nested to check"),
+                None,
+            );
+        };
+        // A rule without a pattern matches whatever the targets are; one with a pattern
+        // matches if any string does. With no strings, `""` stands in, so `tool:*`
+        // still covers the call.
+        let targets: Vec<&str> = if strings.is_empty() {
+            vec![""]
+        } else {
+            strings
+        };
+        if let Some(d) = self.deny_or_ask(tool, &targets) {
+            return d;
+        }
+        let allowed = self
+            .allow
+            .iter()
+            .any(|r| !r.has_pattern() && r.matches(tool, &[]));
+        if read_only || allowed || self.mode == Mode::Bypass {
+            return Decision::Allow;
+        }
+        Decision::ask(
+            format!("{tool} comes from outside ch and isn't marked read-only"),
+            Some(globset::escape(tool)),
+        )
+    }
+}
+
+/// Paths where a write always asks outside bypass mode: git internals, `.env*` files,
+/// ch's project config, and what makes ch run other programs (`.mcp.json`, the
+/// project's `.ch/plugins/`). Names compare case-insensitively, because on
 /// case-insensitive file systems `.GIT/config` is `.git/config`.
 pub fn is_sensitive(rel: &Path) -> bool {
     let names: Vec<String> = rel
@@ -365,7 +445,13 @@ pub fn is_sensitive(rel: &Path) -> bool {
     if names.iter().any(|n| n == ".git") {
         return true;
     }
-    if names.last().is_some_and(|n| n.starts_with(".env")) {
+    if names
+        .last()
+        .is_some_and(|n| n.starts_with(".env") || n == ".mcp.json")
+    {
+        return true;
+    }
+    if names.windows(2).any(|w| w[0] == ".ch" && w[1] == "plugins") {
         return true;
     }
     names.ends_with(&[".ch".to_string(), "config.toml".to_string()])
@@ -705,5 +791,82 @@ allow = ["edit_file"]"#,
         assert!(is_sensitive(Path::new(".CH/Config.toml")));
         assert!(!is_sensitive(Path::new(".ch/commands/x.md")));
         assert!(!is_sensitive(Path::new("src/env.rs")));
+        assert!(is_sensitive(Path::new(".mcp.json")));
+        assert!(is_sensitive(Path::new("sub/.MCP.json")));
+        assert!(is_sensitive(Path::new(".ch/plugins/x/plugin.toml")));
+        assert!(is_sensitive(Path::new(".ch/plugins")));
+        assert!(!is_sensitive(Path::new("plugins/x.rs")));
+    }
+
+    fn outside(p: &Policy, tool: &str, input: Value) -> Decision {
+        p.decide(tool, &input, false)
+    }
+
+    #[test]
+    fn outside_tools_ask_unless_allowed_by_name() {
+        let f = fixture();
+        let p = policy(&f, "");
+        let d = outside(&p, "mcp__gh__create_issue", json!({"title": "x"}));
+        assert_eq!(key(&d), Some("mcp__gh__create_issue"));
+        // Read-only only by the user's own list, which arrives as `read_only`.
+        assert_eq!(p.decide("mcp__gh__list", &json!({}), true), Decision::Allow);
+        // Bypass allows them like any other tool.
+        let p = policy(&f, "mode = \"bypass\"");
+        assert_eq!(outside(&p, "mcp__gh__x", json!({})), Decision::Allow);
+        // accept-edits doesn't: they aren't edits.
+        let p = policy(&f, "mode = \"accept-edits\"");
+        assert!(is_ask(&outside(&p, "mcp__gh__x", json!({}))));
+
+        let p = policy(&f, "allow = [\"mcp__gh__*\", \"ext__p__run:*\"]");
+        assert_eq!(outside(&p, "mcp__gh__x", json!({})), Decision::Allow);
+        assert!(is_ask(&outside(&p, "mcp__other__x", json!({}))));
+        // An allow rule with a pattern doesn't count for an outside tool.
+        assert!(is_ask(&outside(&p, "ext__p__run", json!({"cmd": "ls"}))));
+    }
+
+    #[test]
+    fn outside_tools_deny_and_ask_on_any_string() {
+        let f = fixture();
+        let p = policy(
+            &f,
+            "allow = [\"mcp__*\"]\ndeny = [\"mcp__fs__*:/etc/*\"]\nask = [\"mcp__*:*prod*\"]",
+        );
+        let nested = json!({"ops": [{"args": {"path": "/etc/passwd"}}]});
+        assert!(is_deny(&outside(&p, "mcp__fs__read", nested)));
+        assert!(is_ask(&outside(
+            &p,
+            "mcp__db__q",
+            json!({"x": [1, {"y": "use prod db"}]})
+        )));
+        let keyed = json!({"files": {"/etc/passwd": true}});
+        assert!(is_deny(&outside(&p, "mcp__fs__read", keyed)));
+        assert_eq!(
+            outside(&p, "mcp__db__q", json!({"x": "dev"})),
+            Decision::Allow
+        );
+
+        // Too many strings to check: it asks, even when allowed.
+        let many: Vec<String> = (0..=MAX_OUTSIDE_STRINGS).map(|i| i.to_string()).collect();
+        assert!(is_ask(&outside(&p, "mcp__db__q", json!({ "list": many }))));
+        let mut deep = json!("x");
+        for _ in 0..100 {
+            deep = json!([deep]);
+        }
+        assert!(is_ask(&outside(&p, "mcp__db__q", deep)));
+    }
+
+    #[test]
+    fn built_in_checks_never_see_outside_tools() {
+        let f = fixture();
+        // `bash` rules and the bash deny list don't apply to an MCP tool that happens to
+        // take a `command`, and an outside allow rule can't cover `bash`.
+        let p = policy(&f, "allow = [\"bash\", \"mcp__*\"]");
+        let d = outside(&p, "mcp__sh__run", json!({"command": "rm -rf /"}));
+        assert_eq!(d, Decision::Allow, "allowed by name, not judged as bash");
+        let p = policy(&f, "allow = [\"mcp__*\"]");
+        assert!(is_ask(&bash(&p, "make deploy")));
+        // `update_plan` never asks; an outside tool named like it does.
+        let p = policy(&f, "");
+        assert!(is_ask(&outside(&p, "ext__x__update_plan", json!({}))));
     }
 }
