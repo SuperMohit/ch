@@ -73,6 +73,7 @@ The exit code says how the run ended:
 | 3 | Context overflow |
 | 4 | Stopped by a hook |
 | 5 | Prompt blocked |
+| 6 | The model refused |
 | 130 | Cancelled |
 
 Run `ch --help` for every flag.

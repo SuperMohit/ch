@@ -182,6 +182,8 @@ impl Usage {
 pub enum TerminationReason {
     /// The model stopped calling tools.
     Done,
+    /// The model declined to answer (the provider's refusal stop reason).
+    Refused,
     /// `agent.max_steps` model calls were made without the model finishing.
     StepLimit,
     /// The request no longer fits in the model's context window.
@@ -200,6 +202,7 @@ impl TerminationReason {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Done => "done",
+            Self::Refused => "refused",
             Self::StepLimit => "step_limit",
             Self::ContextOverflow { .. } => "context_overflow",
             Self::HookStop { .. } => "hook_stop",

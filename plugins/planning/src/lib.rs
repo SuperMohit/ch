@@ -20,7 +20,7 @@
 //!
 //! ```toml
 //! [plugins.planning]
-//! refresh_after_steps = 10    # 0 shows the plan only at the start of a turn; not 1
+//! refresh_after_steps = 10    # 0 shows the plan only at the start of a turn; 1 means 2
 //! ```
 
 mod plan;
@@ -29,7 +29,6 @@ mod tool;
 
 use std::sync::Arc;
 
-use anyhow::bail;
 use ch_kernel::reexports::async_trait;
 use ch_kernel::{Cx, Plugin, PluginManifest, PromptContributor, RegisterCx};
 use serde::Deserialize;
@@ -59,15 +58,19 @@ pub struct PlanningConfig {
 }
 
 impl PlanningConfig {
-    /// Rejects a refresh on every call.
-    pub fn validate(&self) -> anyhow::Result<()> {
+    /// Corrects a refresh on every call to every other call, with a warning: a project
+    /// may set this without trust, so a bad value mustn't stop `ch` from starting.
+    pub fn checked(mut self) -> (Self, Vec<String>) {
+        let mut warnings = Vec::new();
         if self.refresh_after_steps == 1 {
-            bail!(
+            warnings.push(
                 "plugins.planning.refresh_after_steps = 1 would add the plan to every call; \
-                 use 2 or more, or 0 to turn it off"
+                 using 2 (0 turns it off)"
+                    .to_string(),
             );
+            self.refresh_after_steps = 2;
         }
-        Ok(())
+        (self, warnings)
     }
 }
 
@@ -100,7 +103,10 @@ impl Plugin for PlanningPlugin {
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
         let config: PlanningConfig = cx.config()?;
-        config.validate()?;
+        let (config, warnings) = config.checked();
+        for warning in warnings {
+            tracing::warn!("{warning}");
+        }
         let store = Arc::new(PlanStore::default());
         cx.provide_service(store.clone())?;
         cx.add_tool(UpdatePlan::new(store.clone()));
@@ -325,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refresh_on_every_call_and_unknown_keys_are_rejected() {
+    fn a_refresh_on_every_call_is_corrected_and_unknown_keys_are_rejected() {
         let build = |toml: &str| {
             let tmp = tempfile::tempdir().unwrap();
             let config = ch_kernel::Config::parse(toml).unwrap();
@@ -334,8 +340,14 @@ mod tests {
         assert!(build("").is_ok());
         assert!(build("[plugins.planning]\nrefresh_after_steps = 0").is_ok());
         assert!(build("[plugins.planning]\nrefresh_after_steps = 2").is_ok());
-        let err = build("[plugins.planning]\nrefresh_after_steps = 1").unwrap_err();
-        assert!(format!("{err:#}").contains("every call"), "{err:#}");
+        assert!(build("[plugins.planning]\nrefresh_after_steps = 1").is_ok());
+        let every_call = PlanningConfig {
+            refresh_after_steps: 1,
+        };
+        let (fixed, warnings) = every_call.checked();
+        assert_eq!(fixed.refresh_after_steps, 2);
+        assert!(warnings[0].contains("every call"), "{warnings:?}");
+        assert!(PlanningConfig::default().checked().1.is_empty());
         assert!(build("[plugins.planning]\nrefresh_after_step = 3").is_err());
     }
 

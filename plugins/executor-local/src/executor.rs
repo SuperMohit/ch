@@ -80,11 +80,12 @@ impl LocalExecutor {
             } else {
                 Stdio::null()
             });
-        for name in &self.hidden_env {
-            cmd.env_remove(name);
-        }
         for (k, v) in &request.env {
             cmd.env(k, v);
+        }
+        // After the request's own values, so a caller can't put a hidden one back.
+        for name in &self.hidden_env {
+            cmd.env_remove(name);
         }
         for (k, v) in FIXED_ENV {
             cmd.env(k, v);

@@ -6,7 +6,7 @@
 //!
 //! ```toml
 //! [plugins.tool-web-fetch]
-//! user_agent = "ch/0.1 (coding agent)"
+//! user_agent = "ch/0.1 (coding agent)"   # one that can't be a header is replaced
 //! timeout_secs = 30
 //! max_bytes = 5242880
 //! max_redirects = 10
@@ -48,6 +48,24 @@ pub struct WebFetchConfig {
     pub allow_private_hosts: bool,
 }
 
+impl WebFetchConfig {
+    /// Replaces a `user_agent` that can't be sent as a header (a control character,
+    /// say) with the default, with a warning: a project may set it without trust, so a
+    /// bad value mustn't stop `ch` from starting.
+    pub fn checked(mut self) -> (Self, Vec<String>) {
+        let mut warnings = Vec::new();
+        if reqwest::header::HeaderValue::from_str(&self.user_agent).is_err() {
+            let default = Self::default().user_agent;
+            warnings.push(format!(
+                "plugins.tool-web-fetch.user_agent {:?} can't be sent as a header; using {default:?}",
+                self.user_agent
+            ));
+            self.user_agent = default;
+        }
+        (self, warnings)
+    }
+}
+
 impl Default for WebFetchConfig {
     fn default() -> Self {
         Self {
@@ -76,6 +94,10 @@ impl Plugin for ToolWebFetchPlugin {
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
         let config: WebFetchConfig = cx.config()?;
+        let (config, warnings) = config.checked();
+        for warning in warnings {
+            tracing::warn!("{warning}");
+        }
         cx.add_tool(WebFetchTool::new(config)?);
         Ok(())
     }

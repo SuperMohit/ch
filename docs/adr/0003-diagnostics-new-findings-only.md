@@ -162,9 +162,7 @@ These are the findings the design rests on. The figures are as their authors rep
 - **Only `edit_file` and `write_file` changes are seen.** Changes made through bash (`sed -i`, a code generator) aren't checked.
 - **The cache doesn't see config changes.** A checker's config file edited in the middle of a session leaves earlier cached results in place until the content of the checked file changes.
 - **The turn's end checks every file the turn changed,** not just `max_files_per_step`, since its results are mostly cached; the per-turn list stops at 100 files.
-- **Two kernel issues this plugin exposes,** to fix in the kernel:
-  - A turn-end note sent on the last allowed step leaves the turn ending as `StepLimit`, with the note unanswered in history.
-  - A refused response is treated as `Done`, so the turn-end check runs, but its note never reaches the model.
+- **A kernel issue this plugin exposes,** to fix in the kernel: a turn-end note sent on the last allowed step leaves the turn ending as `StepLimit`, with the note unanswered in history. (A refused response used to end as `Done`, running a turn-end check whose note never reached the model; it now ends as `Refused`, and the check doesn't run.)
 - **Checkers that can't read stdin get no before/after diff.** A checker with `stdin = false` only reads the file on disk, and by check time the **before** content exists only in the snapshot. Two options:
   - write the snapshot to a temp file beside the original (which some tools mis-resolve);
   - or run it only at turn end against a baseline.
