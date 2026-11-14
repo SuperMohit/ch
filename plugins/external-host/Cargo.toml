@@ -12,3 +12,21 @@ workspace = true
 
 [dependencies]
 ch-kernel.workspace = true
+ch-executor-local.workspace = true
+ch-mcp-bridge.workspace = true
+ch-plugin-protocol.workspace = true
+ch-plugin-sdk.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+ch-testkit.workspace = true
+futures.workspace = true
+tempfile.workspace = true

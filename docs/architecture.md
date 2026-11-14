@@ -98,7 +98,7 @@ sequenceDiagram
 |---|---|---|---|
 | **ModelProvider** | 1 per role (agent, summarizer) | `stream(req, cancel) -> Stream<ModelEvent>` | `provider-anthropic`, `provider-openai` |
 | **Tool** | many | `spec() -> ToolSpec`, `call(input, &ToolCx) -> ToolOutput` | `tools-fs`, `tool-bash`, `tool-web-fetch`, `planning` (`update_plan`) |
-| **ToolSource** | many | `start(ToolSink, &Cx)`, `stop()`; reports tools through the sink then and whenever they change ([ADR 0006](adr/0006-outside-plugins-and-changing-tools.md)) | `mcp-bridge`, `external-host` (planned) |
+| **ToolSource** | many | `start(ToolSink, &Cx)`, `stop()`; reports tools through the sink then and whenever they change ([ADR 0006](adr/0006-outside-plugins-and-changing-tools.md)) | `mcp-bridge`, `external-host` |
 | **Hook** | many, ordered by priority | `on(&HookEvent, &Cx) -> HookDecision` | `safety` (permissions), `stuck`, `diagnostics`, `hooks-shell` |
 | **PromptContributor** | many, ordered | `system_blocks(cx)`, `turn_reminders(cx)` | `prompt-base`, `project-instructions`, `planning` |
 | **ContextStrategy** | 1 | `view(&History, Budget, cx) -> View`, `compact(&History, Budget, &CompactRequest, cx) -> CompactOutcome` | `context` (`none` / `elide` / `summarize` / `staged`) |
@@ -144,7 +144,7 @@ Not doing: Rust dynamic libraries (`dlopen`), because Rust has no stable ABI and
 
 - Config merges in this order: built-in defaults → `~/.ch/config.toml` → `.ch/config.toml` (project) → `--profile <name>` → CLI flags.
 - Project config settings that could loosen permissions, run commands, read paths or pick endpoints and credentials apply only after the user trusts them; trust is recorded per workspace for the exact values (`crates/ch-cli/src/trust.rs`, [ADR 0001](adr/0001-sandbox-and-agent-security-responsibilities.md)).
-- *(Planned, roadmap 7.2 and 7.6)* Plugins load from `~/.ch/plugins/*/plugin.toml` and `.ch/plugins/*/plugin.toml`. Project plugins need a one-time trust prompt.
+- External plugins load from `~/.ch/plugins/*/plugin.toml` (`external-host`, roadmap 7.2; the protocol is in `crates/ch-plugin-protocol`). *(Planned, roadmap 7.6)* `.ch/plugins/*/plugin.toml` in a project, after a trust prompt per plugin.
 - Project instructions are read from `CH.md` / `AGENTS.md` in the repo root, and in parent directories up to the git root.
 - Sessions are stored in `~/.ch/sessions/<project-hash>/<session-id>.jsonl`.
 

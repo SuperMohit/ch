@@ -1,0 +1,10 @@
+# Copy this directory to ~/.ch/plugins/block-secrets/. Needs python3 on PATH.
+name = "block-secrets"
+description = "Refuses tool calls whose input contains a credential"
+command = "python3"
+args = ["plugin.py"]
+# If this check can't run (python3 missing, the script crashing or too slow), calls
+# are refused, not let through: `on_error` covers a running plugin, `guards` the time
+# before it first answers.
+on_error = "deny"
+guards = ["*"]
