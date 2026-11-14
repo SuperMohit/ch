@@ -3,7 +3,9 @@
 //! Text arrives in `choices[0].delta.content`. Tool calls arrive in
 //! `choices[0].delta.tool_calls`, keyed by `index`: the id and name come first, then the
 //! arguments stream in pieces. Usage arrives in a final chunk with no choices (requested
-//! with `stream_options.include_usage`), then `data: [DONE]`.
+//! with `stream_options.include_usage`), then `data: [DONE]`. A refusal arrives as text
+//! in `delta.refusal`, or as `finish_reason: "content_filter"`; either makes the stop
+//! reason `Refusal`, which the kernel ends the turn on without running any tool call.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -53,6 +55,8 @@ pub struct Assembler {
     reasoning: String,
     calls: BTreeMap<u64, PendingCall>,
     finish_reason: Option<String>,
+    /// Text arrived in `delta.refusal`.
+    refused: bool,
     usage: Usage,
     content_started: bool,
     finished: bool,
@@ -105,6 +109,13 @@ impl Assembler {
         let delta = &choice["delta"];
         if let Some(t) = delta["content"].as_str().filter(|t| !t.is_empty()) {
             self.content_started = true;
+            self.text.push_str(t);
+            out.push(ModelEvent::TextDelta(t.to_string()));
+        }
+        // The model's explanation of a refusal: shown like text, so the user sees it.
+        if let Some(t) = delta["refusal"].as_str().filter(|t| !t.is_empty()) {
+            self.content_started = true;
+            self.refused = true;
             self.text.push_str(t);
             out.push(ModelEvent::TextDelta(t.to_string()));
         }
@@ -203,6 +214,9 @@ impl Assembler {
             });
         }
         let stop_reason = match self.finish_reason.as_deref() {
+            // Before the tool-call rule, so a filtered response's tool calls never run.
+            _ if self.refused => StopReason::Refusal,
+            Some("content_filter") => StopReason::Refusal,
             Some("length") => StopReason::MaxTokens,
             // Some servers report "stop" even when they called tools.
             _ if !self.calls.is_empty() => StopReason::ToolUse,
@@ -377,6 +391,27 @@ mod tests {
 
     fn usage() -> Value {
         json!({"id":"c","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"prompt_tokens_details":{"cached_tokens":64}}})
+    }
+
+    #[tokio::test]
+    async fn refusals_and_filtered_responses_stop_as_refusal() {
+        let (evs, err) = collect(sse(
+            &[
+                delta(json!({"refusal": "I can't help with that."})),
+                finish("stop"),
+            ],
+            true,
+        ))
+        .await;
+        assert!(err.is_none(), "{err:?}");
+        let r = completed(&evs);
+        assert_eq!(r.stop_reason, StopReason::Refusal);
+        assert_eq!(r.message.text(), "I can't help with that.");
+
+        let call = json!({"tool_calls": [{"index": 0, "id": "t1", "function": {"name": "bash", "arguments": "{}"}}]});
+        let (evs, err) = collect(sse(&[delta(call), finish("content_filter")], true)).await;
+        assert!(err.is_none(), "{err:?}");
+        assert_eq!(completed(&evs).stop_reason, StopReason::Refusal);
     }
 
     #[tokio::test]

@@ -19,8 +19,8 @@ pub struct PrintResult {
     #[serde(rename = "type")]
     pub kind: String,
     pub session_id: String,
-    /// `done`, `error`, `step_limit`, `context_overflow`, `hook_stop`, `cancelled` or
-    /// `prompt_denied`.
+    /// `done`, `error`, `step_limit`, `context_overflow`, `hook_stop`, `prompt_denied`,
+    /// `refused` or `cancelled`.
     pub reason: String,
     /// The error message or stop reason, when there is one.
     pub detail: Option<String>,

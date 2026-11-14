@@ -85,9 +85,10 @@ impl StuckConfig {
             // Lowering refuse_after keeps the stop where it was, so a project can't make
             // a hopeless turn run longer, and a refusal still comes before the stop.
             let fixed = self.stop_after - 1;
+            let off = if fixed == 0 { " (off)" } else { "" };
             warnings.push(format!(
                 "plugins.stuck.refuse_after ({}) must be below stop_after ({}), or the turn \
-                 ends before a call is ever refused; using {fixed}",
+                 ends before a call is ever refused; using {fixed}{off}",
                 self.refuse_after, self.stop_after
             ));
             self.refuse_after = fixed;

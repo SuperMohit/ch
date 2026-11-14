@@ -65,7 +65,7 @@ impl Command for Clear {
         "clear"
     }
     fn description(&self) -> &str {
-        "Start a fresh conversation (token and cost totals are kept)"
+        "Start a fresh conversation, with its own token and cost totals"
     }
     async fn run(&self, _args: &str, cx: &mut CmdCx<'_>) -> anyhow::Result<Outcome> {
         // Don't lose the current conversation.
@@ -182,7 +182,8 @@ impl Command for Cost {
         } else {
             out.push_str("**Cost:** not tracked. Set `[model.pricing]` in the config to see it.");
         }
-        // After /clear or /resume the conversation's totals no longer match this run's.
+        // After /clear, /resume or resuming at startup, the conversation's totals no longer
+        // match this run's.
         let (p, pc) = (s.process_usage(), s.process_cost());
         if p != u || (pc - s.cost()).abs() > 1e-9 {
             let tokens =
