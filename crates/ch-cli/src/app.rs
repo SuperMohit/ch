@@ -260,12 +260,13 @@ pub async fn run_with(
     let overrides = Overrides::from_cli(&cli);
     let project_settings = ProjectSettings::of(&plugins);
     let mut loaded = build_config(&paths, &overrides, &project_settings)?;
+    // Whether ch may ask the user something before the session starts.
+    let interactive = matches!(stdin, Stdin::Process)
+        && !cli.is_print()
+        && !cli.list_plugins
+        && std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal();
     if let ProjectTrust::Untrusted { settings, hash } = &loaded.project {
-        let interactive = matches!(stdin, Stdin::Process)
-            && !cli.is_print()
-            && !cli.list_plugins
-            && std::io::stdin().is_terminal()
-            && std::io::stderr().is_terminal();
         if interactive {
             if confirm_trust(&describe(settings))? {
                 TrustStore::new(&paths.home).trust(&workspace, hash)?;
@@ -292,6 +293,7 @@ pub async fn run_with(
         } => Some(settings.clone()),
         _ => None,
     };
+    let project_servers = loaded.project_servers.take();
     let config = loaded.config;
     tracing::info!(files = ?loaded.files, workspace = %workspace.display(), "config loaded");
     let kcfg = config.kernel()?;
@@ -305,6 +307,17 @@ pub async fn run_with(
     // Options for the frontends travel as services in the registry.
     let mut services = Services::default();
     services.provide(Arc::new(ChHome(paths.home.clone())));
+    #[cfg(feature = "mcp-bridge")]
+    crate::mcp::provide_project_servers(
+        &paths,
+        &config,
+        project_servers.as_ref(),
+        interactive,
+        cli.trust_project_servers,
+        &mut services,
+    )?;
+    #[cfg(not(feature = "mcp-bridge"))]
+    let _ = project_servers;
     let selection = select(&cli, &kcfg);
     if cli.is_print() {
         let prompt = match stdin {

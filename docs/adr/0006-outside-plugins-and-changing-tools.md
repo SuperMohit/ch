@@ -243,3 +243,29 @@ A session file saved before ledgers existed counts only the built-in tools as it
 4. **`hooks-shell` (7.5)**, with timeouts and the same trust rules, then **`ch plugins` and `/plugins reload` (7.6)**.
 
 The conformance profile (7.7) runs in each PR against what that PR adds.
+
+## Implementation notes (part 2: the MCP bridge)
+
+Where the bridge settled details this ADR left open:
+
+- **Config.** `[[mcp_servers]]` in `~/.ch/config.toml` and a project's `.ch/config.toml`, and `mcpServers` in `.mcp.json`. The CLI takes `mcp_servers` out of the project config before splitting its settings, including from every profile, so project servers never count as the user's own and never join the settings' trust hash. `.mcp.json` entries come in name order: JSON objects have no order ch keeps.
+- **Trust.** The CLI finds project servers (`ch_mcp_bridge::discover_project`), asks about each untrusted one at startup when it may, and hands them to the plugin as a `ProjectServers` service with a callback that saves trust. Records live beside the settings' record in `trusted-projects.toml` as `[[server]]` entries. The hash covers the entry as written (env and header values before `${VAR}` expansion, so no secret is stored), the resolved program, and the content of the program and of every argument that names a file inside the workspace.
+- **`/mcp trust` takes two steps.** `/mcp trust <name>` shows what the server runs; `/mcp trust <name> yes` saves trust for the hash that was shown and starts the server. A command can't ask a question, and the user should see the entry before trusting it.
+- **Exit paths.** `ch_kernel::exit` keeps a process-wide list of cleanups, and `main.rs` and the print frontend's second Ctrl-C leave through `ch_kernel::exit::exit`. The bridge records each server's process group and registers one cleanup that SIGKILLs them all.
+- **Stdio framing.** The bridge has its own transport over the child's pipes. A response over 16 MB, or one rmcp can't read, is answered locally with a JSON-RPC error for its id, found in the first 64 KB or the last 1 KB of the line, so the call fails at once instead of waiting for its timeout.
+- **HTTP.** rmcp's default reqwest client follows only same-origin 307 and 308 redirects, which already meets §10.
+- **Results.** Embedded text resources count as text; blobs, images and audio become placeholders with their type and size; resource links become `[resource link: <uri>]`.
+- **Safety.** Outside tools are recognised by prefix before any built-in check. Deny and ask patterns match every string value of the input; an input with more than 4096 strings or nested deeper than 64 levels asks rather than going unchecked.
+- **What the trust prompt covers.**
+  - ch's own `PATH` finds a stdio server's program, never the entry's `env.PATH`, so the program shown and hashed is the one that runs.
+  - A project entry's env values are shown unless they only reference ch's variables (`NODE_OPTIONS = "--require ./x.js"` changes what runs).
+  - The variables an entry reads are found by running the same expansion that starts it, so nested forms such as `${${KEY}}` can't hide one.
+  - A file named after `=` in an argument (`--require=./x.js`) is hashed too. Files reached in other ways, such as imports or a directory argument, are not: trusting a server that runs workspace code means trusting that code.
+- **Trust is checked again before every spawn.** A trusted project server whose hash changed since startup or since `/mcp trust` (an edited script, then `/mcp reconnect`) fails with a reason instead of starting.
+- **A project entry's `read_only_tools` is ignored.** Only the user's config can make an outside tool skip approval.
+- **Redaction** also covers the values of the variables an entry reads (a server can echo a bare token), any URL user info, and secret-looking query parameters (`api_key`, `token`, `sig`, ...). The stderr tail is redacted before it is cut.
+- **Lifecycle.**
+  - A process still in its handshake is tracked, so a stop then (the background start's limit, `/mcp reconnect`, the session ending) kills it.
+  - Exits are noticed from the child as well as from stdout, so a grandchild holding stdout open doesn't hide one.
+  - Call timeouts are the bridge's own, and cancel notifications are sent from a task, so a write blocked on a full pipe delays neither. Stopping skips closing stdin when a write holds it.
+  - The stdio transport keeps a partly read line between `receive` calls, because rmcp drops that future inside a `select!`.

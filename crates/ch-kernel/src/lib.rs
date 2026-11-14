@@ -11,6 +11,7 @@ pub mod context;
 pub mod cx;
 pub mod events;
 pub mod executor;
+pub mod exit;
 pub mod frontend;
 pub mod history;
 pub mod hook;
