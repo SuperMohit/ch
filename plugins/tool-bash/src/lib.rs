@@ -26,7 +26,7 @@ pub use tool::{BashTool, DescriptionVariant};
 
 /// `[plugins.tool-bash]` settings.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct BashConfig {
     /// Timeout when the model doesn't pass `timeout_seconds`.
     pub default_timeout_secs: u64,

@@ -43,7 +43,7 @@ pub const RESERVED: &[&str] = &[
 
 /// `[plugins.commands-markdown]`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct MarkdownConfig {
     /// Directory of user-level commands. `~/` is the home directory; an empty string
     /// turns user commands off. Defaults to `commands` in the ch home (`~/.ch`).

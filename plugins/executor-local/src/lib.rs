@@ -31,7 +31,7 @@ pub use executor::{DEFAULT_KEY_VARS, LocalExecutor};
 
 /// `[plugins.executor-local]` settings.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LocalExecutorConfig {
     /// Cap per stream (stdout, stderr). Overflow keeps the tail.
     pub max_output_bytes: usize,
