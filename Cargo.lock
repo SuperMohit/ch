@@ -229,6 +229,7 @@ dependencies = [
  "ch-context",
  "ch-diagnostics",
  "ch-executor-local",
+ "ch-external-host",
  "ch-frontend-print",
  "ch-frontend-repl",
  "ch-kernel",
@@ -365,7 +366,23 @@ dependencies = [
 name = "ch-external-host"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "ch-executor-local",
  "ch-kernel",
+ "ch-mcp-bridge",
+ "ch-plugin-protocol",
+ "ch-plugin-sdk",
+ "ch-testkit",
+ "futures",
+ "nix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -478,10 +495,19 @@ dependencies = [
 [[package]]
 name = "ch-plugin-protocol"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "ch-plugin-sdk"
 version = "0.1.0"
+dependencies = [
+ "ch-plugin-protocol",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "ch-project-instructions"
@@ -3102,6 +3128,23 @@ name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
+name = "todo-scanner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "ch-external-host",
+ "ch-kernel",
+ "ch-plugin-sdk",
+ "ch-testkit",
+ "futures",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "tokio"

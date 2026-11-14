@@ -62,8 +62,8 @@ pub fn builtin_plugins() -> Vec<Arc<dyn Plugin>> {
     // Outside plugins.
     #[cfg(feature = "mcp-bridge")]
     plugins.push(ch_mcp_bridge::plugin());
-    // #[cfg(feature = "external-host")]
-    // plugins.push(ch_external_host::plugin());
+    #[cfg(feature = "external-host")]
+    plugins.push(ch_external_host::plugin());
     // #[cfg(feature = "hooks-shell")]
     // plugins.push(ch_hooks_shell::plugin());
 
