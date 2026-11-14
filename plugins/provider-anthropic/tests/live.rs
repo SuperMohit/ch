@@ -40,6 +40,7 @@ async fn streamed_tool_use_round_trip() {
         temperature: None,
         thinking_budget: None,
         purpose: "live-test".into(),
+        tool_ledger: None,
     };
 
     let mut stream = provider
@@ -105,6 +106,7 @@ async fn a_tool_result_is_accepted_after_its_call_s_thinking_is_dropped() {
         temperature: None,
         thinking_budget: Some(2048),
         purpose: "live-test".into(),
+        tool_ledger: None,
     };
     let first = ch_kernel::complete(&provider, request.clone(), CancellationToken::new())
         .await

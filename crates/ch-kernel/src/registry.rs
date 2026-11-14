@@ -19,6 +19,7 @@ use crate::plugin::{API_VERSION, Plugin, PluginManifest, RegisterCx};
 use crate::prompt::PromptContributor;
 use crate::services::Services;
 use crate::tool::{Tool, ToolSpec};
+use crate::tool_source::ToolSource;
 
 type Tagged<T> = Vec<(String, Arc<T>)>;
 
@@ -28,6 +29,7 @@ pub struct RegistryBuilder {
     pub(crate) enabled: Vec<String>,
     pub(crate) providers: Tagged<dyn ModelProvider>,
     pub(crate) tools: Tagged<dyn Tool>,
+    pub(crate) sources: Tagged<dyn ToolSource>,
     pub(crate) hooks: Tagged<dyn Hook>,
     pub(crate) prompts: Tagged<dyn PromptContributor>,
     pub(crate) contexts: Tagged<dyn ContextStrategy>,
@@ -52,6 +54,9 @@ pub struct Registry {
     pub plugins: Vec<PluginStatus>,
     pub providers: Tagged<dyn ModelProvider>,
     pub tools: Tagged<dyn Tool>,
+    /// Sources of tools known only at run time, in registration order (their
+    /// precedence when two offer the same name).
+    pub sources: Tagged<dyn ToolSource>,
     /// Sorted by priority (stable).
     pub hooks: Tagged<dyn Hook>,
     /// Sorted by priority (stable).
@@ -216,6 +221,20 @@ impl RegistryBuilder {
                 .map_err(|e| anyhow::anyhow!("plugin `{plugin}`: {e}"))?;
         }
         check_unique("tool", self.tools.iter().map(|(p, t)| (p, t.spec().name)))?;
+        for (plugin, tool) in &self.tools {
+            let name = tool.spec().name;
+            if crate::tool_source::is_outside_tool(&name) {
+                bail!(
+                    "plugin `{plugin}`: tool name `{name}` starts with a prefix reserved for \
+                     MCP servers and external plugins ({:?})",
+                    crate::tool_source::RESERVED_PREFIXES
+                );
+            }
+        }
+        check_unique(
+            "tool source",
+            self.sources.iter().map(|(p, s)| (p, s.id().to_string())),
+        )?;
         check_unique(
             "command",
             self.commands.iter().map(|(p, c)| (p, c.name().to_string())),
@@ -256,6 +275,7 @@ impl RegistryBuilder {
             plugins,
             providers: self.providers,
             tools: self.tools,
+            sources: self.sources,
             hooks: self.hooks,
             prompts: self.prompts,
             contexts: self.contexts,

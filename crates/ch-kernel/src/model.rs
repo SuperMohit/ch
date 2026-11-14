@@ -7,6 +7,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use crate::ledger::LedgerEntry;
 use crate::tool::ToolSpec;
 use crate::types::{Message, StopReason, Usage};
 
@@ -17,6 +18,7 @@ pub struct ModelRequest {
     /// System prompt blocks, in order. Providers join or send them as separate blocks.
     pub system: Vec<String>,
     pub messages: Vec<Message>,
+    /// The tools the model may call now.
     pub tools: Vec<ToolSpec>,
     pub max_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -27,6 +29,29 @@ pub struct ModelRequest {
     /// Free-form tag for telemetry, e.g. "agent" or "context.summarize".
     #[serde(default)]
     pub purpose: String,
+    /// Every tool definition sent in this conversation, in order, when the provider
+    /// said it renders tool changes natively ([`ToolChanges::Native`]). Such a provider
+    /// sends these instead of `tools`, deferring the entries marked `deferred`, and
+    /// renders `ToolsChanged` blocks as tool-change messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_ledger: Option<Vec<LedgerEntry>>,
+}
+
+/// How a provider handles tools that are added or withdrawn during a conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChanges {
+    /// It reads `ModelRequest::tool_ledger` and announces changes without changing the
+    /// tool definitions sent earlier (Anthropic's mid-conversation tool changes).
+    Native,
+    /// It sends the current tools and renders `ToolsChanged` as a note. For models that
+    /// don't check their earlier reasoning against the tool list: a change costs one
+    /// prompt-cache rewrite.
+    Replace,
+    /// The model checks its reasoning against the tool list and the provider can't
+    /// announce changes, so the list stays as first sent until `/clear`: new tools
+    /// wait, and withdrawn ones fail when called.
+    Frozen,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -99,6 +124,11 @@ pub trait ModelProvider: Send + Sync {
     fn default_model(&self) -> Option<&str> {
         None
     }
+
+    /// How requests for `model` handle tools added or withdrawn mid-conversation.
+    fn tool_changes(&self, _model: &str) -> ToolChanges {
+        ToolChanges::Replace
+    }
 }
 
 /// Runs a request to completion, ignoring deltas. Useful for tool-free helper calls
@@ -121,16 +151,20 @@ pub async fn complete(
 }
 
 pub(crate) fn specs_chars(specs: &[ToolSpec]) -> usize {
-    specs
-        .iter()
-        .map(|t| t.name.len() + t.description.len() + t.input_schema.to_string().len())
-        .sum()
+    specs.iter().map(spec_chars).sum()
+}
+
+fn spec_chars(t: &ToolSpec) -> usize {
+    t.name.len() + t.description.len() + t.input_schema.to_string().len()
 }
 
 /// Raw token estimate of a whole request.
 pub(crate) fn estimate_request_tokens(req: &ModelRequest) -> u64 {
     let chars = req.system.iter().map(String::len).sum::<usize>()
         + req.messages.iter().map(Message::char_len).sum::<usize>()
-        + specs_chars(&req.tools);
+        + match &req.tool_ledger {
+            Some(ledger) => ledger.iter().map(|e| spec_chars(&e.spec)).sum(),
+            None => specs_chars(&req.tools),
+        };
     crate::tokens::estimate_tokens(chars)
 }

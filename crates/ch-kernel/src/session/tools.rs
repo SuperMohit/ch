@@ -8,7 +8,7 @@ use crate::approver::{Approval, ApprovalRequest};
 use crate::cx::Cx;
 use crate::events::AgentEvent;
 use crate::hook::{HookEvent, Verdict, run_hooks};
-use crate::tool::{Tool, ToolOutput};
+use crate::tool::{Tool, ToolOutput, ToolSpec};
 use crate::types::{ContentBlock, ToolCall};
 use crate::util::truncate_middle;
 
@@ -46,9 +46,8 @@ impl Session {
         let mut batches: Vec<(bool, Vec<ToolCall>)> = Vec::new();
         for call in calls {
             let ro = self
-                .tools
-                .get(&call.name)
-                .is_some_and(|t| t.spec().read_only);
+                .callable(&call.name)
+                .is_ok_and(|(spec, _)| spec.read_only);
             match batches.last_mut() {
                 Some((true, b)) if ro => b.push(call),
                 _ => batches.push((ro, vec![call])),
@@ -139,37 +138,60 @@ impl Session {
         (results, stop)
     }
 
+    /// The tool a call to `name` runs, with the spec the session uses for it (for a
+    /// tool from a source, its read-only flag comes from the user's config), or the
+    /// error the model gets: the model may call only tools it was told about, while
+    /// they are still offered.
+    fn callable(&self, name: &str) -> Result<(ToolSpec, Arc<dyn Tool>), String> {
+        match self.ledger.get(name) {
+            Some(entry) if entry.active => self.catalog.tool(name).ok_or_else(|| {
+                let reason = (entry.source.as_deref())
+                    .and_then(|s| self.catalog.gone_reason(s))
+                    .unwrap_or_else(|| "its source no longer offers it".into());
+                format!("`{name}` is no longer available: {reason}.")
+            }),
+            Some(_) => Err(format!(
+                "`{name}` is no longer available. Use one of the tools you have now."
+            )),
+            None => {
+                let mut names: Vec<String> =
+                    (self.tool_specs.iter()).map(|t| t.name.clone()).collect();
+                names.sort_unstable();
+                Err(format!(
+                    "Unknown tool `{name}`. Available tools are: {}.",
+                    names.join(", ")
+                ))
+            }
+        }
+    }
+
     /// Runs pre_tool hooks and approval for one call.
     async fn prepare_call(
         &mut self,
         call: ToolCall,
         cx: &Cx,
     ) -> (Prepared, Option<(String, String)>) {
-        let Some(tool) = self.tools.get(&call.name).cloned() else {
-            let mut names: Vec<&str> = self.tools.keys().map(String::as_str).collect();
-            names.sort_unstable();
-            let output = ToolOutput::error(format!(
-                "Unknown tool `{}`. Available tools are: {}.",
-                call.name,
-                names.join(", ")
-            ));
-            self.events.emit(AgentEvent::ToolCallStart {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                input: call.input.clone(),
-                summary: String::new(),
-            });
-            return (
-                Prepared::Done {
-                    call,
-                    output,
-                    not_run: false,
-                    notes: Vec::new(),
-                },
-                None,
-            );
+        let (spec, tool) = match self.callable(&call.name) {
+            Ok(found) => found,
+            Err(why) => {
+                let output = ToolOutput::error(why);
+                self.events.emit(AgentEvent::ToolCallStart {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    input: call.input.clone(),
+                    summary: String::new(),
+                });
+                return (
+                    Prepared::Done {
+                        call,
+                        output,
+                        not_run: false,
+                        notes: Vec::new(),
+                    },
+                    None,
+                );
+            }
         };
-        let spec = tool.spec();
         let mut ev = HookEvent::PreTool {
             call,
             read_only: spec.read_only,

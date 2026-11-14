@@ -1,5 +1,6 @@
 //! Kernel request → chat-completions request body.
 
+use ch_kernel::util::system_reminder;
 use ch_kernel::{ContentBlock, Message, ModelRequest, Role, ToolSpec};
 use serde_json::{Map, Value, json};
 
@@ -79,7 +80,7 @@ fn messages(req: &ModelRequest) -> Vec<Value> {
 /// Tool results become `role: "tool"` messages (they must directly follow the assistant
 /// message that called them); any text goes in a user message after them.
 fn user(msg: &Message, out: &mut Vec<Value>) {
-    let mut text = Vec::new();
+    let mut text: Vec<String> = Vec::new();
     for block in &msg.content {
         match block {
             ContentBlock::ToolResult {
@@ -98,7 +99,10 @@ fn user(msg: &Message, out: &mut Vec<Value>) {
                     "content": content,
                 }));
             }
-            ContentBlock::Text { text: t } if !t.is_empty() => text.push(t.as_str()),
+            ContentBlock::Text { text: t } if !t.is_empty() => text.push(t.clone()),
+            ContentBlock::ToolsChanged { added, removed } => {
+                text.push(system_reminder(&ch_kernel::ledger::note(added, removed)));
+            }
             _ => {}
         }
     }
@@ -147,6 +151,27 @@ fn assistant(msg: &Message) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_change_is_a_note_in_the_user_message() {
+        let msg = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::text("go on"),
+                ContentBlock::ToolsChanged {
+                    added: vec!["mcp__gh__a".into()],
+                    removed: vec!["mcp__gh__b".into()],
+                },
+            ],
+        };
+        let mut out = Vec::new();
+        user(&msg, &mut out);
+        assert_eq!(out.len(), 1);
+        let text = out[0]["content"].as_str().unwrap();
+        assert!(text.starts_with("go on\n\n<system-reminder>"), "{text}");
+        assert!(text.contains("Tools now available: mcp__gh__a."), "{text}");
+        assert!(text.contains("(don't call them): mcp__gh__b."), "{text}");
+    }
 
     #[test]
     fn a_stored_malformed_call_is_sent_back_unchanged() {
@@ -218,6 +243,7 @@ mod tests {
             temperature: Some(0.5),
             thinking_budget: Some(1000),
             purpose: String::new(),
+            tool_ledger: None,
         };
         let body = build_body(
             &req,

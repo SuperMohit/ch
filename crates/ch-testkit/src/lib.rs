@@ -6,6 +6,12 @@
 //!   observations instead of panics.
 //! - [`test_cx`] / [`TestCx`] build a [`Cx`] with chosen services and executor, and
 //!   [`build_registry`] registers real plugins against a temp workspace.
+//! - [`ScriptedSource`] is a tool source a test drives: it adds, changes and withdraws
+//!   tools mid-session, fails, or starts slowly.
+
+mod source;
+
+pub use source::{ScriptedSource, echo_tool, echo_tool_described};
 
 use std::any::Any;
 use std::panic::AssertUnwindSafe;

@@ -14,6 +14,7 @@ pub mod executor;
 pub mod frontend;
 pub mod history;
 pub mod hook;
+pub mod ledger;
 pub mod model;
 pub mod plugin;
 pub mod prompt;
@@ -23,6 +24,7 @@ pub mod session;
 pub mod store;
 pub mod tokens;
 pub mod tool;
+pub mod tool_source;
 pub mod types;
 pub mod util;
 
@@ -41,17 +43,20 @@ pub use history::{Event, EventId, History};
 pub use hook::{
     Hook, HookAsk, HookDecision, HookEvent, HookOutcome, HookPoint, Verdict, run_hooks,
 };
+pub use ledger::{LedgerEntry, Offered, ToolLedger};
 pub use model::{
-    ModelError, ModelEvent, ModelProvider, ModelRequest, ModelResponse, ModelStream, complete,
+    ModelError, ModelEvent, ModelProvider, ModelRequest, ModelResponse, ModelStream, ToolChanges,
+    complete,
 };
 pub use plugin::{API_VERSION, Plugin, PluginManifest, RegisterCx};
 pub use prompt::PromptContributor;
 pub use registry::{PluginStatus, Registry, RegistryBuilder};
 pub use services::{ChHome, Services};
 pub use session::{CancelHandle, Session, SessionBuilder, TurnResult};
-pub use store::{SessionLock, SessionMeta, SessionSnapshot, SessionStore};
+pub use store::{SavedPrompt, SessionLock, SessionMeta, SessionSnapshot, SessionStore};
 pub use tokens::{TokenCalibrator, estimate_tokens};
 pub use tool::{Tool, ToolOutput, ToolSpec};
+pub use tool_source::{SourceStatus, ToolSink, ToolSource};
 pub use types::{ContentBlock, Message, Role, StopReason, TerminationReason, ToolCall, Usage};
 
 /// Re-exports plugin crates commonly need, so they agree on versions.
