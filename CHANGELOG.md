@@ -77,7 +77,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 - A session can only be open in one `ch` at a time. A second `ch -c` (or `/resume`) for a session another process has open now stops with a message, instead of both processes saving over each other's turns. The lock is released when `ch` exits, even after a crash.
 - `/clear` starts a new session instead of emptying the current one. Before, the next turn saved over the cleared conversation, so it was lost. Now it stays saved and `/resume` brings it back.
 - `edit_file` and `write_file` change the exact content the read-before-write check verified. Before, they read the file a second time after the check, so a change made between the two reads was edited over without the "changed on disk" error.
-- A repository's `.ch/config.toml` can no longer stop `ch` from starting with an out-of-range `plugins.planning.refresh_after_steps` or `plugins.stuck` limit. As with `context` and `spill`, the value is corrected, with a warning in `ch.log`.
+- A repository's `.ch/config.toml` can no longer stop `ch` from starting with an out-of-range `plugins.planning.refresh_after_steps` or `plugins.stuck` limit, or a `plugins.tool-web-fetch.user_agent` that can't be sent as a header. As with `context` and `spill`, the value is corrected, with a warning in `ch.log`; a user agent with a control character is replaced by the default.
 - `/clear` starts the new conversation's token and cost totals at zero, so the saved session no longer carries the previous conversation's spend. `/cost` shows the conversation's totals, plus the whole run's when they differ, as after `/clear`, `/resume` or `ch -c`.
 
 ### Security
