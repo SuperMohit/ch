@@ -30,7 +30,7 @@ impl Session {
     /// before that, what the prompt contributors give now. It is rendered once per
     /// conversation because a model's signed reasoning is checked against it.
     pub(super) async fn system_prompt(&self, cx: &Cx) -> Vec<String> {
-        match &self.system {
+        match &self.conversation.system {
             Some(system) => system.clone(),
             None => self.render_system(cx).await,
         }
@@ -105,7 +105,7 @@ impl Session {
                 ),
             );
         }
-        let staged = self.ledger.stage(&offered, mode);
+        let staged = self.conversation.ledger.stage(&offered, mode);
         if mode == ToolChanges::Frozen && staged.ledger.has_deferred() {
             self.warn_once(
                 "frozen with deferred".into(),
@@ -126,11 +126,17 @@ impl Session {
             );
         }
         let waiting: Vec<String> = (staged.waiting.iter())
-            .filter(|n| !self.tool_warnings.contains(&format!("waiting {n}")))
+            .filter(|n| {
+                !self
+                    .conversation
+                    .tool_warnings
+                    .contains(&format!("waiting {n}"))
+            })
             .cloned()
             .collect();
         if !waiting.is_empty() {
-            self.tool_warnings
+            self.conversation
+                .tool_warnings
                 .extend(waiting.iter().map(|n| format!("waiting {n}")));
             let why = match mode {
                 ToolChanges::Frozen => {
@@ -149,7 +155,7 @@ impl Session {
     }
 
     fn warn_once(&mut self, key: String, message: String) {
-        if self.tool_warnings.insert(key) {
+        if self.conversation.tool_warnings.insert(key) {
             self.events.emit(AgentEvent::Warning { message });
         }
     }
@@ -161,10 +167,10 @@ impl Session {
             self.events
                 .emit(AgentEvent::ToolsChanged { added, removed });
         }
-        self.ledger = staged.ledger;
-        self.tool_specs = Arc::new(self.ledger.active_specs());
-        if self.system.is_none() {
-            self.system = Some(system.to_vec());
+        self.conversation.ledger = staged.ledger;
+        self.tool_specs = Arc::new(self.conversation.ledger.active_specs());
+        if self.conversation.system.is_none() {
+            self.conversation.system = Some(system.to_vec());
         }
     }
 
@@ -180,7 +186,7 @@ impl Session {
         let staged = self.stage_tools(mode);
         // A conversation's system prompt is rendered with its first request's tools; ones
         // added later are announced, not written into it.
-        let system = match &self.system {
+        let system = match &self.conversation.system {
             Some(system) => system.clone(),
             None => {
                 let first = Cx {
@@ -245,7 +251,9 @@ impl Session {
         // the request carries become the conversation's at the same point.
         self.commit_prompt(staged, &ccx.agent_request.system);
         if !added.is_empty() {
-            self.history.append_to_last_user(self.turn, added);
+            self.conversation
+                .history
+                .append_to_last_user(self.conversation.turn, added);
         }
 
         match self.send(request, step, cx).await {
@@ -287,7 +295,7 @@ impl Session {
         };
         let compacted = self
             .context
-            .compact(&self.history, budget, &request, ccx)
+            .compact(&self.conversation.history, budget, &request, ccx)
             .await;
         self.record_context_usage();
         if cancel.is_cancelled() {
@@ -318,7 +326,10 @@ impl Session {
 
     /// The context strategy's view of the history.
     async fn view(&mut self, budget: Budget, ccx: &ContextCx) -> Result<View, TerminationReason> {
-        let view = self.context.view(&self.history, budget, ccx).await;
+        let view = self
+            .context
+            .view(&self.conversation.history, budget, ccx)
+            .await;
         self.record_context_usage();
         if ccx.cx.cancel.is_cancelled() {
             return Err(TerminationReason::Cancelled);
@@ -337,13 +348,13 @@ impl Session {
     ) -> Result<ModelResponse, Failed> {
         debug_assert_eq!(
             request.messages.last(),
-            self.history.last().map(|e| &e.message),
+            self.conversation.history.last().map(|e| &e.message),
             "the request must end with the newest history message"
         );
         let raw_est = estimate_request_tokens(&request);
         let (model, purpose) = (request.model.clone(), request.purpose.clone());
         self.events.emit(AgentEvent::ModelRequest {
-            turn: self.turn,
+            turn: self.conversation.turn,
             step,
             model: model.clone(),
             purpose: purpose.clone(),
@@ -371,7 +382,7 @@ impl Session {
         let cost = self
             .for_configured_model(model, self.kcfg.model.pricing)
             .map(|p| p.cost(usage));
-        self.spend.add(usage, cost);
+        self.conversation.spend.add(usage, cost);
         self.process_spend.add(usage, cost);
         self.events.emit(AgentEvent::Usage {
             usage: *usage,
