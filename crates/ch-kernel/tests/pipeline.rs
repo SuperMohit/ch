@@ -1539,7 +1539,7 @@ async fn a_compaction_s_cost_is_saved_even_without_a_turn_after_it() {
     let mut s = open(None);
     s.run_turn("task").await;
     s.end().await;
-    let id = s.id().to_string();
+    let id = s.id().clone();
     drop(s);
     purposes.lock().unwrap().clear();
 
@@ -1975,7 +1975,7 @@ async fn sessions_persist_and_restore() {
         .build()
         .unwrap();
     s.run_turn("remember me").await;
-    let id = s.id().to_string();
+    let id = s.id().clone();
     let snap = store.load(&id).unwrap();
     assert_eq!(snap.meta.title, "remember me");
     let s2 = Session::builder(registry, cfg)
@@ -2758,9 +2758,9 @@ async fn clear_starts_a_new_session_and_keeps_the_old_one() {
         .build()
         .unwrap();
     s.run_turn("first").await;
-    let old_id = s.id().to_string();
+    let old_id = s.id().clone();
     s.clear().unwrap();
-    assert_ne!(s.id(), old_id);
+    assert_ne!(s.id(), &old_id);
     assert!(s.history().is_empty());
     assert_eq!(s.turn(), 0);
     s.run_turn("second").await;
@@ -2770,7 +2770,7 @@ async fn clear_starts_a_new_session_and_keeps_the_old_one() {
     assert_eq!(old.history.len(), 2);
     let new = store.load(s.id()).unwrap();
     assert_eq!((new.meta.title.as_str(), new.meta.turns), ("second", 1));
-    assert_eq!(store.latest().unwrap().unwrap().id, s.id());
+    assert_eq!(store.latest().unwrap().unwrap().id, *s.id());
 
     // Each conversation is saved with its own usage; the process keeps the sum.
     assert_eq!(old.usage, usage());
@@ -2808,16 +2808,16 @@ async fn a_session_open_in_one_process_cant_be_opened_in_another() {
     }
 
     let mut other = open().build().unwrap();
-    let other_id = other.id().to_string();
+    let other_id = other.id().clone();
     assert!(other.restore(snap.clone()).is_err());
     assert_eq!(
         other.id(),
-        other_id,
+        &other_id,
         "a failed /resume keeps the current session"
     );
 
-    let first_id = first.id().to_string();
+    let first_id = first.id().clone();
     drop(first);
     other.restore(snap).unwrap();
-    assert_eq!(other.id(), first_id);
+    assert_eq!(other.id(), &first_id);
 }

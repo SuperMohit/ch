@@ -14,7 +14,8 @@ use ch_kernel::reexports::{CancellationToken, async_trait};
 use ch_kernel::{
     AgentEvent, Config, ContentBlock, Cx, Message, ModelError, ModelEvent, ModelProvider,
     ModelRequest, ModelResponse, ModelStream, Plugin, PluginManifest, RegisterCx, RegistryBuilder,
-    Role, Session, SessionStore, StopReason, Tool, ToolChanges, ToolOutput, ToolSpec, Usage,
+    Role, Session, SessionId, SessionStore, StopReason, Tool, ToolChanges, ToolOutput, ToolSpec,
+    Usage,
 };
 use ch_provider_scripted::{ScriptedProvider, estimate_request_tokens};
 use serde_json::{Value, json};
@@ -90,7 +91,7 @@ pub fn build_with(
     let registry = RegistryBuilder::build(plugins, &config, ws).unwrap();
     Session::builder(Arc::new(registry), config)
         .workspace(ws)
-        .id(id)
+        .id(SessionId::parse(id).unwrap())
         .store(SessionStore::new(sessions))
         .build()
         .unwrap()

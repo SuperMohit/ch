@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use async_trait::async_trait;
 use ch_kernel::util::thousands;
-use ch_kernel::{CmdCx, Command, Outcome, SessionMeta};
+use ch_kernel::{CmdCx, Command, Outcome, SessionId, SessionMeta};
 
 use crate::format::{first_line, mask_table};
 
@@ -306,7 +306,7 @@ impl Command for Resume {
             ));
         };
         let sessions = store.list()?;
-        let current = cx.session.id().to_string();
+        let current = cx.session.id().clone();
 
         if args.is_empty() {
             if sessions.is_empty() {
@@ -386,13 +386,13 @@ fn session_line(m: &SessionMeta, current: bool) -> String {
 }
 
 /// An exact id, or a unique prefix of one.
-fn resolve_id(sessions: &[SessionMeta], wanted: &str) -> Result<String, String> {
-    if sessions.iter().any(|m| m.id == wanted) {
-        return Ok(wanted.to_string());
+fn resolve_id(sessions: &[SessionMeta], wanted: &str) -> Result<SessionId, String> {
+    if let Some(exact) = sessions.iter().find(|m| m.id == wanted) {
+        return Ok(exact.id.clone());
     }
     let matches: Vec<&SessionMeta> = sessions
         .iter()
-        .filter(|m| m.id.starts_with(wanted))
+        .filter(|m| m.id.as_str().starts_with(wanted))
         .collect();
     match matches.as_slice() {
         [one] => Ok(one.id.clone()),
