@@ -15,7 +15,8 @@ use crate::stub::{self, Saved};
 
 /// Where trimmed results can be saved, and how stubs tell the model to read them.
 pub struct Files {
-    /// The session directory, anchored as the file tools check it.
+    /// The session directory, anchored as the file tools check it
+    /// ([`ch_kernel::util::anchored`]).
     pub base: Option<PathBuf>,
     pub tools: ReadTools,
 }

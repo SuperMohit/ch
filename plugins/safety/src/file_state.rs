@@ -6,6 +6,8 @@ use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
+use crate::path_guard::WorkspacePath;
+
 type Hash = [u8; 32];
 
 /// What the agent has seen of one file.
@@ -24,11 +26,13 @@ struct Entry {
 /// Edits are only allowed on files that were fully read and haven't changed on disk
 /// since. Because the hash is checked again at edit time, changes made through `bash`
 /// or by the user can't silently bypass read-before-write.
+///
+/// Every method takes a [`WorkspacePath`], so only files inside the workspace are
+/// tracked or cleared for writing; a file the model reads in the session directory is
+/// never written by the file tools, so its reads are not recorded.
 #[derive(Debug, Default)]
 pub struct FileState {
     entries: Mutex<HashMap<PathBuf, Entry>>,
-    /// Paths in messages are shown relative to this root when set.
-    display_root: Option<PathBuf>,
 }
 
 /// SHA-256 of `bytes`.
@@ -37,14 +41,6 @@ pub fn content_hash(bytes: &[u8]) -> [u8; 32] {
 }
 
 impl FileState {
-    /// A tracker that shows paths relative to `root` in its messages.
-    pub fn with_root(root: impl Into<PathBuf>) -> Self {
-        Self {
-            entries: Mutex::default(),
-            display_root: Some(root.into()),
-        }
-    }
-
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Entry>> {
         // A panic while holding the lock can't leave the map half-updated (every
         // update is a single insert), so a poisoned lock is still usable.
@@ -53,20 +49,11 @@ impl FileState {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn display(&self, path: &Path) -> String {
-        match &self.display_root {
-            Some(root) => match path.strip_prefix(root) {
-                Ok(rel) => rel.display().to_string(),
-                Err(_) => path.display().to_string(),
-            },
-            None => path.display().to_string(),
-        }
-    }
-
     /// Records that the agent read `path`, whose current content is `content`. `full`
     /// is true when the whole file was shown. A partial read never downgrades an
     /// earlier full read of the same content.
-    pub fn record_read(&self, path: &Path, content: &[u8], full: bool) {
+    pub fn record_read(&self, path: &WorkspacePath, content: &[u8], full: bool) {
+        let path = path.as_path();
         let hash = content_hash(content);
         let mut map = self.lock();
         let prev = map.get(path).filter(|e| e.hash == hash);
@@ -87,12 +74,13 @@ impl FileState {
     /// counts as fully read.
     pub fn record_lines(
         &self,
-        path: &Path,
+        path: &WorkspacePath,
         content: &[u8],
         start: usize,
         end: usize,
         total_lines: usize,
     ) {
+        let path = path.as_path();
         let hash = content_hash(content);
         let mut map = self.lock();
         let (mut seen, was_full) = match map.get(path).filter(|e| e.hash == hash) {
@@ -121,8 +109,9 @@ impl FileState {
     /// read, is unchanged on disk since and has no other hard links (`Some` of the bytes
     /// that were checked, so the caller changes exactly what was verified). The error
     /// tells the model what to do.
-    pub fn check_writable(&self, path: &Path) -> Result<Option<Vec<u8>>, String> {
-        let shown = self.display(path);
+    pub fn check_writable(&self, path: &WorkspacePath) -> Result<Option<Vec<u8>>, String> {
+        let shown = path.relative();
+        let path = path.as_path();
         let current = match std::fs::read(path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -161,9 +150,9 @@ impl FileState {
     }
 
     /// Records that the agent wrote `content` to `path`; it counts as fully read.
-    pub fn record_write(&self, path: &Path, content: &[u8]) {
+    pub fn record_write(&self, path: &WorkspacePath, content: &[u8]) {
         self.lock().insert(
-            path.to_path_buf(),
+            path.as_path().to_path_buf(),
             Entry {
                 hash: content_hash(content),
                 full_read: true,
@@ -173,13 +162,13 @@ impl FileState {
     }
 
     /// Whether `path` is currently recorded as fully read (ignores on-disk changes).
-    pub fn is_fully_read(&self, path: &Path) -> bool {
-        self.lock().get(path).is_some_and(|e| e.full_read)
+    pub fn is_fully_read(&self, path: &WorkspacePath) -> bool {
+        self.lock().get(path.as_path()).is_some_and(|e| e.full_read)
     }
 
     /// Forgets `path` (after it was deleted, for example).
-    pub fn forget(&self, path: &Path) {
-        self.lock().remove(path);
+    pub fn forget(&self, path: &WorkspacePath) {
+        self.lock().remove(path.as_path());
     }
 }
 
@@ -210,18 +199,27 @@ fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PathGuard;
 
-    fn setup() -> (tempfile::TempDir, FileState, PathBuf) {
+    /// A workspace holding `a.txt`, its guard, a tracker and `a.txt`'s path.
+    fn workspace() -> (tempfile::TempDir, PathGuard, FileState, WorkspacePath) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.txt");
-        std::fs::write(&path, "one\ntwo\n").unwrap();
-        (dir, FileState::default(), path)
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+        let guard = PathGuard::new(dir.path()).unwrap();
+        let path = guard.resolve("a.txt").unwrap();
+        (dir, guard, FileState::default(), path)
+    }
+
+    fn setup() -> (tempfile::TempDir, FileState, WorkspacePath) {
+        let (dir, _, fs, path) = workspace();
+        (dir, fs, path)
     }
 
     #[test]
     fn new_files_are_writable() {
-        let (dir, fs, _) = setup();
-        assert_eq!(fs.check_writable(&dir.path().join("new.txt")), Ok(None));
+        let (_d, guard, fs, _) = workspace();
+        let new = guard.resolve("new.txt").unwrap();
+        assert_eq!(fs.check_writable(&new), Ok(None));
     }
 
     #[cfg(unix)]
@@ -296,8 +294,8 @@ mod tests {
 
     #[test]
     fn messages_use_relative_paths() {
-        let (dir, _, path) = setup();
-        let fs = FileState::with_root(dir.path());
+        let (_d, _guard, _, path) = workspace();
+        let fs = FileState::default();
         let err = fs.check_writable(&path).unwrap_err();
         assert!(err.contains("`a.txt`"), "{err}");
     }
