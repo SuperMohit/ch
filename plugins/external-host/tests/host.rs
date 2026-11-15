@@ -251,8 +251,8 @@ async fn tools_hooks_prompts_commands_and_events() {
     h.call("ext__t__notify", json!({})).await;
     let mut noted = false;
     while let Ok(ev) = rx.try_recv() {
-        if let AgentEvent::Note { source, text } = ev {
-            noted |= source == "ext:t" && text == "hello from the plugin";
+        if let AgentEvent::Note { plugin, text } = ev {
+            noted |= plugin == "ext:t" && text == "hello from the plugin";
         }
     }
     assert!(noted);

@@ -94,7 +94,7 @@ stdin = true                        # the only value accepted for now; see "Limi
 - **Without the `safety` plugin** nothing is checked, and the first edit of a checked file says so in one warning.
 - **Probing.** On first use, `command -v` looks for the command's program, skipping leading `NAME=value` words. If it isn't found, the checker is off for the session, with one warning to the user and nothing to the model.
 - **What to configure.** Checks with no false positives that look at one file: parse errors, undefined names. Not formatters (they report style) and not project-wide builds (see "Limits").
-- **Events.** Each report emits `Custom { source: "diagnostics", name: "introduced" }` (or `"turn_end"`) with the number of findings, for telemetry and the Phase 9 comparison.
+- **Events.** Each report emits `Custom { plugin: "diagnostics", name: "introduced" }` (or `"turn_end"`) with the number of findings, for telemetry and the Phase 9 comparison.
 - **Optional.** The plugin is its own cargo feature, enabled by default like `stuck`, `planning` and `spill`. With no checkers configured it adds no hook and needs nothing else; it doesn't require the `safety` plugin, and finds `PathGuard` and `Policy` among the session's services when it runs. `plugins.disable = ["diagnostics"]` turns it off.
 - **Settable by a project without trust:** `timeout_secs`, `max_report_chars` and `max_files_per_step`. A value outside the ranges above is brought into range with a warning, so a repository can't make a checker run for minutes, nor stop `ch` from starting. **Need trust:** `checkers` and `nudge_at_turn_end`.
 

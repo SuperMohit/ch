@@ -61,8 +61,8 @@ async fn above_soft_the_middle_is_trimmed_down_to_trim_to() {
     let custom = events
         .iter()
         .find_map(|e| match e {
-            AgentEvent::Custom { source, name, data }
-                if source == "context" && name == "compaction" =>
+            AgentEvent::Custom { plugin, name, data }
+                if plugin == "context" && name == "compaction" =>
             {
                 Some(data.clone())
             }

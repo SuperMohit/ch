@@ -27,6 +27,13 @@
 //!
 //! Commands are declared in `plugin.toml`, not at `initialize`: ch needs their names
 //! before any plugin runs.
+//!
+//! Words used in field names: a *tool use* is the block the model wrote, which the
+//! history keeps under its `id`; a *tool call* is that request being handled, run or
+//! refused (`tool/call` when it runs). `tool_use_id` is the tool use's `id`. Events
+//! follow the naming rules on `ch_kernel::AgentEvent`; in short, `source` only ever
+//! means a tool source, and who emitted something is `plugin` (`ext:<name>` for an
+//! external plugin).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -282,6 +289,8 @@ pub struct ToolCallParams {
     /// The plugin's own name for the tool (without `ext__<plugin>__`).
     pub name: String,
     pub input: Value,
+    /// The `id` of the tool use being run. Absent when ch calls the tool outside a
+    /// model's turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
 }
@@ -386,7 +395,8 @@ fn info() -> String {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NotifyParams {
-    pub message: String,
+    /// One line for the user. ch shows it as a `note` event from `ext:<plugin>`.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

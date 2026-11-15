@@ -66,6 +66,17 @@ impl Session {
                     None
                 };
                 if let Some(why) = skip {
+                    // Every ToolCallEnd has a ToolCallStart, also for a call not run.
+                    let summary = self
+                        .callable(&call.name)
+                        .map(|(_, tool)| tool.summarize(&call.input))
+                        .unwrap_or_default();
+                    self.events.emit(AgentEvent::ToolCallStart {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        input: call.input.clone(),
+                        summary,
+                    });
                     prepared.push(Prepared::Done {
                         call,
                         output: ToolOutput::error(why),

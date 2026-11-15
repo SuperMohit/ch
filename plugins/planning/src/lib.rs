@@ -13,7 +13,7 @@
 //! with the default), since like every reminder each copy stays in the history.
 //!
 //! Each update is saved as `plan.json` in the session directory, so a resumed session
-//! keeps its plan, and emitted as a `Custom { source: "planning", name: "plan_updated" }`
+//! keeps its plan, and emitted as a `Custom { plugin: "planning", name: "plan_updated" }`
 //! event. The tool result carries the plan in its metadata for frontends. A refresh
 //! emits `plan_refreshed` with the number of model calls since the plan was last
 //! shown, when the reminder is added; a turn can still end before that request is sent.
@@ -225,8 +225,8 @@ mod tests {
         assert_eq!(out.metadata["plan"][1]["activeForm"], "Fixing");
         assert_eq!(store.get(&cx).unwrap().len(), 2);
         match rx.try_recv().unwrap() {
-            AgentEvent::Custom { source, name, data } => {
-                assert_eq!((source.as_str(), name.as_str()), (ID, "plan_updated"));
+            AgentEvent::Custom { plugin, name, data } => {
+                assert_eq!((plugin.as_str(), name.as_str()), (ID, "plan_updated"));
                 assert_eq!(data, out.metadata);
             }
             other => panic!("unexpected event {other:?}"),
@@ -295,8 +295,8 @@ mod tests {
             "{reminders:?}"
         );
         match rx.try_recv().unwrap() {
-            AgentEvent::Custom { source, name, data } => {
-                assert_eq!((source.as_str(), name.as_str()), (ID, "plan_refreshed"));
+            AgentEvent::Custom { plugin, name, data } => {
+                assert_eq!((plugin.as_str(), name.as_str()), (ID, "plan_refreshed"));
                 assert_eq!(data, json!({"steps_since": 10}));
             }
             other => panic!("unexpected event {other:?}"),
