@@ -314,6 +314,7 @@ impl Plugin for AnthropicPlugin {
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
         let cfg: AnthropicConfig = cx.config()?;
+        cx.add_secret_env(&cfg.api_key_env);
         cx.add_provider(AnthropicProvider::new(cfg)?);
         Ok(())
     }

@@ -12,7 +12,7 @@ use crate::command::Command;
 use crate::config::Config;
 use crate::context::{ContextStrategy, PassthroughContext};
 use crate::events::EventSink;
-use crate::executor::Executor;
+use crate::executor::{Executor, SecretEnv};
 use crate::frontend::Frontend;
 use crate::hook::Hook;
 use crate::model::ModelProvider;
@@ -40,6 +40,7 @@ pub struct RegistryBuilder {
     pub(crate) approvers: Tagged<dyn Approver>,
     pub(crate) frontends: Tagged<dyn Frontend>,
     pub(crate) services: Services,
+    pub(crate) secret_env: SecretEnv,
 }
 
 /// Why a plugin is or isn't active, for `ch --list-plugins`.
@@ -69,6 +70,8 @@ pub struct Registry {
     pub approvers: Tagged<dyn Approver>,
     pub frontends: Tagged<dyn Frontend>,
     pub services: Arc<Services>,
+    /// Variables plugins declared secret; see [`SecretEnv`].
+    pub secret_env: SecretEnv,
 }
 
 impl RegistryBuilder {
@@ -315,6 +318,7 @@ impl RegistryBuilder {
             approvers: self.approvers,
             frontends: self.frontends,
             services: Arc::new(self.services),
+            secret_env: self.secret_env,
         })
     }
 }

@@ -250,6 +250,7 @@ impl Plugin for OpenAiPlugin {
 
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
         let cfg: OpenAiConfig = cx.config()?;
+        cx.add_secret_env(&cfg.api_key_env);
         cx.add_provider(OpenAiProvider::new(cfg)?);
         Ok(())
     }

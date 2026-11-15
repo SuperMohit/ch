@@ -6,10 +6,17 @@
 //! returned. Background processes that keep the pipes open don't hang the call: once
 //! the shell exits, reading stops after a short drain timeout.
 //!
-//! Provider API keys are removed from the commands' environment: `ANTHROPIC_API_KEY`,
-//! `OPENAI_API_KEY`, and any variable a `[plugins.<id>] api_key_env` setting names.
+//! Secrets are removed from the commands' environment: every variable a plugin declared
+//! with `RegisterCx::secret_env` (each provider declares the one it reads its key
+//! from), and, whether or not their provider is enabled, `ANTHROPIC_API_KEY`,
+//! `OPENAI_API_KEY` and any variable a `[plugins.<id>] api_key_env` setting names.
 //! There is deliberately no setting to pass them through, since a project's
 //! `.ch/config.toml` could otherwise expose the user's key to the model.
+//!
+//! This hides them from a command's own environment, not from `ch`'s: on macOS any
+//! process of the same user can read another's starting environment (`ps -wwE -p
+//! <pid>`). On Linux `ch` makes itself non-dumpable at startup, which closes
+//! `/proc/<pid>/environ`.
 //!
 //! ```toml
 //! [plugins.executor-local]
@@ -68,7 +75,13 @@ impl Plugin for ExecutorLocalPlugin {
     fn register(&self, cx: &mut RegisterCx<'_>) -> anyhow::Result<()> {
         let config: LocalExecutorConfig = cx.config()?;
         let keys = api_key_vars(cx.full_config());
-        cx.add_executor(LocalExecutor::new(config).hide_env(keys));
+        // The backstop names go into the shared set too, so it lists everything hidden.
+        let secrets = cx.secret_env();
+        cx.add_executor(
+            LocalExecutor::new(config)
+                .hide_env(keys)
+                .hide_secrets(secrets),
+        );
         Ok(())
     }
 }

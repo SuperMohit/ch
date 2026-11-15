@@ -368,3 +368,53 @@ async fn dropping_the_run_future_kills_the_group() {
         "shell {pid} survived the abort"
     );
 }
+
+/// Declares `var` secret at registration, as a provider does with its key variable.
+struct DeclaresSecret(&'static str);
+
+impl ch_kernel::Plugin for DeclaresSecret {
+    fn manifest(&self) -> ch_kernel::PluginManifest {
+        ch_kernel::PluginManifest::new("provider-elsewhere", "a third-party provider")
+    }
+    fn register(&self, cx: &mut ch_kernel::RegisterCx<'_>) -> anyhow::Result<()> {
+        cx.add_secret_env(self.0);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_variable_a_plugin_declares_secret_is_hidden() {
+    // HOME is always set, so it stands in for a third-party provider's key. The plugin
+    // that declares it registers after the executor.
+    assert!(std::env::var_os("HOME").is_some());
+    let registry = ch_kernel::RegistryBuilder::build(
+        vec![
+            ch_executor_local::plugin(),
+            std::sync::Arc::new(DeclaresSecret("HOME")),
+        ],
+        &ch_kernel::Config::default(),
+        Path::new("/tmp"),
+    )
+    .unwrap();
+    // The set lists everything hidden, the executor's own backstop names included.
+    assert_eq!(
+        registry.secret_env.names(),
+        ["ANTHROPIC_API_KEY", "HOME", "OPENAI_API_KEY"]
+    );
+    let exec = registry.executor(Some("local")).unwrap().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let req = || {
+        request(
+            "printf '%s' \"${HOME-unset}\"",
+            dir.path(),
+            Duration::from_secs(5),
+        )
+    };
+    let r = exec.run(req(), CancellationToken::new()).await.unwrap();
+    assert_eq!(r.stdout, "unset");
+    // A request can't put a declared secret back.
+    let mut put_back = req();
+    put_back.env.push(("HOME".into(), "/tmp/key".into()));
+    let r = exec.run(put_back, CancellationToken::new()).await.unwrap();
+    assert_eq!(r.stdout, "unset");
+}
