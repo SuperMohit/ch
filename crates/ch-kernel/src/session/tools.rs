@@ -154,7 +154,7 @@ impl Session {
     /// error the model gets: the model may call only tools it was told about, while
     /// they are still offered.
     fn callable(&self, name: &str) -> Result<(ToolSpec, Arc<dyn Tool>), String> {
-        match self.ledger.get(name) {
+        match self.conversation.ledger.get(name) {
             Some(entry) if entry.active => self.catalog.tool(name).ok_or_else(|| {
                 let reason = (entry.source.as_deref())
                     .and_then(|s| self.catalog.gone_reason(s))

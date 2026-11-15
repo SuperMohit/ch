@@ -2,21 +2,16 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::Utc;
-
 use crate::config::Config;
 use crate::context::UsageLog;
 use crate::events::EventBus;
-use crate::history::History;
-use crate::ledger::ToolLedger;
 use crate::registry::Registry;
 use crate::session_id::SessionId;
 use crate::store::{SessionMeta, SessionSnapshot, SessionStore};
 use crate::tokens::TokenCalibrator;
 use crate::tool_source::Catalog;
-use crate::types::Usage;
 
-use super::{CancelHandle, Session, Spend};
+use super::{CancelHandle, Conversation, Session, Spend};
 
 pub struct SessionBuilder {
     registry: Arc<Registry>,
@@ -127,39 +122,29 @@ impl SessionBuilder {
         let hooks = registry.hooks.iter().map(|(_, h)| h.clone()).collect();
         let workspace = Arc::new(self.workspace);
 
-        let now = Utc::now();
-        let (id, history, usage, cost, created_at, model, turn, prompt) = match self.restore {
-            Some(snap) => (
-                snap.meta.id.clone(),
-                snap.history,
-                snap.usage,
-                snap.cost,
-                snap.meta.created_at,
-                restored_model(&snap.meta, provider.id(), &configured_model),
-                snap.meta.turns,
-                snap.prompt,
-            ),
+        let (conversation, model, prompt) = match self.restore {
+            Some(snap) => {
+                let model = restored_model(&snap.meta, provider.id(), &configured_model);
+                let (conversation, prompt) = Conversation::restored(snap);
+                (conversation, model, prompt)
+            }
             None => (
-                self.id.unwrap_or_else(SessionId::generate),
-                History::new(),
-                Usage::default(),
-                0.0,
-                now,
+                Conversation::new(self.id.unwrap_or_else(SessionId::generate)),
                 configured_model.clone(),
-                0,
                 None,
             ),
         };
         let model = self.model.unwrap_or(model);
-        let lock = self.store.as_ref().map(|s| s.lock(&id)).transpose()?;
+        let lock = (self.store.as_ref())
+            .map(|s| s.lock(&conversation.id))
+            .transpose()?;
 
         let mut session = Session {
-            id,
+            conversation,
             registry,
             config: self.config,
             kcfg,
             workspace,
-            history,
             events: self.events.unwrap_or_default(),
             provider,
             model,
@@ -172,20 +157,14 @@ impl SessionBuilder {
             catalog,
             sources,
             source_tasks: HashMap::new(),
-            ledger: ToolLedger::default(),
-            system: None,
             tool_specs: Arc::default(),
-            tool_warnings: HashSet::new(),
             hooks,
             cancel: CancelHandle::default(),
-            turn,
-            spend: Spend { usage, cost },
             process_spend: Spend::default(),
             calibrator: TokenCalibrator::default(),
             always_allow: HashSet::new(),
             store: self.store,
             _lock: lock,
-            created_at,
             sink_tasks: Vec::new(),
             started: false,
             ended: false,

@@ -102,10 +102,6 @@ impl History {
             _ => None,
         })
     }
-
-    pub fn clear(&mut self) {
-        self.events.clear();
-    }
 }
 
 #[cfg(test)]

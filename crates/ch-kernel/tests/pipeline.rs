@@ -2059,8 +2059,9 @@ async fn saved_sessions_keep_event_ids_and_turn_numbers() {
     s.run_turn("blocked").await;
     s.run_turn("second").await;
     let snap = store.load(s.id()).unwrap();
+    // A cleared conversation numbers its entries from 0, like any new one.
     let ids: Vec<u64> = snap.history.events().iter().map(|e| e.id).collect();
-    assert_eq!(ids, [2, 3]);
+    assert_eq!(ids, [0, 1]);
     let mut s2 = Session::builder(registry, cfg)
         .restore(snap)
         .build()
@@ -2068,7 +2069,8 @@ async fn saved_sessions_keep_event_ids_and_turn_numbers() {
     assert_eq!(s2.turn(), 2);
     s2.run_turn("third").await;
     let last = s2.history().last().unwrap();
-    assert_eq!((last.id, last.turn), (5, 3));
+    // Ids and turn numbers carry on from the saved file.
+    assert_eq!((last.id, last.turn), (3, 3));
     for entry in std::fs::read_dir(dir.path()).unwrap() {
         let name = entry.unwrap().file_name();
         assert!(!name.to_string_lossy().ends_with(".tmp"), "{name:?}");
@@ -2795,6 +2797,7 @@ async fn clear_starts_a_new_session_and_keeps_the_old_one() {
         .store(store.clone())
         .build()
         .unwrap();
+    let mut rx = s.events().subscribe();
     s.run_turn("first").await;
     let old_id = s.id().clone();
     s.clear().unwrap();
@@ -2823,6 +2826,39 @@ async fn clear_starts_a_new_session_and_keeps_the_old_one() {
     s.clear().unwrap();
     assert_eq!(s.usage(), Usage::default());
     assert_eq!(s.process_usage(), both);
+
+    // Each change was announced with the id of the conversation moved to.
+    let changes: Vec<(String, String, ConversationChange)> = received(&mut rx)
+        .into_iter()
+        .filter_map(|e| match e {
+            AgentEvent::ConversationChanged {
+                session_id,
+                previous,
+                reason,
+            } => Some((session_id, previous, reason)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(changes.len(), 3, "{changes:?}");
+    // first -> cleared -> back to first -> cleared again.
+    assert_eq!(changes[0].1, old_id.to_string());
+    assert_eq!(changes[0].2, ConversationChange::Cleared);
+    assert_eq!(
+        (changes[1].0.as_str(), changes[1].1.as_str(), changes[1].2),
+        (
+            old_id.as_str(),
+            changes[0].0.as_str(),
+            ConversationChange::Resumed
+        )
+    );
+    assert_eq!(
+        (changes[2].0.as_str(), changes[2].1.as_str(), changes[2].2),
+        (
+            s.id().as_str(),
+            old_id.as_str(),
+            ConversationChange::Cleared
+        )
+    );
 }
 
 #[cfg(unix)]

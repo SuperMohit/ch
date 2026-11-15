@@ -20,6 +20,7 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 ### New
 
+- A `conversation_changed` event when `/clear` or `/resume` moves the session to another conversation, with the new `session_id`, the `previous` one and a `reason` (`cleared` or `resumed`). External plugins can subscribe to it. The conversation a session starts with is still named by `session_start`. A conversation started with `/clear` numbers its saved history entries from 0, like any new one, instead of continuing the previous conversation's count.
 - **Interactive REPL.** `ch` streams the model's text as it arrives, shows one line per tool call and coloured diffs for edits, and takes multi-line input. Esc or Ctrl-C interrupts a turn and keeps the history.
 - **Headless mode.** `ch -p "task"` runs one task without interaction, reading the prompt from stdin with `-p -`. `--output-format` is `text`, `json` or `stream-json`, and the exit code says how the run ended (done, error, step limit, context overflow, stopped by a hook, prompt blocked, refused, cancelled).
 - **Model providers.** The Anthropic Messages API, with streaming, retries, prompt caching and extended thinking, and OpenAI-compatible chat completions (OpenAI, OpenRouter, vLLM, SGLang).

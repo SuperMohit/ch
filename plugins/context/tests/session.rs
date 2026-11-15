@@ -293,3 +293,45 @@ async fn a_call_that_copies_a_marker_is_refused() {
     assert!(content.contains(ch_context::REFUSED), "{content}");
     assert!(!d.ws.join("a.txt").exists());
 }
+
+#[tokio::test]
+async fn trims_of_a_cleared_conversation_never_touch_the_next_one() {
+    let d = dirs();
+    // A long turn that trims, then after /clear a short one that doesn't need to.
+    let mut steps = calls(60);
+    steps.extend(calls(3));
+    let provider = ScriptedProvider::new(steps).with_context_window(WINDOW);
+    let mut s = session(provider.clone(), &d.ws, &d.sessions, ELIDE);
+    let mut rx = s.events().subscribe();
+    s.run_turn("read the logs").await;
+    assert!(compactions(&received(&mut rx)) > 0, "the first turn trims");
+    let before = provider.requests().len();
+
+    // The new conversation numbers its entries from 0 again, the same ids the old
+    // trims point at; they must not apply to it.
+    s.clear().unwrap();
+    let r = s.run_turn("again").await;
+    assert_eq!(r.reason, TerminationReason::Done, "{r:?}");
+    let after = &provider.requests()[before..];
+    assert_eq!(after.len(), 4);
+    let first_user = |req: &ModelRequest| {
+        req.messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .and_then(|m| m.content.first())
+            .cloned()
+    };
+    for req in after {
+        assert!(
+            matches!(first_user(req), Some(ContentBlock::Text { text }) if text.contains("again")),
+            "{:?}",
+            req.messages.first()
+        );
+        let elided = req
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, ContentBlock::ToolResult { content, .. } if content.starts_with("[Output elided")));
+        assert!(!elided, "a stub from the old conversation");
+    }
+}

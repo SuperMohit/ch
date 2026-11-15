@@ -14,6 +14,9 @@ use crate::tool::ToolSpec;
 /// Cheap to clone; everything is behind `Arc`.
 #[derive(Clone)]
 pub struct Cx {
+    /// The current conversation's id. It changes on `/clear` and `/resume` (the
+    /// session emits `ConversationChanged` then), so a plugin that keeps state per
+    /// conversation keys it by this id and starts over when it differs.
     pub session_id: Arc<str>,
     /// Workspace root. Tools must not touch anything outside it.
     pub workspace: Arc<PathBuf>,

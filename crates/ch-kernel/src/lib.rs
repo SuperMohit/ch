@@ -38,7 +38,7 @@ pub use context::{
     PassthroughContext, UsageLog, View,
 };
 pub use cx::Cx;
-pub use events::{AgentEvent, CompactionKind, EventBus, EventSink};
+pub use events::{AgentEvent, CompactionKind, ConversationChange, EventBus, EventSink};
 pub use executor::{ExecRequest, ExecResult, Executor, SecretEnv};
 pub use frontend::Frontend;
 pub use history::{Event, EventId, History};

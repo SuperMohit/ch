@@ -38,6 +38,16 @@ pub enum CompactionKind {
     Summarized,
 }
 
+/// Why the conversation changed within a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationChange {
+    /// `/clear` started a new, empty one.
+    Cleared,
+    /// `/resume` loaded a saved one.
+    Resumed,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -46,6 +56,16 @@ pub enum AgentEvent {
         model: String,
         workspace: String,
         plugins: Vec<String>,
+    },
+    /// The session moved from conversation `previous` to `session_id` (`/clear`,
+    /// `/resume`); from here on, history, turn numbers and usage are the new one's.
+    /// The conversation a session starts with, new or resumed with `ch -c`, is named
+    /// by `SessionStart` instead. A change before the session has started (before
+    /// `SessionStart`) reaches only the frontend, since sinks aren't running yet.
+    ConversationChanged {
+        session_id: String,
+        previous: String,
+        reason: ConversationChange,
     },
     TurnStart {
         turn: u32,
@@ -223,6 +243,11 @@ mod tests {
                 workspace: s(),
                 plugins: vec![],
             },
+            AgentEvent::ConversationChanged {
+                session_id: s(),
+                previous: s(),
+                reason: ConversationChange::Cleared,
+            },
             AgentEvent::TurnStart {
                 turn: 1,
                 prompt: s(),
@@ -322,6 +347,7 @@ mod tests {
     fn covered(e: &AgentEvent) {
         match e {
             AgentEvent::SessionStart { .. }
+            | AgentEvent::ConversationChanged { .. }
             | AgentEvent::TurnStart { .. }
             | AgentEvent::ModelRequest { .. }
             | AgentEvent::TextDelta { .. }
@@ -375,6 +401,7 @@ mod tests {
             types,
             [
                 "session_start",
+                "conversation_changed",
                 "turn_start",
                 "model_request",
                 "text_delta",

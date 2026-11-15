@@ -24,7 +24,7 @@ impl Session {
         let sources = self.sources.clone();
         let waits: Vec<_> = sources.into_iter().map(|s| self.spawn_source(s)).collect();
         join_all(waits).await;
-        if !self.ledger.is_started() {
+        if !self.conversation.ledger.is_started() {
             self.tool_specs = Arc::new(
                 (self.catalog.offered().0.into_iter())
                     .map(|o| o.spec)
