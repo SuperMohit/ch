@@ -254,7 +254,11 @@ fn read_line(out: &mut Stream, line: &str) {
         "context_compacted" => out.signals.compactions = out.signals.compactions.saturating_add(1),
         "hook_denied" => out.signals.hook_denials = out.signals.hook_denials.saturating_add(1),
         "warning" => out.signals.warnings = out.signals.warnings.saturating_add(1),
-        "custom" if str_field("source") == "planning" && str_field("name") == "plan_refreshed" => {
+        // `source` is the field's name before `plugin`, in streams from older builds.
+        "custom"
+            if (str_field("plugin") == "planning" || str_field("source") == "planning")
+                && str_field("name") == "plan_refreshed" =>
+        {
             out.signals.plan_refreshes = out.signals.plan_refreshes.saturating_add(1);
         }
         "assistant_message" => out.steps = out.steps.saturating_add(1),
@@ -338,12 +342,12 @@ mod tests {
                 tokens_after: 5,
             },
             AgentEvent::Custom {
-                source: "planning".into(),
+                plugin: "planning".into(),
                 name: "plan_refreshed".into(),
                 data: json!({"steps_since": 10}),
             },
             AgentEvent::Custom {
-                source: "planning".into(),
+                plugin: "planning".into(),
                 name: "plan_updated".into(),
                 data: json!({}),
             },
@@ -464,17 +468,21 @@ mod tests {
     fn plan_refreshes_only_count_from_the_planning_plugin() {
         let text = lines(&[
             AgentEvent::Custom {
-                source: "other".into(),
+                plugin: "other".into(),
                 name: "plan_refreshed".into(),
                 data: json!({}),
             },
             AgentEvent::Custom {
-                source: "planning".into(),
+                plugin: "planning".into(),
                 name: "plan_refreshed".into(),
                 data: json!({}),
             },
         ]);
         assert_eq!(parse(&text).signals.plan_refreshes, 1);
+        // A build from before `plugin` named the field `source`; its runs still count.
+        let older =
+            json!({"type": "custom", "source": "planning", "name": "plan_refreshed", "data": {}});
+        assert_eq!(parse(&format!("{text}{older}\n")).signals.plan_refreshes, 2);
     }
 
     #[test]

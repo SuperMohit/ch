@@ -6,6 +6,13 @@ User-visible changes to `ch`, newest first. Each pull request that changes behav
 
 ### Breaking
 
+- Four names changed in the event JSON that `ch -p --output-format stream-json` prints and external plugins receive (`event/notify`, and the `turn_end` hook through `hook/invoke`):
+  - `tool_input_started` is now `tool_input_start`, like `turn_start` and `tool_call_start`.
+  - A `note` names who added it in `plugin` instead of `source`.
+  - A `custom` event names its plugin in `plugin` instead of `source`.
+  - A `hook_stop` reason (in `turn_end`) names its hook in `hook` instead of `source`.
+
+  `source` now only means a tool source, as in `tool_source` events. In the plugin protocol, `ui/notify` takes `text` instead of `message`, like the note it becomes. A tool call skipped because the turn was stopped or cancelled now has a `tool_call_start` before its `tool_call_end`, like every other call.
 - An unknown key under `[model]`, `[agent]` or `[select]` (including `[model.pricing]` and `[model.summarizer]`) stops `ch` with an error that lists the valid keys. Before, a misspelled setting such as `agent.max_step` was silently ignored. Top-level keys are unchanged.
 - An unknown key in a `[plugins.<id>]` table stops `ch` with an error naming the key, as an unknown key under `[model]` does. So does a table for a plugin that has no settings (such as `[plugins.tools-fs]`), and a table whose id is no plugin's (such as `[plugins.planing]`). Before, all three were silently ignored for most plugins, so a misspelled setting did nothing. A disabled plugin's table is checked when the plugin is enabled.
 - A `[model.summarizer]` that names a provider with no default model, such as `openai`, now needs `model.summarizer.id`, or `ch` stops at startup.

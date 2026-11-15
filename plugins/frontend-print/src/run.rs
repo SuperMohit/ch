@@ -63,7 +63,7 @@ fn reason_detail(reason: &TerminationReason) -> Option<String> {
         TerminationReason::ContextOverflow { message } | TerminationReason::Error { message } => {
             Some(message.clone())
         }
-        TerminationReason::HookStop { source, reason } => Some(format!("{source}: {reason}")),
+        TerminationReason::HookStop { hook, reason } => Some(format!("{hook}: {reason}")),
         TerminationReason::PromptDenied { reason } => Some(reason.clone()),
     }
 }
@@ -271,7 +271,7 @@ mod tests {
         );
         assert_eq!(
             exit_code(&TerminationReason::HookStop {
-                source: "s".into(),
+                hook: "s".into(),
                 reason: "r".into()
             }),
             4

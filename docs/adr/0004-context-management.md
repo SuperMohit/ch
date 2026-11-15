@@ -295,7 +295,7 @@ max_summary_share = 0.15       # 0.05–0.30
 ### Events and telemetry
 
 - **`ContextCompacted`** (`events.rs:101-105`) for each trim (`Elided`) and summary (`Summarized`). The print frontend already renders it (`plugins/frontend-print/src/render.rs:34-42`).
-- **`Custom { source: "context", name: "compaction" }`** with the details:
+- **`Custom { plugin: "context", name: "compaction" }`** with the details:
   - the trigger: `soft`, `hard`, `overflow` or `manual`;
   - results elided, inputs shortened, reminders elided, superseded calls, and thinking blocks dropped;
   - the first edited event, and the summary's span and length.

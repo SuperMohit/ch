@@ -1863,7 +1863,7 @@ async fn post_tool_stop_ends_turn_after_step() {
     assert_eq!(
         r.reason,
         TerminationReason::HookStop {
-            source: "stuck".into(),
+            hook: "stuck".into(),
             reason: "looping".into()
         }
     );
@@ -1872,6 +1872,44 @@ async fn post_tool_stop_ends_turn_after_step() {
         tool_results(&h.session.history().events()[2].message).len(),
         1
     );
+}
+
+#[tokio::test]
+async fn a_call_skipped_after_a_stop_still_has_a_start_and_an_end() {
+    let plugins = vec![plugin("stuck", |cx| {
+        cx.add_hook(ScriptedHook {
+            id: "stuck",
+            priority: 0,
+            points: vec![HookPoint::PostTool],
+            log: Default::default(),
+            decide: Box::new(|_| HookDecision::stop("looping")),
+        });
+        Ok(())
+    })];
+    // `echo` is read-only and `slow_write` isn't, so they run in separate batches and
+    // the stop after the first skips the second.
+    let mut h = harness(
+        vec![Ok(tool_reply(&[
+            ("a", "echo", json!({"text":"1"})),
+            ("b", "slow_write", json!({"ms": 1})),
+        ]))],
+        plugins,
+        config(),
+    );
+    let mut rx = h.session.events().subscribe();
+    h.session.run_turn("go").await;
+    let results = tool_results(&h.session.history().events()[2].message);
+    assert_eq!(results[1].1, "Not run: the turn was stopped by a hook.");
+    let (mut starts, mut ends) = (Vec::new(), Vec::new());
+    for e in received(&mut rx) {
+        match e {
+            AgentEvent::ToolCallStart { id, .. } => starts.push(id),
+            AgentEvent::ToolCallEnd { id, .. } => ends.push(id),
+            _ => {}
+        }
+    }
+    assert_eq!(starts, ["a", "b"]);
+    assert_eq!(ends, ["a", "b"]);
 }
 
 #[tokio::test]
@@ -2728,7 +2766,7 @@ async fn tool_input_streaming_emits_throttled_progress() {
     let mut progress = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         match ev {
-            AgentEvent::ToolInputStarted { name, .. } => {
+            AgentEvent::ToolInputStart { name, .. } => {
                 assert_eq!(name, "echo");
                 started += 1;
             }

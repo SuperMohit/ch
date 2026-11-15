@@ -73,7 +73,7 @@ impl TurnView {
             AgentEvent::TextDelta { text } => self.text(text, &mut out),
             // The model is writing a tool call. Big inputs (a whole file) take a while,
             // so show what it's preparing and how much has arrived.
-            AgentEvent::ToolInputStarted { name, .. } => {
+            AgentEvent::ToolInputStart { name, .. } => {
                 self.end_text(&mut out);
                 out.push(Action::Spinner(Some(format!("preparing {name}"))));
             }
@@ -124,9 +124,9 @@ impl TurnView {
                 self.last_started = None;
                 out.push(Action::Spinner(Some(self.waiting_message())));
             }
-            AgentEvent::Note { source, text } => {
+            AgentEvent::Note { plugin, text } => {
                 self.end_text(&mut out);
-                out.push(Action::Write(format!("{}\n", note_line(source, text))));
+                out.push(Action::Write(format!("{}\n", note_line(plugin, text))));
                 self.last_started = None;
             }
             AgentEvent::HookDenied {
@@ -200,8 +200,8 @@ impl TurnView {
             }
             // The summary that replaced them, or the merge of the two oldest, so the user
             // sees what the model reads back.
-            AgentEvent::Custom { source, name, data }
-                if source == "context" && name == "compaction" =>
+            AgentEvent::Custom { plugin, name, data }
+                if plugin == "context" && name == "compaction" =>
             {
                 if let Some(text) = data["text"].as_str() {
                     self.end_text(&mut out);
@@ -288,7 +288,7 @@ impl TurnView {
     }
 }
 
-fn note_line(source: &str, text: &str) -> String {
+fn note_line(plugin: &str, text: &str) -> String {
     let lines: Vec<&str> = text.trim().lines().collect();
     let first = lines.first().copied().unwrap_or("");
     let more = if lines.len() > 1 {
@@ -298,7 +298,7 @@ fn note_line(source: &str, text: &str) -> String {
     };
     dim(&format!(
         "  · {}: {}{more}",
-        printable(source),
+        printable(plugin),
         terminal_text(first)
     ))
 }
@@ -450,7 +450,7 @@ mod tests {
         let text = v.handle(&delta("Writing the guide now."));
         assert!(!text.iter().any(|x| matches!(x, Action::Spinner(Some(_)))));
         // The text line is ended and the spinner says what's being prepared.
-        let a = v.handle(&AgentEvent::ToolInputStarted {
+        let a = v.handle(&AgentEvent::ToolInputStart {
             id: "t1".into(),
             name: "write_file".into(),
         });
@@ -479,7 +479,7 @@ mod tests {
     fn notes_and_warnings_are_single_lines() {
         let actions = run(&[
             AgentEvent::Note {
-                source: "diagnostics".into(),
+                plugin: "diagnostics".into(),
                 text: "2 warnings\nline 2\nline 3".into(),
             },
             AgentEvent::Warning {
@@ -534,7 +534,7 @@ mod tests {
                 message: "w\u{1b}[H".into(),
             },
             AgentEvent::Note {
-                source: "n".into(),
+                plugin: "n".into(),
                 text: "\u{1b}[35mred".into(),
             },
             AgentEvent::HookDenied {
@@ -543,7 +543,7 @@ mod tests {
                 reason: "r\u{1b}[8m".into(),
             },
             AgentEvent::Custom {
-                source: "context".into(),
+                plugin: "context".into(),
                 name: "compaction".into(),
                 data: json!({"kind": "summarized", "text": "## Goal\u{1b}[8m\n\u{1b}[1Anext\r"}),
             },
@@ -587,17 +587,17 @@ mod tests {
                 tokens_after: 20_000,
             },
             AgentEvent::Custom {
-                source: "context".into(),
+                plugin: "context".into(),
                 name: "compaction".into(),
                 data: json!({"kind": "summarized", "text": "## Goal\nFix it."}),
             },
             AgentEvent::Custom {
-                source: "context".into(),
+                plugin: "context".into(),
                 name: "compaction".into(),
                 data: json!({"kind": "merged", "text": "## Goal\nBoth."}),
             },
             AgentEvent::Custom {
-                source: "context".into(),
+                plugin: "context".into(),
                 name: "compaction".into(),
                 data: json!({"kind": "elided"}),
             },

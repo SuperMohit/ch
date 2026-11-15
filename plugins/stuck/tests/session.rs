@@ -136,7 +136,7 @@ async fn a_call_that_keeps_failing_is_refused_then_ends_the_turn() {
     assert_eq!(
         reason,
         TerminationReason::HookStop {
-            source: "stuck".into(),
+            hook: "stuck".into(),
             reason: "`check` failed 2 times in a row with the same input and was refused 6 \
                      more times"
                 .into(),
@@ -176,7 +176,7 @@ async fn three_malformed_responses_end_the_turn() {
     assert_eq!(
         reason,
         TerminationReason::HookStop {
-            source: "stuck".into(),
+            hook: "stuck".into(),
             reason: "the model sent malformed tool input in 3 responses in a row".into(),
         }
     );

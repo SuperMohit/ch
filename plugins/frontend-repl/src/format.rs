@@ -224,8 +224,8 @@ pub fn reason_text(reason: &TerminationReason) -> Option<String> {
         TerminationReason::ContextOverflow { message } => Some(format!(
             "stopped: context window full ({message}); try /compact or /clear"
         )),
-        TerminationReason::HookStop { source, reason } => {
-            Some(format!("stopped by {source}: {reason}"))
+        TerminationReason::HookStop { hook, reason } => {
+            Some(format!("stopped by {hook}: {reason}"))
         }
         TerminationReason::PromptDenied { reason } => Some(format!("prompt blocked: {reason}")),
         TerminationReason::Error { message } => Some(format!("error: {message}")),

@@ -30,7 +30,7 @@ pub fn verbose_line(event: &AgentEvent) -> Option<String> {
         AgentEvent::HookDenied { hook, reason, .. } => {
             Some(format!("  ⎿ denied by {hook}: {}", first_line(reason)))
         }
-        AgentEvent::Note { source, text } => Some(format!("  · {source}: {}", first_line(text))),
+        AgentEvent::Note { plugin, text } => Some(format!("  · {plugin}: {}", first_line(text))),
         AgentEvent::ContextCompacted {
             kind,
             tokens_before,

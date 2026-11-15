@@ -491,10 +491,7 @@ impl Session {
                 self.emit_denied(&hook, None, &reason);
                 Some(TerminationReason::PromptDenied { reason })
             }
-            Verdict::Stop { hook, reason } => Some(TerminationReason::HookStop {
-                source: hook,
-                reason,
-            }),
+            Verdict::Stop { hook, reason } => Some(TerminationReason::HookStop { hook, reason }),
             Verdict::Continue | Verdict::Ask { .. } => None,
         };
         if let Some(reason) = denied {
@@ -563,10 +560,7 @@ impl Session {
             reminders.extend(outcome.notes.iter().map(|(_, n)| n.clone()));
             let after_stop = match outcome.verdict {
                 Verdict::Deny { hook, reason } | Verdict::Stop { hook, reason } => {
-                    Some(TerminationReason::HookStop {
-                        source: hook,
-                        reason,
-                    })
+                    Some(TerminationReason::HookStop { hook, reason })
                 }
                 _ => None,
             };
@@ -622,10 +616,7 @@ impl Session {
                 self.emit_notes(&outcome);
                 match outcome.verdict {
                     Verdict::Stop { hook, reason } => {
-                        let stop = TerminationReason::HookStop {
-                            source: hook,
-                            reason,
-                        };
+                        let stop = TerminationReason::HookStop { hook, reason };
                         break (stop, true);
                     }
                     _ => match outcome.notes_text() {
@@ -651,10 +642,7 @@ impl Session {
                 break (TerminationReason::Cancelled, false);
             }
             if let Some((hook, reason)) = stop {
-                let stop = TerminationReason::HookStop {
-                    source: hook,
-                    reason,
-                };
+                let stop = TerminationReason::HookStop { hook, reason };
                 break (stop, false);
             }
         };
@@ -707,9 +695,9 @@ impl Session {
     }
 
     fn emit_notes(&self, outcome: &HookOutcome) {
-        for (source, text) in &outcome.notes {
+        for (plugin, text) in &outcome.notes {
             self.events.emit(AgentEvent::Note {
-                source: source.clone(),
+                plugin: plugin.clone(),
                 text: text.clone(),
             });
         }
