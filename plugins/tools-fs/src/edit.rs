@@ -4,10 +4,9 @@ mod hints;
 mod lines;
 mod whitespace;
 
-use std::path::Path;
-
 use ch_kernel::reexports::{CancellationToken, async_trait};
 use ch_kernel::{Cx, Tool, ToolOutput, ToolSpec};
+use ch_safety::WorkspacePath;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -133,7 +132,7 @@ impl EditFile {
             Ok(p) => p,
             Err(e) => return failed(ToolOutput::error(e), "bad_path", None),
         };
-        let rel = ctx.rel(&path);
+        let rel = path.relative();
         let fail = |reason: &str, out: ToolOutput| failed(out, reason, Some(&rel));
         match std::fs::metadata(&path) {
             Ok(m) if m.is_dir() => {
@@ -149,7 +148,7 @@ impl EditFile {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return fail(
                     "missing",
-                    not_found(ctx, &path, "Use write_file to create a new file."),
+                    not_found(ctx, path.as_path(), "Use write_file to create a new file."),
                 );
             }
             Err(e) => {
@@ -164,7 +163,7 @@ impl EditFile {
             Ok(None) => {
                 return fail(
                     "missing",
-                    not_found(ctx, &path, "Use write_file to create a new file."),
+                    not_found(ctx, path.as_path(), "Use write_file to create a new file."),
                 );
             }
             Err(msg) => return fail("unread_or_stale", ToolOutput::error(msg)),
@@ -304,7 +303,7 @@ enum Unwritten {
 
 /// Writes `new` to `path` if the file still holds `checked`, the bytes the
 /// read-before-write check verified and the edit was made from.
-fn write_checked(path: &Path, checked: &[u8], new: &str) -> Result<(), Unwritten> {
+fn write_checked(path: &WorkspacePath, checked: &[u8], new: &str) -> Result<(), Unwritten> {
     match std::fs::read(path) {
         Ok(now) if now == checked => {}
         Ok(_) => return Err(Unwritten::Changed),
@@ -325,8 +324,11 @@ mod tests {
     #[test]
     fn writes_only_what_was_checked() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.txt");
-        std::fs::write(&path, "now\n").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "now\n").unwrap();
+        let path = PathGuard::new(dir.path())
+            .unwrap()
+            .resolve("a.txt")
+            .unwrap();
         // Changed since the check: nothing is written.
         assert!(matches!(
             write_checked(&path, b"then\n", "new\n"),
@@ -341,18 +343,19 @@ mod tests {
             write_checked(&path, b"new\n", "x"),
             Err(Unwritten::Changed)
         ));
-        assert!(!path.exists());
+        assert!(!path.as_path().exists());
     }
 
     #[test]
     fn edits_write_only_what_was_checked() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
-        let path = root.join("a.txt");
-        std::fs::write(&path, "x = 1\n").unwrap();
-        let state = Arc::new(FileState::with_root(&root));
+        std::fs::write(root.join("a.txt"), "x = 1\n").unwrap();
+        let guard = Arc::new(PathGuard::new(&root).unwrap());
+        let path = guard.resolve("a.txt").unwrap();
+        let state = Arc::new(FileState::default());
         state.record_read(&path, b"x = 1\n", true);
-        let ctx = FsContext::new(Arc::new(PathGuard::new(&root).unwrap()), state);
+        let ctx = FsContext::new(guard, state);
         let input = || Input {
             path: "a.txt".into(),
             old_text: "x = 1".into(),

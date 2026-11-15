@@ -190,7 +190,7 @@ impl Policy {
         let readable = session_dir.filter(|_| read_only && SESSION_READERS.contains(&tool));
         let rel = match raw {
             Some(p) => match self.guard.resolve_readable(p, readable) {
-                Ok(abs) => self.guard.relative(&abs),
+                Ok(abs) => self.guard.relative(abs.as_path()),
                 Err(msg) => return Decision::deny(msg),
             },
             None => ".".to_string(),

@@ -101,13 +101,16 @@ impl ReadFile {
             Ok(p) => p,
             Err(e) => return ToolOutput::error(e),
         };
-        let rel = ctx.rel(&path);
-        let meta = match std::fs::metadata(&path) {
+        let rel = ctx.rel(path.as_path());
+        // Reads are recorded for read-before-write; a file in the session directory is
+        // never written by the file tools, so only workspace files are.
+        let workspace_file = path.workspace();
+        let meta = match std::fs::metadata(path.as_path()) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return not_found(
                     ctx,
-                    &path,
+                    path.as_path(),
                     "Use glob_files or list_files to find the right path.",
                 );
             }
@@ -125,7 +128,7 @@ impl ReadFile {
                 meta.len()
             ));
         }
-        let bytes = match std::fs::read(&path) {
+        let bytes = match std::fs::read(path.as_path()) {
             Ok(b) => b,
             Err(e) => return ToolOutput::error(format!("Could not read `{rel}`: {e}.")),
         };
@@ -137,7 +140,9 @@ impl ReadFile {
             ));
         }
         if bytes.is_empty() {
-            ctx.state.record_read(&path, &bytes, true);
+            if let Some(p) = workspace_file {
+                ctx.state.record_read(p, &bytes, true);
+            }
             return ToolOutput::ok(format!("`{rel}` is empty (0 bytes)."));
         }
         if input.offset == Some(0) || input.limit == Some(0) {
@@ -184,7 +189,9 @@ impl ReadFile {
             out.push_str(&numbered);
             end = i + 1;
         }
-        ctx.state.record_lines(&path, &bytes, start, end, total);
+        if let Some(p) = workspace_file {
+            ctx.state.record_lines(p, &bytes, start, end, total);
+        }
 
         let mut notes = Vec::new();
         if end < total {

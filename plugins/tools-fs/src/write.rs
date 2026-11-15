@@ -78,7 +78,7 @@ impl WriteFile {
             Ok(p) => p,
             Err(e) => return ToolOutput::error(e),
         };
-        let rel = ctx.rel(&path);
+        let rel = path.relative();
         let previous = match std::fs::metadata(&path) {
             Ok(m) if m.is_dir() => {
                 return ToolOutput::error(format!(
@@ -101,7 +101,7 @@ impl WriteFile {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return ToolOutput::error(format!("Could not open `{rel}`: {e}.")),
         };
-        if let Some(parent) = path.parent()
+        if let Some(parent) = path.as_path().parent()
             && let Err(e) = std::fs::create_dir_all(parent)
         {
             return ToolOutput::error(format!(

@@ -5,7 +5,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use ch_kernel::util::ReadTools;
+use ch_kernel::util::{ReadTools, anchored};
 use ch_kernel::{
     AgentEvent, Budget, CompactionKind, ContextCx, History, Message, ModelError, ModelProvider,
     ModelRequest, Role, estimate_tokens,
@@ -18,7 +18,7 @@ use crate::render::{Rendered, render};
 use crate::strategy::{Context, ID, Made, Step, thinking_count, warn};
 use crate::stub;
 use crate::summary::{self, Summary, USER_TEXT_MAX, UserText};
-use crate::trim::{anchor, save_originals};
+use crate::trim::save_originals;
 
 /// Requests per summary the provider may reject as too long; each halves the span.
 const TOO_LONG_TRIES: usize = 3;
@@ -401,7 +401,7 @@ fn not_written(why: &str, parts: usize) -> String {
 async fn keep_users(ccx: &ContextCx, mut users: Vec<UserText>) -> Vec<UserText> {
     let (Some(dir), Some(base)) = (
         ccx.cx.session_dir.as_deref(),
-        ccx.cx.session_dir.as_deref().and_then(|d| anchor(d)),
+        ccx.cx.session_dir.as_deref().and_then(|d| anchored(d).ok()),
     ) else {
         return users;
     };
