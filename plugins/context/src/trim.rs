@@ -53,7 +53,7 @@ impl Context {
         trigger: Trigger,
     ) -> Option<Decision> {
         let files = &Files {
-            base: ccx.cx.session_dir.as_deref().and_then(|d| anchor(d)),
+            base: ccx.cx.session_dir.as_deref().and_then(|d| anchored(d).ok()),
             tools: ReadTools::of(&ccx.cx),
         };
         let rendered = render(history, records);
@@ -136,15 +136,6 @@ impl Context {
             view,
             records: vec![record],
         })
-    }
-}
-
-/// The session directory anchored as the file tools check it, also before it exists;
-/// `None` if it is a symlink.
-pub(crate) fn anchor(dir: &Path) -> Option<PathBuf> {
-    match fs::symlink_metadata(dir) {
-        Ok(_) => anchored(dir).ok(),
-        Err(_) => Some(fs::canonicalize(dir.parent()?).ok()?.join(dir.file_name()?)),
     }
 }
 

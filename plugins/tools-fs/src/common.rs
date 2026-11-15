@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use ch_kernel::ToolOutput;
-use ch_safety::{FileState, PathGuard};
+use ch_safety::{FileState, PathGuard, ReadablePath};
 use globset::{GlobBuilder, GlobMatcher};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -45,6 +45,7 @@ impl FsContext {
             Some(p) => self
                 .guard
                 .resolve_readable(p, session_dir)
+                .map(ReadablePath::into_path_buf)
                 .map_err(ToolOutput::error),
         }
     }
