@@ -122,7 +122,7 @@ async fn a_spilled_result_can_be_read_back_also_after_resuming() {
     );
     let (path, offset) = notice_target(&preview);
     assert!(preview.contains(&format!("log line {:05}\n\n[… lines {offset}–", offset - 1)));
-    let id = first.id().to_string();
+    let id = first.id().clone();
     first.end().await;
     drop(first);
 
@@ -164,5 +164,5 @@ async fn without_the_plugin_the_middle_is_cut_and_the_session_dir_holds_no_outpu
     let preview = &results(&s)[0];
     assert!(!preview.contains("saved at"));
     assert!(!preview.contains("log line 02500"));
-    assert!(!sessions.join(s.id()).join("spill").exists());
+    assert!(!sessions.join(s.id().as_str()).join("spill").exists());
 }

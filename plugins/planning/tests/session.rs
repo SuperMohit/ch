@@ -97,7 +97,7 @@ async fn a_resumed_session_keeps_its_plan_and_clear_drops_it() {
         first.run_turn("fix it").await.reason,
         TerminationReason::Done
     );
-    let id = first.id().to_string();
+    let id = first.id().clone();
     first.end().await;
     drop(first);
 

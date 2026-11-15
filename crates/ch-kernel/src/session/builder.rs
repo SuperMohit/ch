@@ -10,6 +10,7 @@ use crate::events::EventBus;
 use crate::history::History;
 use crate::ledger::ToolLedger;
 use crate::registry::Registry;
+use crate::session_id::SessionId;
 use crate::store::{SessionMeta, SessionSnapshot, SessionStore};
 use crate::tokens::TokenCalibrator;
 use crate::tool_source::Catalog;
@@ -21,7 +22,7 @@ pub struct SessionBuilder {
     registry: Arc<Registry>,
     config: Arc<Config>,
     workspace: PathBuf,
-    id: Option<String>,
+    id: Option<SessionId>,
     approver: Option<String>,
     store: Option<SessionStore>,
     restore: Option<SessionSnapshot>,
@@ -55,8 +56,8 @@ impl SessionBuilder {
         self
     }
 
-    pub fn id(mut self, id: impl Into<String>) -> Self {
-        self.id = Some(id.into());
+    pub fn id(mut self, id: SessionId) -> Self {
+        self.id = Some(id);
         self
     }
 
@@ -139,7 +140,7 @@ impl SessionBuilder {
                 snap.prompt,
             ),
             None => (
-                self.id.unwrap_or_else(new_session_id),
+                self.id.unwrap_or_else(SessionId::generate),
                 History::new(),
                 Usage::default(),
                 0.0,
@@ -199,10 +200,4 @@ pub(super) fn restored_model(meta: &SessionMeta, provider: &str, configured: &st
         Some(p) if p != provider => configured.to_string(),
         _ => meta.model.clone(),
     }
-}
-
-pub(super) fn new_session_id() -> String {
-    let ts = Utc::now().format("%Y%m%d-%H%M%S");
-    let short = uuid::Uuid::new_v4().simple().to_string();
-    format!("{ts}-{}", &short[..6])
 }

@@ -18,11 +18,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::history::{Event, History};
 use crate::ledger::ToolLedger;
+use crate::session_id::SessionId;
 use crate::types::Usage;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
-    pub id: String,
+    pub id: SessionId,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub workspace: String,
@@ -43,7 +44,7 @@ pub struct SessionLock {
 
 impl SessionLock {
     #[cfg(unix)]
-    fn acquire(file: fs::File, id: &str) -> anyhow::Result<Self> {
+    fn acquire(file: fs::File, id: &SessionId) -> anyhow::Result<Self> {
         use nix::fcntl::{Flock, FlockArg};
         match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
             Ok(lock) => Ok(Self { _lock: lock }),
@@ -56,7 +57,7 @@ impl SessionLock {
     }
 
     #[cfg(not(unix))]
-    fn acquire(_file: fs::File, _id: &str) -> anyhow::Result<Self> {
+    fn acquire(_file: fs::File, _id: &SessionId) -> anyhow::Result<Self> {
         Ok(Self {})
     }
 }
@@ -130,7 +131,7 @@ impl SessionStore {
     }
 
     /// Locks session `id` for this process until the [`SessionLock`] is dropped.
-    pub fn lock(&self, id: &str) -> anyhow::Result<SessionLock> {
+    pub fn lock(&self, id: &SessionId) -> anyhow::Result<SessionLock> {
         fs::create_dir_all(&self.dir)
             .with_context(|| format!("creating {}", self.dir.display()))?;
         let path = self.dir.join(format!("{id}.lock"));
@@ -143,22 +144,13 @@ impl SessionStore {
         SessionLock::acquire(file, id)
     }
 
-    /// Whether `id` can name a session: ASCII letters, digits, `-` and `_`. An id becomes
-    /// a file name and the session's directory, which the file tools may read.
-    pub fn is_valid_id(id: &str) -> bool {
-        !id.is_empty()
-            && id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    }
-
-    pub fn path_for(&self, id: &str) -> PathBuf {
+    pub fn path_for(&self, id: &SessionId) -> PathBuf {
         self.dir.join(format!("{id}.jsonl"))
     }
 
     /// Per-session directory for auxiliary files (elided tool outputs, ...).
-    pub fn aux_dir(&self, id: &str) -> PathBuf {
-        self.dir.join(id)
+    pub fn aux_dir(&self, id: &SessionId) -> PathBuf {
+        self.dir.join(id.as_str())
     }
 
     pub fn save(&self, snap: &SessionSnapshot) -> anyhow::Result<()> {
@@ -205,8 +197,7 @@ impl SessionStore {
         Ok(())
     }
 
-    pub fn load(&self, id: &str) -> anyhow::Result<SessionSnapshot> {
-        anyhow::ensure!(Self::is_valid_id(id), "`{id}` is not a session id");
+    pub fn load(&self, id: &SessionId) -> anyhow::Result<SessionSnapshot> {
         let path = self.path_for(id);
         let f = fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
         let mut meta = None;
@@ -233,7 +224,7 @@ impl SessionStore {
         }
         let meta = meta.with_context(|| format!("{} has no meta line", path.display()))?;
         anyhow::ensure!(
-            meta.id == id,
+            meta.id == *id,
             "{} belongs to session `{}`, not `{id}`",
             path.display(),
             meta.id
@@ -265,7 +256,10 @@ impl SessionStore {
             if BufReader::new(f).read_line(&mut first).is_err() {
                 continue;
             }
-            if let Ok(Line::Meta(m)) = serde_json::from_str::<Line>(&first) {
+            // Only what `load` would accept: a file named after the id it holds.
+            if let Ok(Line::Meta(m)) = serde_json::from_str::<Line>(&first)
+                && path.file_stem().and_then(|s| s.to_str()) == Some(m.id.as_str())
+            {
                 out.push(m);
             }
         }
@@ -289,6 +283,10 @@ mod tests {
     use super::*;
     use crate::types::Message;
 
+    fn id(s: &str) -> SessionId {
+        SessionId::parse(s).unwrap()
+    }
+
     #[test]
     fn save_load_list_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
@@ -300,7 +298,7 @@ mod tests {
         let now = Utc::now();
         let snap = SessionSnapshot {
             meta: SessionMeta {
-                id: "s1".into(),
+                id: id("s1"),
                 created_at: now,
                 updated_at: now,
                 workspace: "/tmp/my proj".into(),
@@ -321,7 +319,7 @@ mod tests {
             }),
         };
         store.save(&snap).unwrap();
-        let loaded = store.load("s1").unwrap();
+        let loaded = store.load(&id("s1")).unwrap();
         assert_eq!(loaded.history.len(), 2);
         assert_eq!(loaded.usage.input_tokens, 5);
         assert_eq!(loaded.meta, snap.meta);
@@ -331,15 +329,23 @@ mod tests {
 
         // Ids that aren't plain names, or a file claiming another id, don't load: the id
         // names the session's directory, which the file tools may read.
-        for bad in ["", "..", "../s1", "a/b"] {
-            assert!(store.load(bad).is_err(), "{bad:?}");
-        }
-        let forged = std::fs::read_to_string(store.path_for("s1"))
+        let saved = std::fs::read_to_string(store.path_for(&id("s1"))).unwrap();
+        let other = saved.replacen("\"id\":\"s1\"", "\"id\":\"s9\"", 1);
+        std::fs::write(store.path_for(&id("s2")), other).unwrap();
+        let err = store.load(&id("s2")).unwrap_err().to_string();
+        assert!(err.contains("belongs to session `s9`"), "{err}");
+        let unsafe_id = saved.replacen("\"id\":\"s1\"", "\"id\":\"../s1\"", 1);
+        std::fs::write(store.path_for(&id("s3")), unsafe_id).unwrap();
+        let err = format!("{:#}", store.load(&id("s3")).unwrap_err());
+        assert!(err.contains("not a session id"), "{err}");
+        // Neither forged file is listed: s2 holds another session's id, s3 an unsafe one.
+        let listed: Vec<String> = store
+            .list()
             .unwrap()
-            .replacen("\"id\":\"s1\"", "\"id\":\"\"", 1);
-        std::fs::write(store.path_for("s2"), forged).unwrap();
-        let err = store.load("s2").unwrap_err().to_string();
-        assert!(err.contains("belongs to session ``"), "{err}");
+            .iter()
+            .map(|m| m.id.to_string())
+            .collect();
+        assert_eq!(listed, ["s1"]);
     }
 
     #[cfg(unix)]
@@ -347,15 +353,15 @@ mod tests {
     fn a_session_can_be_locked_once_at_a_time() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::new(dir.path());
-        let held = store.lock("s1").unwrap();
-        let err = store.lock("s1").err().unwrap();
+        let held = store.lock(&id("s1")).unwrap();
+        let err = store.lock(&id("s1")).err().unwrap();
         assert!(
             format!("{err:#}").contains("open in another ch process"),
             "{err:#}"
         );
-        assert!(store.lock("s2").is_ok());
+        assert!(store.lock(&id("s2")).is_ok());
         drop(held);
-        assert!(store.lock("s1").is_ok());
+        assert!(store.lock(&id("s1")).is_ok());
         assert!(
             store.list().unwrap().is_empty(),
             "lock files are not sessions"
