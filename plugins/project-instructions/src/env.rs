@@ -8,13 +8,29 @@ use std::time::{Duration, Instant};
 /// How many `git status` entries to show.
 const STATUS_ENTRIES: usize = 10;
 
+/// The variables git gets from ch's environment; everything else, API keys included, is
+/// left out.
+const GIT_ENV: &[&str] = &["PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "TMPDIR"];
+
 /// Runs `git <args>` in `dir`, returning trimmed stdout on success. Returns `None` on
 /// any failure, including a missing git binary, a nonzero exit or the timeout (the
 /// process is killed).
+///
+/// The repository's own config can name commands git runs (`core.fsmonitor`, filter
+/// drivers), and a workspace's `.git/config` may have been planted or written by the
+/// model. So git gets a cleared environment, without the provider keys, and
+/// fsmonitor is off.
 pub fn git(dir: &Path, args: &[&str], timeout: Duration) -> Option<String> {
     let mut child = Command::new("git")
+        .args(["-c", "core.fsmonitor=false"])
         .args(args)
         .current_dir(dir)
+        .env_clear()
+        .envs(
+            GIT_ENV
+                .iter()
+                .filter_map(|k| Some((k, std::env::var_os(k)?))),
+        )
         // Don't take the index lock: the user may be running git at the same time.
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
@@ -137,6 +153,64 @@ mod tests {
         assert!(!s.contains("?? f10"));
         assert!(s.contains("... and 3 more"));
         assert!(status_summary(&[]).contains("clean"));
+    }
+
+    fn init(dir: &Path) {
+        let ok = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "git init failed");
+    }
+
+    #[test]
+    fn git_gets_no_more_of_the_environment_than_it_needs() {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path());
+        // Cargo sets CARGO_MANIFEST_DIR for test runs; like an API key, it must not reach
+        // git or what git runs.
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let env = git(
+            dir.path(),
+            &["-c", "alias.e=!env", "e"],
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(env.contains("PATH="), "{env}");
+        assert!(!env.contains("CARGO_MANIFEST_DIR="), "{env}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_fsmonitor_command_does_not_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path());
+        let marker = dir.path().join("ran");
+        let hook = dir.path().join("monitor.sh");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let set = Command::new("git")
+            .args(["config", "core.fsmonitor"])
+            .arg(&hook)
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(set.success());
+        // Plain git runs it, so the check below means something.
+        let _ = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(dir.path())
+            .output();
+        assert!(marker.exists(), "this git doesn't run fsmonitor hooks");
+        std::fs::remove_file(&marker).unwrap();
+        git(
+            dir.path(),
+            &["status", "--porcelain"],
+            Duration::from_secs(5),
+        );
+        assert!(!marker.exists(), "the repository's fsmonitor command ran");
     }
 
     #[test]

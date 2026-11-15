@@ -39,7 +39,7 @@ pub use context::{
 };
 pub use cx::Cx;
 pub use events::{AgentEvent, CompactionKind, EventBus, EventSink};
-pub use executor::{ExecRequest, ExecResult, Executor};
+pub use executor::{ExecRequest, ExecResult, Executor, SecretEnv};
 pub use frontend::Frontend;
 pub use history::{Event, EventId, History};
 pub use hook::{

@@ -208,4 +208,9 @@ fn registers_without_an_api_key() {
     .unwrap();
     let p = registry.provider(Some("openai")).unwrap();
     assert_eq!(p.context_window("gpt-x"), Some(128_000));
+    // The variable its key comes from is declared secret, so executors hide it.
+    assert_eq!(
+        registry.secret_env.names(),
+        ["CH_TEST_SURELY_UNSET_OPENAI_VAR"]
+    );
 }

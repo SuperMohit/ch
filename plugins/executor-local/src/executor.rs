@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
-use ch_kernel::{ExecRequest, ExecResult, Executor};
+use ch_kernel::{ExecRequest, ExecResult, Executor, SecretEnv};
 use nix::unistd::Pid;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -31,9 +31,9 @@ pub const DEFAULT_KEY_VARS: &[&str] = &["ANTHROPIC_API_KEY", "OPENAI_API_KEY"];
 #[derive(Debug, Clone)]
 pub struct LocalExecutor {
     config: LocalExecutorConfig,
-    /// Removed from every command's environment, so the model can't read the
-    /// provider's API key with `printenv` or `echo $VAR`.
-    hidden_env: Vec<String>,
+    /// Removed from every command's environment when it starts, so the model can't
+    /// read a provider's API key with `printenv` or `echo $VAR`.
+    secrets: SecretEnv,
 }
 
 impl Default for LocalExecutor {
@@ -51,18 +51,27 @@ enum Ending {
 
 impl LocalExecutor {
     pub fn new(config: LocalExecutorConfig) -> Self {
-        Self {
-            config,
-            hidden_env: DEFAULT_KEY_VARS.iter().map(|v| v.to_string()).collect(),
+        let secrets = SecretEnv::default();
+        for name in DEFAULT_KEY_VARS {
+            secrets.add(name);
         }
+        Self { config, secrets }
+    }
+
+    /// Hides every variable in `secrets`, the set plugins declare into, as it stands
+    /// when each command starts. The names this executor already hides are added to it.
+    pub fn hide_secrets(mut self, secrets: SecretEnv) -> Self {
+        for name in self.secrets.names() {
+            secrets.add(&name);
+        }
+        self.secrets = secrets;
+        self
     }
 
     /// Also removes `names` from every command's environment.
-    pub fn hide_env(mut self, names: impl IntoIterator<Item = String>) -> Self {
+    pub fn hide_env(self, names: impl IntoIterator<Item = String>) -> Self {
         for name in names {
-            if !self.hidden_env.contains(&name) {
-                self.hidden_env.push(name);
-            }
+            self.secrets.add(&name);
         }
         self
     }
@@ -84,7 +93,7 @@ impl LocalExecutor {
             cmd.env(k, v);
         }
         // After the request's own values, so a caller can't put a hidden one back.
-        for name in &self.hidden_env {
+        for name in self.secrets.names() {
             cmd.env_remove(name);
         }
         for (k, v) in FIXED_ENV {

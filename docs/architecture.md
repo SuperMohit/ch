@@ -104,7 +104,7 @@ sequenceDiagram
 | **ContextStrategy** | 1 | `view(&History, Budget, cx) -> View`, `compact(&History, Budget, &CompactRequest, cx) -> CompactOutcome` | `context` (`none` / `elide` / `summarize` / `staged`) |
 | **Command** (slash) | many | `name()`, `run(args, &CmdCx) -> Outcome` | `commands-core`, `commands-markdown` |
 | **EventSink** | many | `handle(&AgentEvent)`, `flush()` | `telemetry-langfuse`, `telemetry-jsonl` |
-| **Executor** | 1 | `run(cmd, cwd, timeout, cancel) -> ExecResult` | `executor-local`, `executor-docker` |
+| **Executor** | 1 | `run(cmd, cwd, timeout, cancel) -> ExecResult`; removes the variables plugins declared secret (`SecretEnv`) | `executor-local`, `executor-docker` |
 | **Approver** | 1 (usually from the frontend) | `ask(&ApprovalRequest) -> Approval` | `repl` (interactive), `auto-deny`, `auto-allow` |
 | **Frontend** | 1 | `run(SessionHandle) -> Result<()>` | `repl`, `print` (headless/JSON), later `tui` |
 | **Service** | many, typed | shared state such as `FileState`, `PlanStore`, `PathGuard` | provided and consumed by plugins |
@@ -115,7 +115,8 @@ sequenceDiagram
 pub trait Plugin: Send + Sync {
     fn manifest(&self) -> PluginManifest;    // id, version, api_version, description, requires/provides
     fn register(&self, cx: &mut RegisterCx) -> anyhow::Result<()>;
-    // RegisterCx: cx.config::<T>()?, cx.add_tool(..), cx.add_hook(..), cx.provide_service(..), ...
+    // RegisterCx: cx.config::<T>()?, cx.add_tool(..), cx.add_hook(..), cx.provide_service(..),
+    // cx.add_secret_env("MY_API_KEY") (executors hide it from commands), ...
 }
 ```
 

@@ -339,6 +339,11 @@ fn registers_without_an_api_key() {
     let p = registry.provider(Some("anthropic")).unwrap();
     assert_eq!(p.context_window("claude-opus-5-5"), Some(1_000_000));
     assert_eq!(p.context_window("unknown"), None);
+    // The variable its key comes from is declared secret, so executors hide it.
+    assert_eq!(
+        registry.secret_env.names(),
+        ["CH_TEST_SURELY_UNSET_KEY_VAR"]
+    );
 }
 
 #[tokio::test]

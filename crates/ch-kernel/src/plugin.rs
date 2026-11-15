@@ -12,7 +12,7 @@ use crate::command::Command;
 use crate::config::Config;
 use crate::context::ContextStrategy;
 use crate::events::EventSink;
-use crate::executor::Executor;
+use crate::executor::{Executor, SecretEnv};
 use crate::frontend::Frontend;
 use crate::hook::Hook;
 use crate::model::ModelProvider;
@@ -111,6 +111,19 @@ impl RegisterCx<'_> {
     pub fn config<T: DeserializeOwned + Default>(&self) -> anyhow::Result<T> {
         self.config_read.set(true);
         self.config.plugin_section(&self.plugin_id)
+    }
+
+    /// Declares that environment variable `name` holds a secret, such as the API key a
+    /// provider reads. Executors remove it from every command's environment, so the
+    /// model can't read it with `printenv`.
+    pub fn add_secret_env(&mut self, name: &str) {
+        self.builder.secret_env.add(name);
+    }
+
+    /// Every variable declared with [`RegisterCx::add_secret_env`], by any plugin, read
+    /// at the time of use. Executors keep this to hide them.
+    pub fn secret_env(&self) -> SecretEnv {
+        self.builder.secret_env.clone()
     }
 
     /// The whole merged config.
