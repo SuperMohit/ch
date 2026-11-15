@@ -1,10 +1,13 @@
 //! Path guard, file state and permission policy.
 //!
-//! The `safety` plugin provides two services other plugins rely on:
+//! The `safety` plugin provides services other plugins rely on:
 //!
 //! - [`PathGuard`] resolves model-supplied paths and rejects anything outside the
-//!   workspace (including `..` tricks and symlink escapes).
+//!   workspace (including `..` tricks and symlink escapes). A path it accepts for writing
+//!   is a [`WorkspacePath`]; one it accepts only for reading is a [`ReadablePath`].
 //! - [`FileState`] tracks what the agent has read, so edits require a full, current read.
+//!   It takes only [`WorkspacePath`]s, so nothing outside the workspace is cleared for a
+//!   write.
 //! - [`Policy`] is the compiled permission policy, for plugins that run commands on
 //!   their own and must not run more than the model could (diagnostics).
 //!
@@ -62,7 +65,7 @@ use ch_kernel::reexports::async_trait;
 use ch_kernel::{Cx, Hook, HookDecision, HookEvent, HookPoint, Plugin, PluginManifest, RegisterCx};
 
 pub use file_state::{FileState, content_hash};
-pub use path_guard::PathGuard;
+pub use path_guard::{PathGuard, ReadablePath, SessionPath, WorkspacePath};
 pub use policy::{Decision, Mode, Policy, SafetyConfig, is_sensitive};
 pub use rules::Rule;
 
@@ -97,7 +100,7 @@ impl Plugin for SafetyPlugin {
                 cx.workspace().display()
             )
         })?);
-        let state = Arc::new(FileState::with_root(guard.root()));
+        let state = Arc::new(FileState::default());
         let policy = Arc::new(Policy::new(&config, guard.clone())?);
         cx.provide_service(guard)?;
         cx.provide_service(state)?;

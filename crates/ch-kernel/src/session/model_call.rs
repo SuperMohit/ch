@@ -230,10 +230,7 @@ impl Session {
             unreachable!("hooks cannot change the event kind")
         };
         if let Verdict::Deny { hook, reason } | Verdict::Stop { hook, reason } = outcome.verdict {
-            return Err(TerminationReason::HookStop {
-                source: hook,
-                reason,
-            });
+            return Err(TerminationReason::HookStop { hook, reason });
         }
         if let Some(notes) = outcome.notes_text() {
             let block = ContentBlock::text(system_reminder(&notes));
@@ -423,7 +420,7 @@ impl Session {
                 }
                 Some(Ok(ModelEvent::ToolUseStart { id, name })) => {
                     streamed = true;
-                    self.events.emit(AgentEvent::ToolInputStarted {
+                    self.events.emit(AgentEvent::ToolInputStart {
                         id: id.clone(),
                         name: name.clone(),
                     });

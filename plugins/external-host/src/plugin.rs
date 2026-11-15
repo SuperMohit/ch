@@ -378,8 +378,8 @@ fn on_notify(shared: Arc<Shared>, sink: ToolSink, events: EventBus) -> crate::co
         method::UI_NOTIFY => {
             if let Ok(p) = serde_json::from_value::<NotifyParams>(params) {
                 events.emit(AgentEvent::Note {
-                    source: shared.m.source_id(),
-                    text: ch_kernel::util::terminal_text(&shared.redact(&p.message)),
+                    plugin: shared.m.source_id(),
+                    text: ch_kernel::util::terminal_text(&shared.redact(&p.text)),
                 });
             }
         }

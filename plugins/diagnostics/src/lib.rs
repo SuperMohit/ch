@@ -234,7 +234,7 @@ impl Content {
     /// opened without following a symlink or waiting on a FIFO.
     fn read(guard: &PathGuard, rel: &str) -> Self {
         let path = guard.root().join(rel);
-        if guard.resolve(rel).ok().as_deref() != Some(path.as_path()) {
+        if !guard.resolve(rel).is_ok_and(|p| p.as_path() == path) {
             return Self::Unusable;
         }
         let mut options = std::fs::OpenOptions::new();
@@ -711,7 +711,7 @@ impl Hook for DiagnosticsHook {
                 let Ok(abs) = guard.resolve(raw) else {
                     return HookDecision::Continue;
                 };
-                let rel = guard.relative(&abs);
+                let rel = abs.relative();
                 // pre_tool can run twice for one call: the first snapshot stays.
                 if self.checked_ext(&rel).is_some() && !self.state().before.contains_key(&rel) {
                     let content = Content::read(&guard, &rel);

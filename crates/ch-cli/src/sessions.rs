@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use anyhow::bail;
-use ch_kernel::{SessionMeta, SessionSnapshot, SessionStore};
+use ch_kernel::{SessionId, SessionMeta, SessionSnapshot, SessionStore};
 
 /// Which saved session to load.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,11 +77,16 @@ pub fn load(
         },
         Resume::Id(id) => {
             // The id becomes a file name in the sessions directory.
-            if !SessionStore::is_valid_id(id) {
+            let Ok(id) = SessionId::parse(id) else {
                 bail!("`{id}` is not a session id; `ch --resume` lists them");
-            }
-            if !store.path_for(id).exists() {
-                let known: Vec<String> = store.list()?.into_iter().map(|m| m.id).take(5).collect();
+            };
+            if !store.path_for(&id).exists() {
+                let known: Vec<String> = store
+                    .list()?
+                    .into_iter()
+                    .map(|m| m.id.to_string())
+                    .take(5)
+                    .collect();
                 bail!(
                     "no session `{id}` in this project{}",
                     if known.is_empty() {
@@ -91,7 +96,7 @@ pub fn load(
                     }
                 );
             }
-            Ok(Some(store.load(id)?))
+            Ok(Some(store.load(&id)?))
         }
         Resume::Pick => {
             let sessions = store.list()?;

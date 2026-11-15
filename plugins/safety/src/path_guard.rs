@@ -1,11 +1,153 @@
 //! Keeps every file path inside the workspace root.
+//!
+//! [`PathGuard`] turns a model-supplied path into a [`WorkspacePath`] (inside the
+//! workspace, so the file tools may write it) or, for reads, a [`ReadablePath`] (which
+//! may also be inside the session's own directory, never writable). [`crate::FileState`],
+//! which clears a file for writing, takes only a [`WorkspacePath`], so a path in the
+//! session directory can't be cleared for a write: the compiler refuses it.
 
 use std::ffi::OsString;
+use std::fmt;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+
+use ch_kernel::util::anchored;
 
 /// Symlinks followed while resolving one path before giving up (loops, deep chains).
 const MAX_SYMLINKS: usize = 40;
+
+/// A canonical path inside the workspace root: one the file tools may change.
+///
+/// Only [`PathGuard`] makes one, so holding one means the path passed the guard when it
+/// was resolved. It isn't checked again before a write: a parent directory replaced by
+/// a symlink in between isn't caught here. [`crate::FileState`] takes nothing else:
+///
+/// ```
+/// # fn f(guard: &ch_safety::PathGuard, state: &ch_safety::FileState) -> Result<(), String> {
+/// let path = guard.resolve("src/main.rs")?;
+/// state.check_writable(&path)?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// A plain path, or a path in the session directory from
+/// [`PathGuard::resolve_readable`], is refused by the compiler:
+///
+/// ```compile_fail,E0308
+/// # fn f(state: &ch_safety::FileState) {
+/// let path = std::path::Path::new("src/main.rs");
+/// state.check_writable(path); // expected `&WorkspacePath`, found `&Path`
+/// # }
+/// ```
+///
+/// Displays relative to the workspace root (`.` for the root itself), as messages to
+/// the model show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspacePath {
+    path: PathBuf,
+    root: Arc<Path>,
+}
+
+impl WorkspacePath {
+    /// The canonical absolute path.
+    pub fn as_path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The canonical absolute path, owned.
+    pub fn into_path_buf(self) -> PathBuf {
+        self.path
+    }
+
+    /// The path relative to the workspace root, `.` for the root itself (as
+    /// [`PathGuard::relative`] shows it).
+    pub fn relative(&self) -> String {
+        relative_to(&self.root, &self.path)
+    }
+}
+
+impl AsRef<Path> for WorkspacePath {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl fmt::Display for WorkspacePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.relative())
+    }
+}
+
+/// A canonical path the file tools may read: inside the workspace, or inside the
+/// session's own directory, where plugins keep files for the model to read back (spilled
+/// output, elided results). Only the workspace side is a [`WorkspacePath`], so a
+/// session file can't be handed to anything that writes:
+///
+/// ```compile_fail,E0308
+/// # fn f(guard: &ch_safety::PathGuard, state: &ch_safety::FileState, dir: &std::path::Path) {
+/// let path = guard.resolve_readable("spill/out.txt", Some(dir)).unwrap();
+/// state.check_writable(&path); // expected `&WorkspacePath`, found `&ReadablePath`
+/// # }
+/// ```
+///
+/// Only its workspace side can be:
+///
+/// ```
+/// # fn f(guard: &ch_safety::PathGuard, state: &ch_safety::FileState, dir: &std::path::Path)
+/// #     -> Result<(), String> {
+/// let path = guard.resolve_readable("spill/out.txt", Some(dir))?;
+/// if let Some(p) = path.workspace() {
+///     state.check_writable(p)?;
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadablePath {
+    /// Inside the workspace (also when the session directory is inside it too).
+    Workspace(WorkspacePath),
+    /// Inside the session directory and outside the workspace: read only.
+    Session(SessionPath),
+}
+
+/// A canonical path inside the session directory and outside the workspace. Only
+/// [`PathGuard::resolve_readable`] makes one; the file tools read it and never write it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPath(PathBuf);
+
+impl SessionPath {
+    /// The canonical absolute path.
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl ReadablePath {
+    /// The canonical absolute path.
+    pub fn as_path(&self) -> &Path {
+        match self {
+            Self::Workspace(p) => p.as_path(),
+            Self::Session(p) => p.as_path(),
+        }
+    }
+
+    /// The path if it is inside the workspace.
+    pub fn workspace(&self) -> Option<&WorkspacePath> {
+        match self {
+            Self::Workspace(p) => Some(p),
+            Self::Session(_) => None,
+        }
+    }
+
+    /// The canonical absolute path, owned.
+    pub fn into_path_buf(self) -> PathBuf {
+        match self {
+            Self::Workspace(p) => p.into_path_buf(),
+            Self::Session(p) => p.0,
+        }
+    }
+}
 
 /// Resolves model-supplied paths against the workspace root and rejects anything that
 /// ends up outside it, whether through `..`, an absolute path or a symlink.
@@ -18,14 +160,23 @@ const MAX_SYMLINKS: usize = 40;
 /// refuses to change a file with more than one link (on Unix).
 #[derive(Debug, Clone)]
 pub struct PathGuard {
-    root: PathBuf,
+    root: Arc<Path>,
+}
+
+/// A model-supplied path followed on disk, not yet checked against the roots.
+struct Found<'a> {
+    /// The input, trimmed.
+    input: &'a str,
+    /// The input made absolute, before any symlink is followed.
+    joined: PathBuf,
+    resolved: PathBuf,
 }
 
 impl PathGuard {
     /// Canonicalizes `root`; fails if it does not exist.
     pub fn new(root: impl AsRef<Path>) -> io::Result<Self> {
         Ok(Self {
-            root: std::fs::canonicalize(root.as_ref())?,
+            root: std::fs::canonicalize(root.as_ref())?.into(),
         })
     }
 
@@ -36,23 +187,44 @@ impl PathGuard {
 
     /// Resolves `input` (relative to the workspace root, or absolute) to a canonical
     /// path inside the workspace. The error is written for the model.
-    pub fn resolve(&self, input: &str) -> Result<PathBuf, String> {
-        self.resolve_in(input, None)
+    pub fn resolve(&self, input: &str) -> Result<WorkspacePath, String> {
+        let found = self.find(input)?;
+        if self.contains(&found.resolved) {
+            return Ok(self.inside(found.resolved));
+        }
+        Err(self.refusal(&found))
     }
 
     /// Like [`PathGuard::resolve`] for a path that is only read: it may also be inside
-    /// the session's own directory, where plugins keep files for the model to read back.
-    /// Never use it for a path that will be written.
+    /// `session_dir`, the session's own directory, while that is a real directory (not
+    /// a symlink). Such a path comes back as [`ReadablePath::Session`], which nothing
+    /// that writes accepts.
     pub fn resolve_readable(
         &self,
         input: &str,
         session_dir: Option<&Path>,
-    ) -> Result<PathBuf, String> {
-        let extra = session_dir.and_then(anchored_dir);
-        self.resolve_in(input, extra.as_deref())
+    ) -> Result<ReadablePath, String> {
+        let session = session_dir
+            .filter(|d| std::fs::symlink_metadata(d).is_ok_and(|m| m.is_dir()))
+            .and_then(|d| anchored(d).ok());
+        let found = self.find(input)?;
+        if self.contains(&found.resolved) {
+            return Ok(ReadablePath::Workspace(self.inside(found.resolved)));
+        }
+        if session.is_some_and(|d| found.resolved.starts_with(d)) {
+            return Ok(ReadablePath::Session(SessionPath(found.resolved)));
+        }
+        Err(self.refusal(&found))
     }
 
-    fn resolve_in(&self, input: &str, extra: Option<&Path>) -> Result<PathBuf, String> {
+    fn inside(&self, path: PathBuf) -> WorkspacePath {
+        WorkspacePath {
+            path,
+            root: self.root.clone(),
+        }
+    }
+
+    fn find<'a>(&self, input: &'a str) -> Result<Found<'a>, String> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return Err(format!(
@@ -82,54 +254,57 @@ impl PathGuard {
             ),
             ResolveError::Io(err) => format!("Could not resolve `{trimmed}`: {err}."),
         })?;
-        if resolved.starts_with(&self.root) || extra.is_some_and(|d| resolved.starts_with(d)) {
-            return Ok(resolved);
-        }
-        let lexical = normalize_lexically(&joined);
+        Ok(Found {
+            input: trimmed,
+            joined,
+            resolved,
+        })
+    }
+
+    /// Why `found` is refused: it is outside every root it may be in.
+    fn refusal(&self, found: &Found<'_>) -> String {
+        let Found {
+            input,
+            joined,
+            resolved,
+        } = found;
+        let lexical = normalize_lexically(joined);
         let via_symlink = lexical.starts_with(&self.root);
         if via_symlink {
-            Err(format!(
-                "`{trimmed}` resolves through a symlink to `{}`, which is outside the \
+            format!(
+                "`{input}` resolves through a symlink to `{}`, which is outside the \
                  workspace. Paths must be inside `{}`; work with files in the workspace \
                  instead.",
                 resolved.display(),
                 self.root.display()
-            ))
+            )
         } else {
-            Err(format!(
-                "`{trimmed}` is outside the workspace. Paths must be inside `{}`; use a \
+            format!(
+                "`{input}` is outside the workspace. Paths must be inside `{}`; use a \
                  path relative to it, like `src/main.rs`.",
                 self.root.display()
-            ))
+            )
         }
     }
 
     /// `path` relative to the workspace root for display (`.` for the root itself);
     /// paths outside the root are shown in full.
     pub fn relative(&self, path: &Path) -> String {
-        match path.strip_prefix(&self.root) {
-            Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
-            Ok(rel) => rel.display().to_string(),
-            Err(_) => path.display().to_string(),
-        }
+        relative_to(&self.root, path)
     }
 
     /// Whether `path` (already canonical) is inside the workspace.
-    pub fn contains(&self, path: &Path) -> bool {
+    fn contains(&self, path: &Path) -> bool {
         path.starts_with(&self.root)
     }
 }
 
-/// `dir` with its parent canonicalized but its own name kept, if it is a real directory
-/// and not a symlink. Paths are checked against this, so a symlink placed at `dir`, or
-/// anywhere below it, resolves outside it and is refused.
-fn anchored_dir(dir: &Path) -> Option<PathBuf> {
-    let meta = std::fs::symlink_metadata(dir).ok()?;
-    if !meta.is_dir() {
-        return None;
+fn relative_to(root: &Path, path: &Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
+        Ok(rel) => rel.display().to_string(),
+        Err(_) => path.display().to_string(),
     }
-    let parent = std::fs::canonicalize(dir.parent()?).ok()?;
-    Some(parent.join(dir.file_name()?))
 }
 
 /// `~` and `~/x` become paths under `$HOME`; everything else is unchanged.
@@ -291,12 +466,25 @@ mod tests {
             .join("spill/out.txt");
 
         let s = Some(session.as_path());
-        assert_eq!(g.resolve_readable(file, s).unwrap(), canonical);
+        assert_eq!(
+            g.resolve_readable(file, s).unwrap(),
+            ReadablePath::Session(SessionPath(canonical))
+        );
         assert!(g.resolve(file).is_err(), "writes still need the workspace");
         assert!(g.resolve_readable(file, None).is_err());
-        assert!(
-            g.resolve_readable("src/main.rs", s).is_ok(),
+        assert_eq!(
+            g.resolve_readable("src/main.rs", s).unwrap(),
+            ReadablePath::Workspace(g.resolve("src/main.rs").unwrap()),
             "the workspace still works"
+        );
+        // A session dir that is a file, or not there yet, adds nothing.
+        let not_dir = outside.path().join("s1/spill/out.txt");
+        assert!(g.resolve_readable(file, Some(&not_dir)).is_err());
+        let missing = outside.path().join("s9");
+        let in_missing = missing.join("out.txt");
+        assert!(
+            g.resolve_readable(in_missing.to_str().unwrap(), Some(&missing))
+                .is_err()
         );
 
         // `..` out of it, or a neighbouring session, stays outside.
@@ -343,13 +531,31 @@ mod tests {
     fn relative_and_absolute_inside() {
         let (_d, g) = guard();
         let p = g.resolve("src/main.rs").unwrap();
-        assert_eq!(p, g.root().join("src/main.rs"));
+        assert_eq!(p.as_path(), g.root().join("src/main.rs"));
         let abs = g.root().join("src/main.rs");
         assert_eq!(g.resolve(abs.to_str().unwrap()).unwrap(), p);
         assert_eq!(g.resolve("./src/../src/main.rs").unwrap(), p);
-        assert_eq!(g.resolve(".").unwrap(), g.root());
-        assert_eq!(g.relative(&p), "src/main.rs");
+        let root = g.resolve(".").unwrap();
+        assert_eq!(root.as_path(), g.root());
+        assert_eq!(g.relative(p.as_path()), "src/main.rs");
         assert_eq!(g.relative(g.root()), ".");
+        // A workspace path shows itself the same way.
+        assert_eq!(p.relative(), "src/main.rs");
+        assert_eq!(p.to_string(), "src/main.rs");
+        assert_eq!(root.to_string(), ".");
+    }
+
+    #[test]
+    fn a_session_dir_inside_the_workspace_stays_writable() {
+        let (d, g) = guard();
+        std::fs::create_dir_all(d.path().join(".ch/s1")).unwrap();
+        let session = d.path().join(".ch/s1");
+        let file = session.join("notes.txt");
+        let file = file.to_str().unwrap();
+        let read = g.resolve_readable(file, Some(&session)).unwrap();
+        let write = g.resolve(file).unwrap();
+        assert_eq!(read.workspace(), Some(&write));
+        assert_eq!(read.as_path(), g.root().join(".ch/s1/notes.txt"));
     }
 
     #[test]
@@ -380,9 +586,9 @@ mod tests {
     fn new_file_paths_resolve() {
         let (_d, g) = guard();
         let p = g.resolve("src/new/deep/file.rs").unwrap();
-        assert_eq!(p, g.root().join("src/new/deep/file.rs"));
+        assert_eq!(p.as_path(), g.root().join("src/new/deep/file.rs"));
         let p = g.resolve("src/new/../other.rs").unwrap();
-        assert_eq!(p, g.root().join("src/other.rs"));
+        assert_eq!(p.as_path(), g.root().join("src/other.rs"));
     }
 
     #[test]
@@ -392,9 +598,9 @@ mod tests {
         let case_insensitive = d.path().join(".GIT").exists();
         let p = g.resolve(".Git/hooks/pre-commit").unwrap();
         if case_insensitive {
-            assert_eq!(p, g.root().join(".git/hooks/pre-commit"));
+            assert_eq!(p.as_path(), g.root().join(".git/hooks/pre-commit"));
         } else {
-            assert_eq!(p, g.root().join(".Git/hooks/pre-commit"));
+            assert_eq!(p.as_path(), g.root().join(".Git/hooks/pre-commit"));
         }
     }
 
@@ -424,10 +630,10 @@ mod tests {
         let (d, g) = guard();
         std::os::unix::fs::symlink(d.path().join("src"), d.path().join("alias")).unwrap();
         let p = g.resolve("alias/main.rs").unwrap();
-        assert_eq!(p, g.root().join("src/main.rs"));
+        assert_eq!(p.as_path(), g.root().join("src/main.rs"));
         // `..` after a symlink is the target's parent.
         let p = g.resolve("alias/../src/main.rs").unwrap();
-        assert_eq!(p, g.root().join("src/main.rs"));
+        assert_eq!(p.as_path(), g.root().join("src/main.rs"));
     }
 
     #[cfg(unix)]

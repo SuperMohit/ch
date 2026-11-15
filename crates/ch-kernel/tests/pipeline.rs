@@ -1539,7 +1539,7 @@ async fn a_compaction_s_cost_is_saved_even_without_a_turn_after_it() {
     let mut s = open(None);
     s.run_turn("task").await;
     s.end().await;
-    let id = s.id().to_string();
+    let id = s.id().clone();
     drop(s);
     purposes.lock().unwrap().clear();
 
@@ -1863,7 +1863,7 @@ async fn post_tool_stop_ends_turn_after_step() {
     assert_eq!(
         r.reason,
         TerminationReason::HookStop {
-            source: "stuck".into(),
+            hook: "stuck".into(),
             reason: "looping".into()
         }
     );
@@ -1872,6 +1872,44 @@ async fn post_tool_stop_ends_turn_after_step() {
         tool_results(&h.session.history().events()[2].message).len(),
         1
     );
+}
+
+#[tokio::test]
+async fn a_call_skipped_after_a_stop_still_has_a_start_and_an_end() {
+    let plugins = vec![plugin("stuck", |cx| {
+        cx.add_hook(ScriptedHook {
+            id: "stuck",
+            priority: 0,
+            points: vec![HookPoint::PostTool],
+            log: Default::default(),
+            decide: Box::new(|_| HookDecision::stop("looping")),
+        });
+        Ok(())
+    })];
+    // `echo` is read-only and `slow_write` isn't, so they run in separate batches and
+    // the stop after the first skips the second.
+    let mut h = harness(
+        vec![Ok(tool_reply(&[
+            ("a", "echo", json!({"text":"1"})),
+            ("b", "slow_write", json!({"ms": 1})),
+        ]))],
+        plugins,
+        config(),
+    );
+    let mut rx = h.session.events().subscribe();
+    h.session.run_turn("go").await;
+    let results = tool_results(&h.session.history().events()[2].message);
+    assert_eq!(results[1].1, "Not run: the turn was stopped by a hook.");
+    let (mut starts, mut ends) = (Vec::new(), Vec::new());
+    for e in received(&mut rx) {
+        match e {
+            AgentEvent::ToolCallStart { id, .. } => starts.push(id),
+            AgentEvent::ToolCallEnd { id, .. } => ends.push(id),
+            _ => {}
+        }
+    }
+    assert_eq!(starts, ["a", "b"]);
+    assert_eq!(ends, ["a", "b"]);
 }
 
 #[tokio::test]
@@ -1975,7 +2013,7 @@ async fn sessions_persist_and_restore() {
         .build()
         .unwrap();
     s.run_turn("remember me").await;
-    let id = s.id().to_string();
+    let id = s.id().clone();
     let snap = store.load(&id).unwrap();
     assert_eq!(snap.meta.title, "remember me");
     let s2 = Session::builder(registry, cfg)
@@ -2728,7 +2766,7 @@ async fn tool_input_streaming_emits_throttled_progress() {
     let mut progress = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         match ev {
-            AgentEvent::ToolInputStarted { name, .. } => {
+            AgentEvent::ToolInputStart { name, .. } => {
                 assert_eq!(name, "echo");
                 started += 1;
             }
@@ -2758,9 +2796,9 @@ async fn clear_starts_a_new_session_and_keeps_the_old_one() {
         .build()
         .unwrap();
     s.run_turn("first").await;
-    let old_id = s.id().to_string();
+    let old_id = s.id().clone();
     s.clear().unwrap();
-    assert_ne!(s.id(), old_id);
+    assert_ne!(s.id(), &old_id);
     assert!(s.history().is_empty());
     assert_eq!(s.turn(), 0);
     s.run_turn("second").await;
@@ -2770,7 +2808,7 @@ async fn clear_starts_a_new_session_and_keeps_the_old_one() {
     assert_eq!(old.history.len(), 2);
     let new = store.load(s.id()).unwrap();
     assert_eq!((new.meta.title.as_str(), new.meta.turns), ("second", 1));
-    assert_eq!(store.latest().unwrap().unwrap().id, s.id());
+    assert_eq!(store.latest().unwrap().unwrap().id, *s.id());
 
     // Each conversation is saved with its own usage; the process keeps the sum.
     assert_eq!(old.usage, usage());
@@ -2808,16 +2846,16 @@ async fn a_session_open_in_one_process_cant_be_opened_in_another() {
     }
 
     let mut other = open().build().unwrap();
-    let other_id = other.id().to_string();
+    let other_id = other.id().clone();
     assert!(other.restore(snap.clone()).is_err());
     assert_eq!(
         other.id(),
-        other_id,
+        &other_id,
         "a failed /resume keeps the current session"
     );
 
-    let first_id = first.id().to_string();
+    let first_id = first.id().clone();
     drop(first);
     other.restore(snap).unwrap();
-    assert_eq!(other.id(), first_id);
+    assert_eq!(other.id(), &first_id);
 }

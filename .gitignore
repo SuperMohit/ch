@@ -7,3 +7,5 @@
 *.snap.new
 *.pending-snap
 /eval-out
+__pycache__/
+*.pyc

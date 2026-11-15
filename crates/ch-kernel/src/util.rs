@@ -177,11 +177,22 @@ pub fn terminal_text(text: &str) -> String {
 // Files a plugin saves in the session directory for the model to read back (spilled or
 // elided output) are made with these, so nothing placed there can redirect a write.
 
-/// `dir` with its parent canonicalized and its own name kept, the anchor the file tools
-/// check reads against. Fails if `dir` is a symlink.
+/// `dir` with its parent canonicalized and its own name kept: the anchor the file tools
+/// check reads inside the session directory against, so a symlink placed at `dir`, or
+/// anywhere below it, resolves outside the anchor and is refused. Compute the anchor
+/// only here.
+///
+/// Fails if `dir` is a symlink or can't be inspected. A `dir` that doesn't exist yet is
+/// anchored too, so the anchor is known before the directory is made; callers that
+/// need a real directory check that themselves.
 pub fn anchored(dir: &Path) -> io::Result<PathBuf> {
-    if fs::symlink_metadata(dir)?.file_type().is_symlink() {
-        return Err(io::Error::other(format!("{} is a symlink", dir.display())));
+    match fs::symlink_metadata(dir) {
+        Ok(m) if m.file_type().is_symlink() => {
+            return Err(io::Error::other(format!("{} is a symlink", dir.display())));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
     let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
         return Err(io::Error::other(format!("{} has no parent", dir.display())));
@@ -478,5 +489,30 @@ mod tests {
         assert_eq!(names.len(), 1);
         assert!(write_atomic(&dir.path().join("missing/f"), b"x").is_err());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn anchors_keep_the_name_and_refuse_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        // Not canonical on macOS (`/var` is a symlink), like a real session dir may be.
+        let canonical = fs::canonicalize(dir.path()).unwrap();
+        let session = dir.path().join("s1");
+        // Before it exists, and once it does.
+        assert_eq!(anchored(&session).unwrap(), canonical.join("s1"));
+        fs::create_dir(&session).unwrap();
+        assert_eq!(anchored(&session).unwrap(), canonical.join("s1"));
+        // The parent must exist, and be a directory: only "not there yet" is anchored.
+        assert!(anchored(&dir.path().join("missing/s1")).is_err());
+        fs::write(dir.path().join("file"), "").unwrap();
+        assert!(anchored(&dir.path().join("file/s1")).is_err());
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("s2");
+            std::os::unix::fs::symlink(&session, &link).unwrap();
+            assert!(anchored(&link).is_err());
+            assert!(private_dir(&link, "spill").is_err());
+        }
+        let made = private_dir(&session, "context/elided").unwrap();
+        assert_eq!(made, canonical.join("s1/context/elided"));
     }
 }

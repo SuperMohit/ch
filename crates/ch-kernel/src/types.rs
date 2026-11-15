@@ -189,7 +189,7 @@ pub enum TerminationReason {
     /// The request no longer fits in the model's context window.
     ContextOverflow { message: String },
     /// A hook asked to stop (for example stuck detection).
-    HookStop { source: String, reason: String },
+    HookStop { hook: String, reason: String },
     /// A hook denied the user prompt.
     PromptDenied { reason: String },
     /// The user cancelled the turn.

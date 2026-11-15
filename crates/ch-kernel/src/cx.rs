@@ -48,9 +48,9 @@ impl Cx {
     }
 
     /// Emits a plugin-specific event (plan updates, diagnostics, ...).
-    pub fn emit_custom(&self, source: &str, name: &str, data: serde_json::Value) {
+    pub fn emit_custom(&self, plugin: &str, name: &str, data: serde_json::Value) {
         self.events.emit(AgentEvent::Custom {
-            source: source.to_string(),
+            plugin: plugin.to_string(),
             name: name.to_string(),
             data,
         });

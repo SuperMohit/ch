@@ -29,6 +29,7 @@ use crate::hook::{Hook, HookEvent, HookOutcome, Verdict, run_hooks};
 use crate::ledger::ToolLedger;
 use crate::model::{ModelProvider, ModelRequest};
 use crate::registry::Registry;
+use crate::session_id::SessionId;
 use crate::store::{SavedPrompt, SessionLock, SessionMeta, SessionSnapshot, SessionStore};
 use crate::tokens::TokenCalibrator;
 use crate::tool::{ToolOutput, ToolSpec};
@@ -58,7 +59,7 @@ pub struct TurnResult {
 const MAX_CUT_OFF_TOOL_CALLS: u32 = 3;
 
 pub struct Session {
-    id: String,
+    id: SessionId,
     registry: Arc<Registry>,
     config: Arc<Config>,
     kcfg: KernelConfig,
@@ -130,7 +131,7 @@ impl Session {
 
     // ----- accessors -----
 
-    pub fn id(&self) -> &str {
+    pub fn id(&self) -> &SessionId {
         &self.id
     }
     pub fn registry(&self) -> &Arc<Registry> {
@@ -213,7 +214,7 @@ impl Session {
     /// Starts a new conversation under a new id (`/clear`), leaving the old one saved as
     /// it was. The conversation's usage starts again from zero; the process's is kept.
     pub fn clear(&mut self) -> anyhow::Result<()> {
-        let id = builder::new_session_id();
+        let id = SessionId::generate();
         if let Some(store) = &self.store {
             self._lock = Some(store.lock(&id)?);
         }
@@ -379,7 +380,7 @@ impl Session {
             }));
         }
         self.events.emit(AgentEvent::SessionStart {
-            session_id: self.id.clone(),
+            session_id: self.id.to_string(),
             model: self.model.clone(),
             workspace: self.workspace.to_string_lossy().to_string(),
             plugins: self.registry.enabled_plugin_ids(),
@@ -406,7 +407,7 @@ impl Session {
         }
         self.stop_sources().await;
         self.events.emit(AgentEvent::SessionEnd {
-            session_id: self.id.clone(),
+            session_id: self.id.to_string(),
         });
         for task in self.sink_tasks.drain(..) {
             let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
@@ -490,10 +491,7 @@ impl Session {
                 self.emit_denied(&hook, None, &reason);
                 Some(TerminationReason::PromptDenied { reason })
             }
-            Verdict::Stop { hook, reason } => Some(TerminationReason::HookStop {
-                source: hook,
-                reason,
-            }),
+            Verdict::Stop { hook, reason } => Some(TerminationReason::HookStop { hook, reason }),
             Verdict::Continue | Verdict::Ask { .. } => None,
         };
         if let Some(reason) = denied {
@@ -562,10 +560,7 @@ impl Session {
             reminders.extend(outcome.notes.iter().map(|(_, n)| n.clone()));
             let after_stop = match outcome.verdict {
                 Verdict::Deny { hook, reason } | Verdict::Stop { hook, reason } => {
-                    Some(TerminationReason::HookStop {
-                        source: hook,
-                        reason,
-                    })
+                    Some(TerminationReason::HookStop { hook, reason })
                 }
                 _ => None,
             };
@@ -621,10 +616,7 @@ impl Session {
                 self.emit_notes(&outcome);
                 match outcome.verdict {
                     Verdict::Stop { hook, reason } => {
-                        let stop = TerminationReason::HookStop {
-                            source: hook,
-                            reason,
-                        };
+                        let stop = TerminationReason::HookStop { hook, reason };
                         break (stop, true);
                     }
                     _ => match outcome.notes_text() {
@@ -650,10 +642,7 @@ impl Session {
                 break (TerminationReason::Cancelled, false);
             }
             if let Some((hook, reason)) = stop {
-                let stop = TerminationReason::HookStop {
-                    source: hook,
-                    reason,
-                };
+                let stop = TerminationReason::HookStop { hook, reason };
                 break (stop, false);
             }
         };
@@ -706,9 +695,9 @@ impl Session {
     }
 
     fn emit_notes(&self, outcome: &HookOutcome) {
-        for (source, text) in &outcome.notes {
+        for (plugin, text) in &outcome.notes {
             self.events.emit(AgentEvent::Note {
-                source: source.clone(),
+                plugin: plugin.clone(),
                 text: text.clone(),
             });
         }

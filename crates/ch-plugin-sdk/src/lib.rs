@@ -75,12 +75,10 @@ impl Cx<'_> {
     }
 
     /// A line shown to the user.
-    pub fn notify(&mut self, message: impl Into<String>) {
+    pub fn notify(&mut self, text: impl Into<String>) {
         self.send(Message::notification(
             method::UI_NOTIFY,
-            NotifyParams {
-                message: message.into(),
-            },
+            NotifyParams { text: text.into() },
         ));
     }
 

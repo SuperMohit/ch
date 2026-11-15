@@ -9,7 +9,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ch_kernel::{
-    AgentEvent, ContentBlock, ModelRequest, Role, Session, SessionStore, TerminationReason,
+    AgentEvent, ContentBlock, ModelRequest, Role, Session, SessionId, SessionStore,
+    TerminationReason,
 };
 use ch_provider_scripted::{ScriptStep, ScriptedPlugin, ScriptedProvider};
 use serde_json::{Value, json};
@@ -226,7 +227,11 @@ async fn a_resumed_session_renders_the_same_view_and_reads_a_stub_back() {
         "[plugins.context]\nstrategy = \"elide\"\nsoft = 0.9\nelide_min_chars = 20000",
     );
     resumed
-        .restore(SessionStore::new(&d.sessions).load("s1").unwrap())
+        .restore(
+            SessionStore::new(&d.sessions)
+                .load(&SessionId::parse("s1").unwrap())
+                .unwrap(),
+        )
         .unwrap();
     assert_eq!(
         resumed.run_turn("show one").await.reason,
